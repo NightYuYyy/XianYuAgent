@@ -5,6 +5,7 @@ import { dropStaleCaptchaChallengeCookies, normalizeCookieSnapshot, type XianyuC
 import { createPatchrightVerificationBrowserFactory } from './patchright-verification-browser.js';
 import { XIANYU_USER_AGENT } from './xianyu-browser-identity.js';
 import type { XianyuVerificationBrowserFactory, XianyuVerificationContext, XianyuVerificationCookie, XianyuVerificationPage } from './xianyu-browser-port.js';
+import { acquireXianyuVerificationProfileLock } from './xianyu-verification-profile-lock.js';
 import { XianyuSliderSolver, type XianyuSliderMode } from './xianyu-slider-solver.js';
 
 export type XianyuVerificationBrowserMode = 'disabled' | 'launch';
@@ -31,6 +32,14 @@ export interface XianyuVerificationBrowserResult {
 
 const DEFAULT_MAX_WAIT_MS = 3 * 60_000;
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
+
+/**
+ * A persistent Chrome profile is a singleton resource. Keep this state at
+ * module scope so separate service instances in the same API process cannot
+ * launch two contexts against one profile and create duplicate tabs.
+ */
+const activeVerifications = new Map<string, Promise<XianyuVerificationBrowserResult>>();
+const profileVerificationTails = new Map<string, Promise<void>>();
 
 /**
  * Keep implicit Chrome profiles outside the repository. Production and
@@ -60,7 +69,6 @@ export class XianyuVerificationBrowser {
   private readonly allowManualFallback: boolean;
   private readonly userAgent?: string;
   private readonly browserFactory: XianyuVerificationBrowserFactory;
-  private readonly activeVerifications = new Map<string, Promise<XianyuVerificationBrowserResult>>();
 
   constructor(options: XianyuVerificationBrowserOptions = {}) {
     this.mode = options.mode ?? 'disabled';
@@ -86,15 +94,34 @@ export class XianyuVerificationBrowser {
     maxWaitMs?: number;
     pollIntervalMs?: number;
   }): Promise<XianyuVerificationBrowserResult> {
-    const verificationKey = `${input.profileKey ?? 'default'}\u0000${input.verificationUrl}\u0000${JSON.stringify(input.initialCookieSnapshot ?? [])}`;
-    const active = this.activeVerifications.get(verificationKey);
+    if (this.mode === 'disabled') throw new Error('XIANYU_VERIFICATION_BROWSER_DISABLED');
+    assertVerificationUrl(input.verificationUrl);
+    const profileDir = await this.resolveProfileDir(input.profileKey);
+    const profileLockKey = normalizeProfileLockKey(profileDir);
+    const verificationKey = `${profileLockKey}\u0000${input.verificationUrl}\u0000${JSON.stringify(input.initialCookieSnapshot ?? [])}`;
+    const active = activeVerifications.get(verificationKey);
     if (active) return active;
-    const task = this.runVerification(input);
-    this.activeVerifications.set(verificationKey, task);
+
+    const previous = profileVerificationTails.get(profileLockKey) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => current);
+    profileVerificationTails.set(profileLockKey, tail);
+
+    const task = (async () => {
+      await previous;
+      try {
+        return await this.runVerification(input, profileDir);
+      } finally {
+        release();
+        if (profileVerificationTails.get(profileLockKey) === tail) profileVerificationTails.delete(profileLockKey);
+      }
+    })();
+    activeVerifications.set(verificationKey, task);
     try {
       return await task;
     } finally {
-      if (this.activeVerifications.get(verificationKey) === task) this.activeVerifications.delete(verificationKey);
+      if (activeVerifications.get(verificationKey) === task) activeVerifications.delete(verificationKey);
     }
   }
 
@@ -105,65 +132,68 @@ export class XianyuVerificationBrowser {
     allowManualFallback?: boolean;
     maxWaitMs?: number;
     pollIntervalMs?: number;
-  }): Promise<XianyuVerificationBrowserResult> {
-    if (this.mode === 'disabled') throw new Error('XIANYU_VERIFICATION_BROWSER_DISABLED');
-    assertVerificationUrl(input.verificationUrl);
+  }, profileDir: string): Promise<XianyuVerificationBrowserResult> {
     const maxWaitMs = Math.max(250, Math.floor(input.maxWaitMs ?? this.maxWaitMs));
     const pollIntervalMs = Math.max(25, Math.floor(input.pollIntervalMs ?? this.pollIntervalMs));
     const allowManualFallback = input.allowManualFallback ?? this.allowManualFallback;
     const useHeadless = shouldUseHeadlessVerificationBrowser(this.sliderMode, this.headless);
     const hideWindow = shouldHideVerificationWindow(this.sliderMode, useHeadless, allowManualFallback);
-    const profileDir = await this.resolveProfileDir(input.profileKey);
-    const context = await this.browserFactory.launchPersistentContext({
-      profileDir,
-      headless: useHeadless,
-      hideWindow,
-      executablePath: this.executablePath,
-      userAgent: this.userAgent,
-    });
+    const releaseProfileLock = await acquireXianyuVerificationProfileLock(profileDir, maxWaitMs);
     try {
-      await context.addInitScript({ content: buildAutomationEvasionScript() });
-      const page = await this.reuseVerificationPage(context);
-      const initialSnapshot = normalizeCookieSnapshot(input.initialCookieSnapshot) ?? [];
-      if (initialSnapshot.length > 0) await context.addCookies(toBrowserCookies(initialSnapshot, input.verificationUrl));
-      await page.goto(input.verificationUrl, { waitUntil: 'domcontentloaded', timeout: maxWaitMs });
-      await waitForPageContent(page, Math.min(maxWaitMs, 12_000), pollIntervalMs);
-      await sleep(750);
+      const context = await this.browserFactory.launchPersistentContext({
+        profileDir,
+        headless: useHeadless,
+        hideWindow,
+        executablePath: this.executablePath,
+        userAgent: this.userAgent,
+      });
+      try {
+        await context.addInitScript({ content: buildAutomationEvasionScript() });
+        const page = await this.reuseVerificationPage(context);
+        const initialSnapshot = normalizeCookieSnapshot(input.initialCookieSnapshot) ?? [];
+        if (initialSnapshot.length > 0) await context.addCookies(toBrowserCookies(initialSnapshot, input.verificationUrl));
+        await page.goto(input.verificationUrl, { waitUntil: 'domcontentloaded', timeout: maxWaitMs });
+        await waitForPageContent(page, Math.min(maxWaitMs, 12_000), pollIntervalMs);
+        await sleep(750);
 
-      if (this.sliderMode === 'auto') {
-        const sliderResult = await new XianyuSliderSolver(page, {
-          maxRetries: this.sliderMaxRetries,
-          logger: console,
-        }).solve();
-        if (!sliderResult.success) {
-          const reason = sliderResult.failureReason ?? 'unknown';
-          console.warn(JSON.stringify({ component: 'xianyu-verification', event: 'slider_auto_solve_failed', reason, attempts: sliderResult.attempts, distance: sliderResult.distance, trajectoryPoints: sliderResult.trajectoryPoints }));
-          if (!allowManualFallback) throw new Error(`XIANYU_VERIFICATION_AUTO_SOLVE_FAILED:${reason}`);
-          console.warn(JSON.stringify({ component: 'xianyu-verification', event: 'slider_manual_fallback_wait', reason }));
-        } else {
-          console.info(JSON.stringify({ component: 'xianyu-verification', event: 'slider_auto_solve_succeeded', attempts: sliderResult.attempts, distance: sliderResult.distance, trajectoryPoints: sliderResult.trajectoryPoints }));
-        }
-      }
-
-      const deadline = Date.now() + maxWaitMs;
-      let lastUrl = page.url();
-      let lastCookies = await context.cookies();
-      while (Date.now() < deadline) {
-        lastUrl = page.url();
-        lastCookies = await context.cookies();
-        if (isVerificationPageComplete(lastUrl, lastCookies, initialSnapshot)) {
-          await sleep(1_000);
-          lastCookies = await context.cookies();
-          if (isVerificationPageComplete(lastUrl, lastCookies, initialSnapshot)) {
-            return { finalUrl: lastUrl, cookieSnapshot: dropStaleCaptchaChallengeCookies(mapCookies(lastCookies)) };
+        if (this.sliderMode === 'auto') {
+          const sliderResult = await new XianyuSliderSolver(page, {
+            maxRetries: this.sliderMaxRetries,
+            logger: console,
+          }).solve();
+          if (!sliderResult.success) {
+            const reason = sliderResult.failureReason ?? 'unknown';
+            console.warn(JSON.stringify({ component: 'xianyu-verification', event: 'slider_auto_solve_failed', reason, attempts: sliderResult.attempts, distance: sliderResult.distance, trajectoryPoints: sliderResult.trajectoryPoints }));
+            if (!allowManualFallback) throw new Error(`XIANYU_VERIFICATION_AUTO_SOLVE_FAILED:${reason}`);
+            console.warn(JSON.stringify({ component: 'xianyu-verification', event: 'slider_manual_fallback_wait', reason }));
+          } else {
+            console.info(JSON.stringify({ component: 'xianyu-verification', event: 'slider_auto_solve_succeeded', attempts: sliderResult.attempts, distance: sliderResult.distance, trajectoryPoints: sliderResult.trajectoryPoints }));
           }
         }
-        if (isBlankOrInvalidVerificationPage(lastUrl)) throw new Error('XIANYU_VERIFICATION_PAGE_EMPTY');
-        await sleep(pollIntervalMs);
+
+        const deadline = Date.now() + maxWaitMs;
+        let lastUrl = page.url();
+        let lastCookies = await context.cookies();
+        while (Date.now() < deadline) {
+          lastUrl = page.url();
+          lastCookies = await context.cookies();
+          if (isVerificationPageComplete(lastUrl, lastCookies, initialSnapshot)) {
+            await sleep(1_000);
+            lastCookies = await context.cookies();
+            if (isVerificationPageComplete(lastUrl, lastCookies, initialSnapshot)) {
+              return { finalUrl: lastUrl, cookieSnapshot: dropStaleCaptchaChallengeCookies(mapCookies(lastCookies)) };
+            }
+          }
+          if (isBlankOrInvalidVerificationPage(lastUrl)) throw new Error('XIANYU_VERIFICATION_PAGE_EMPTY');
+          await sleep(pollIntervalMs);
+        }
+        throw new Error('XIANYU_VERIFICATION_TIMEOUT');
+      } finally {
+        await closeVerificationPages(context);
+        await context.close().catch(() => undefined);
       }
-      throw new Error('XIANYU_VERIFICATION_TIMEOUT');
     } finally {
-      await context.close().catch(() => undefined);
+      await releaseProfileLock();
     }
   }
 
@@ -181,6 +211,16 @@ export class XianyuVerificationBrowser {
     for (const extra of pages.slice(1)) await extra.close().catch(() => undefined);
     return page;
   }
+}
+
+async function closeVerificationPages(context: XianyuVerificationContext): Promise<void> {
+  let pages: readonly XianyuVerificationPage[] = [];
+  try {
+    pages = context.pages();
+  } catch {
+    return;
+  }
+  for (const page of pages) await page.close().catch(() => undefined);
 }
 
 export function shouldUseHeadlessVerificationBrowser(sliderMode: XianyuSliderMode, configuredHeadless: boolean): boolean {
@@ -264,6 +304,11 @@ function mapCookies(cookies: Array<{ name: string; value: string; domain?: strin
 function sanitizeProfileKey(value: string): string {
   const normalized = value.trim().replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^\.+/, '').slice(0, 96);
   return normalized || 'default';
+}
+
+function normalizeProfileLockKey(profileDir: string): string {
+  const absolute = resolve(profileDir);
+  return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
 }
 
 function buildAutomationEvasionScript(): string {
