@@ -146,6 +146,15 @@ test('live adapter maps numeric status 1 to unpaid and pending in readOrder', as
   assert.equal(result?.deliveryStatus, 'pending');
 });
 
+test('readOrder rejects a closed detail when the order list is stale and still open', async () => {
+  const { store, admin, account, order } = await setup();
+  const fakeMtop = {
+    readOrderDetail: async () => ({ success: true, detail: { orderNo: order.orderNo, orderStatus: 'closed', paymentStatus: 'paid', deliveryStatus: 'pending' } }),
+  } as unknown as XianyuMtopClient;
+  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => withListedOrder(order, fakeMtop), () => undefined);
+  assert.equal(await adapter.readOrder({ adminId: admin.id, accountId: account.id, orderNo: order.orderNo }), undefined);
+});
+
 test('treats numeric order status 4 as already delivered', async () => {
   const { store, admin, account, order } = await setup();
   let confirmed = false;
@@ -153,7 +162,7 @@ test('treats numeric order status 4 as already delivered', async () => {
     readOrderDetail: async () => ({ success: true, accountInvalid: false, detail: { orderNo: order.orderNo, orderStatus: '4', deliveryStatus: '4' }, cookieHeader: '' }),
     confirmShipment: async () => { confirmed = true; return { status: 'succeeded', externalRef: order.orderNo }; },
   } as unknown as XianyuMtopClient;
-  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => withListedOrder(order, fakeMtop, { deliveryStatus: 'delivered' }), () => undefined);
+  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => withListedOrder(order, fakeMtop, { orderStatus: 'completed', deliveryStatus: 'delivered' }), () => undefined);
   const result = await adapter.confirmShipment({ adminId: admin.id, accountId: account.id, productId: order.productId, itemId: order.itemId, itemTitle: order.itemTitle, orderNo: order.orderNo, executionKey: 'live-confirm-numeric-4' });
   assert.equal(result.status, 'succeeded');
   assert.equal(result.externalRef, order.orderNo);

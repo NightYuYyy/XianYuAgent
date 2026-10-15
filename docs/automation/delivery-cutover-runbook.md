@@ -39,6 +39,12 @@ ORDER BY g.account_id, g.order_no;
 
 普通 `pending`/`resolve_pending` 任务的延迟恢复由 worker 自动处理：原定延迟尚未到期时继续等待，到期且平台订单、账号状态可用时领取。历史 `unknown` 单独走上述人工履约，不纳入自动补发成功率。任何新出现的 `unknown` 继续人工核查，不通过重复点击或重启绕过。
 
+### 已核实仅图片送达的单笔续发
+
+`node dist/repair-partial-delivery.js --order-no=<ORDER_NO> --account-id=<ACCOUNT_ID>` 默认只读；在 API 容器内核对平台订单列表和详情、卖家 IM 历史、本地图片外部消息号与发送步骤时间窗。仅当同一会话的远端历史中图片消息号和 URL 精确一致、其后没有卖家文本或图片，且本地存在对应的恢复消息时，才可加 `--apply`。操作期间暂停该会话的手工外发，避免远端核验与任务恢复之间出现新消息。
+
+`--apply` 在事务内再次校验订单仍已付/待发/无售后、唯一 unknown 图片步骤、unknown 护栏、quarantined 原预占、reserved 卡券、图片发送后未改动的卡券批次及素材、manual_review 账本与任务；只把该图片步骤标记成功并重新排队原任务。worker 在真正外发前再次核对批次和素材，并在外发期间锁定相关数据；若期间发生编辑，则封存且不发送新内容。worker 复用原预占，只发送缺失文本；图片不会重发。原预占超过 15 分钟时，在相同 active 订单护栏与 reserved 卡券均存在的前提下续租。若任一证据缺失、远端已有后续外发或平台状态改变，命令失败且保持封存。无本地平台历史导入图片的其他旧 unknown 单不适用此入口。
+
 无订单号的支付 IM 事件只唤醒该账号的 `NOT_SHIP` 扫描，不能凭买家、商品或会话把它绑定到某个旧订单。完整扫描后，源任务以 `completed`、`order_no IS NULL`、`last_error='ORDER_ID_UNAVAILABLE_SCAN_COMPLETE'` 结束；超过 100 页时扫描前 100 页后移交周期对账，以 `last_error='ORDER_ID_UNAVAILABLE_RECONCILE_HANDOFF'` 结束，深页继续从游标扫描，不再每分钟重扫源任务。这两种 `completed` 都只表示事件信号已消费，**不表示订单已发货或深页已扫描完成**。扫描发现的待发订单会以 `reconcile:<orderNo>` 创建独立的精确订单号任务，之后仍须经过平台 `ALL` 查询、权威详情和发货护栏。扫描请求失败时源任务保持 `resolve_pending` 并重试；周期对账每轮扫前 100 页并续扫至多 100 个深页，直到扫完后再回卷。排查漏发时按 `order_no` 核查精确任务与平台订单，不将无号任务的 `completed` 计入发货成功数。深页对账的恢复时间取决于总页数和平台响应耗时，超过 100 页的晚付款不承诺 30 秒内发现。
 
 ```sql

@@ -236,14 +236,14 @@ export class XianyuImClient {
 
   async listConversations(startCursor?: number, limit = 20): Promise<XianyuImConversationPage> {
     const start = startCursor ?? Number.MAX_SAFE_INTEGER;
-    const response = await this.sendLwp('/r/Conversation/listNewestPagination', [start, clampLimit(limit)]);
+    const response = await this.sendLwp('/r/Conversation/listNewestPagination', [start, clampLimit(limit)], { retryAfterReconnect: false, preserveConnectionOnRejection: true });
     return asRecord(response.body) as XianyuImConversationPage;
   }
 
   async listMessages(conversationRef: string, startCursor?: number, limit = 20): Promise<XianyuImMessagePage> {
     const cid = conversationRef.includes('@goofish') ? conversationRef : `${conversationRef}@goofish`;
     const start = startCursor ?? Number.MAX_SAFE_INTEGER;
-    const response = await this.sendLwp('/r/MessageManager/listUserMessages', [cid, false, start, clampLimit(limit), false]);
+    const response = await this.sendLwp('/r/MessageManager/listUserMessages', [cid, false, start, clampLimit(limit), false], { retryAfterReconnect: false, preserveConnectionOnRejection: true });
     return asRecord(response.body) as XianyuImMessagePage;
   }
 
@@ -391,8 +391,9 @@ export class XianyuImClient {
         console.warn(JSON.stringify({ component: 'xianyu-im-listener', event: 'frame_processing_failed', accountId: this.accountId, errorCode: eventErrorCode(error) }));
       });
     });
-    socket.on('close', () => {
+    socket.on('close', (code: number, reason: Buffer) => {
       if (this.socket !== socket) return;
+      console.warn(JSON.stringify({ component: 'xianyu-im', event: 'socket_closed', accountId: this.accountId, code, reason: String(reason ?? '').slice(0, 80), pendingRequests: this.pending.size, generation: this.connectionGeneration }));
       this.socket = undefined;
       if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = undefined;
@@ -477,7 +478,7 @@ export class XianyuImClient {
     await this.saveCredential?.({ ...this.credential });
   }
 
-  private async sendLwp(lwp: string, body: unknown[], options: { retryAfterReconnect?: boolean } = {}): Promise<Record<string, unknown>> {
+  private async sendLwp(lwp: string, body: unknown[], options: { retryAfterReconnect?: boolean; preserveConnectionOnRejection?: boolean } = {}): Promise<Record<string, unknown>> {
     const retryAfterReconnect = options.retryAfterReconnect ?? true;
     if (!this.connected) await this.connect();
     const generation = this.connectionGeneration;
@@ -488,8 +489,10 @@ export class XianyuImClient {
       const authRejected = error instanceof XianyuImRequestRejected && error.code === 401;
       const transientRejected = retryAfterReconnect && error instanceof XianyuImRequestRejected && error.code === 400;
       if (!authRejected && !transientRejected) {
-        this.setStatus('failed');
-        await this.notifyFailure(error);
+        if (!(options.preserveConnectionOnRejection && error instanceof XianyuImRequestRejected && error.code === 400)) {
+          this.setStatus('failed');
+          await this.notifyFailure(error);
+        }
         throw error;
       }
       try {
@@ -526,7 +529,13 @@ export class XianyuImClient {
       }, timeoutMs);
       this.pending.set(mid, { resolve, reject, timer });
     });
-    this.socket.send(JSON.stringify(message));
+    try { this.socket.send(JSON.stringify(message)); }
+    catch (error) {
+      const pending = this.pending.get(mid);
+      if (pending) { clearTimeout(pending.timer); this.pending.delete(mid); pending.reject(error); }
+      void response.catch(() => undefined);
+      throw error;
+    }
     return response;
   }
 

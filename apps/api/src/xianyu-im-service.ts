@@ -23,6 +23,7 @@ export class XianyuImService {
   private readonly verificationInFlight = new Map<string, Promise<XianyuVerificationBrowserResult>>();
   private readonly verificationRetryAfter = new Map<string, number>();
   private readonly recoveryInFlight = new Map<string, Promise<void>>();
+  private readonly recoveryRetryAfter = new Map<string, number>();
   private readonly credentialRefreshTimers = new Map<string, ReturnType<typeof setInterval>>();
   private readonly transportHeartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
   private readonly credentialRefreshInFlight = new Map<string, Promise<void>>();
@@ -133,6 +134,10 @@ export class XianyuImService {
   }
 
   async sendExternalText(adminId: string, accountId: string, conversationId: string, text: string, requestId: string, traceId: string): Promise<{ externalMessageRef?: string }> {
+    return this.store.withOutboundConversationLock(accountId, conversationId, () => this.sendExternalTextLocked(adminId, accountId, conversationId, text, requestId, traceId));
+  }
+
+  private async sendExternalTextLocked(adminId: string, accountId: string, conversationId: string, text: string, requestId: string, traceId: string): Promise<{ externalMessageRef?: string }> {
     const normalizedText = text.trim();
     if (!normalizedText) throw new ServiceError(422, 'VALIDATION_FAILED', 'text is required');
     const conversation = await this.getConversation(adminId, accountId, conversationId);
@@ -144,6 +149,12 @@ export class XianyuImService {
     try {
       sent = await this.withAccountFailure(adminId, accountId, () => client.sendText(externalRef, conversation.buyerRef, normalizedText, requestId));
     } catch (error) {
+      if (isAmbiguousImSendError(error)) {
+        const recovered = await this.reconcileOutboundSend(adminId, accountId, externalRef, { bodyType: 'text', content: normalizedText, startedAt });
+        if (!recovered) throw new ServiceError(502, 'XIANYU_IM_SEND_OUTCOME_UNKNOWN', 'message send outcome is unknown');
+        await this.clearImSendRisk(adminId, accountId, startedAt);
+        return { externalMessageRef: recovered };
+      }
       if (!isRecoverableTextSendError(error)) throw error;
       await this.resetClient(adminId, accountId);
       if (isValidationTextSendError(error)) {
@@ -157,6 +168,11 @@ export class XianyuImService {
       }
       client = await this.ensureClient(adminId, accountId, { forceCredentialRefresh: isValidationTextSendError(error) });
       sent = await this.withAccountFailure(adminId, accountId, () => client.sendText(externalRef, conversation.buyerRef, normalizedText, requestId));
+    }
+    if (!sent.externalMessageRef) {
+      const recovered = await this.reconcileOutboundSend(adminId, accountId, externalRef, { bodyType: 'text', content: normalizedText, startedAt });
+      if (!recovered) throw new ServiceError(502, 'XIANYU_IM_SEND_OUTCOME_UNKNOWN', 'text acknowledgement has no message reference');
+      sent = { externalMessageRef: recovered };
     }
     await this.clearImSendRisk(adminId, accountId, startedAt);
     return sent;
@@ -193,11 +209,30 @@ export class XianyuImService {
     // use the already-connected IM socket. Wait for the account-scoped IM
     // session first so a background reconnect/token refresh cannot race the
     // upload and make it read a stale cookie snapshot.
-    const client = await this.ensureClient(adminId, accountId);
+    await this.ensureClient(adminId, accountId);
     const upload = await this.mtop.uploadChatImage(adminId, accountId, file.filename, file.contentType, file.data);
     if (!upload.success || !upload.url) throw new ServiceError(upload.accountInvalid ? 401 : 502, upload.errorCode ?? 'IMAGE_UPLOAD_FAILED', upload.message ?? 'unable to upload image');
+    return this.store.withOutboundConversationLock(accountId, conversationId, () => this.sendUploadedImageLocked(adminId, accountId, conversationId, conversation, upload.url!, upload.width, upload.height, requestId, traceId));
+  }
+
+  private async sendUploadedImageLocked(adminId: string, accountId: string, conversationId: string, conversation: ConversationRecord, imageUrl: string, width: number | undefined, height: number | undefined, requestId: string, traceId: string): Promise<unknown> {
+    const externalRef = conversation.externalConversationRef!;
+    const client = await this.ensureClient(adminId, accountId);
     const startedAt = new Date().toISOString();
-    const sent = await this.withAccountFailure(adminId, accountId, () => client.sendImage(externalRef, conversation.buyerRef, upload.url!, upload.width, upload.height, requestId));
+    let sent: { externalMessageRef?: string };
+    try {
+      sent = await this.withAccountFailure(adminId, accountId, () => client.sendImage(externalRef, conversation.buyerRef, imageUrl, width, height, requestId));
+    } catch (error) {
+      if (!isAmbiguousImSendError(error)) throw error;
+      const recovered = await this.reconcileOutboundSend(adminId, accountId, externalRef, { bodyType: 'image', content: imageUrl, startedAt });
+      if (!recovered) throw new ServiceError(502, 'XIANYU_IM_SEND_OUTCOME_UNKNOWN', 'image send outcome is unknown');
+      sent = { externalMessageRef: recovered };
+    }
+    if (!sent.externalMessageRef) {
+      const recovered = await this.reconcileOutboundSend(adminId, accountId, externalRef, { bodyType: 'image', content: imageUrl, startedAt });
+      if (!recovered) throw new ServiceError(502, 'XIANYU_IM_SEND_OUTCOME_UNKNOWN', 'image acknowledgement has no message reference');
+      sent = { externalMessageRef: recovered };
+    }
     await this.clearImSendRisk(adminId, accountId, startedAt);
     const created = await this.messages.createMessage({
       adminId,
@@ -205,7 +240,7 @@ export class XianyuImService {
       direction: 'outbound',
       senderRole: 'agent',
       bodyType: 'image',
-      bodyRef: upload.url,
+      bodyRef: imageUrl,
       externalMessageRef: sent.externalMessageRef,
       source: 'human',
       requestId,
@@ -224,6 +259,7 @@ export class XianyuImService {
     const inFlight = [...this.clientInFlight.values()];
     this.clientInFlight.clear();
     this.recoveryInFlight.clear();
+    this.recoveryRetryAfter.clear();
     this.verificationInFlight.clear();
     this.verificationRetryAfter.clear();
     const clients = new Set(this.clients.values());
@@ -329,6 +365,24 @@ export class XianyuImService {
       }
     }
     return { conversationsScanned: conversations.items.length, imported, queued };
+  }
+
+  private async reconcileOutboundSend(adminId: string, accountId: string, conversationRef: string, expected: { bodyType: 'text' | 'image'; content: string; startedAt: string }): Promise<string | undefined> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (attempt) await new Promise<void>((resolve) => setTimeout(resolve, 350 * attempt));
+      try {
+        const client = await this.ensureClient(adminId, accountId);
+        const page = await client.listMessages(conversationRef, undefined, 100);
+        const match = matchRecentOutboundMessage(page.userMessageModels, client.selfUserIds, expected);
+        if (match) {
+          console.info(JSON.stringify({ component: 'xianyu-im', event: 'send_ack_reconciled', accountId, bodyType: expected.bodyType, externalMessageRef: match }));
+          return match;
+        }
+      } catch (error) {
+        console.warn(JSON.stringify({ component: 'xianyu-im', event: 'send_ack_reconcile_failed', accountId, bodyType: expected.bodyType, errorCode: recoveryErrorCode(error) }));
+      }
+    }
+    return undefined;
   }
 
   async resetClient(adminId: string, accountId: string): Promise<void> {
@@ -562,15 +616,18 @@ export class XianyuImService {
     if (typeof this.store.listConversations !== 'function') return;
     const key = `${adminId}:${accountId}`;
     if (this.recoveryInFlight.has(key)) return;
+    if ((this.recoveryRetryAfter.get(key) ?? 0) > Date.now()) return;
     const task = new Promise<void>((resolve) => {
       setTimeout(() => {
         void this.recoverRecentMessages(adminId, accountId)
           .then((result) => {
+            this.recoveryRetryAfter.delete(key);
             if (result.imported > 0 || result.queued > 0) {
               console.info(JSON.stringify({ component: 'xianyu-im-listener', event: 'history_recovery_completed', adminId, accountId, ...result }));
             }
           })
           .catch((error) => {
+            this.recoveryRetryAfter.set(key, Date.now() + 30_000);
             console.warn(JSON.stringify({ component: 'xianyu-im-listener', event: 'history_recovery_failed', adminId, accountId, errorCode: recoveryErrorCode(error) }));
           })
           .finally(resolve);
@@ -930,6 +987,37 @@ function normalizeHistoryMessage(value: unknown, myId: string | readonly string[
   return { externalMessageRef, externalMessageRefAliases: externalMessageRefCandidates.filter((value) => value !== externalMessageRef), senderRef: senderRef || undefined, itemRef, direction, bodyType, bodyText, bodyRef, ...(platformSystemMessage ? { platformSystemMessage: true } : {}), riskFlags: createdAt ? undefined : ['source_timestamp_invalid'], createdAt: createdAt ?? receivedAt };
 }
 
+export function matchRecentOutboundMessage(models: unknown, selfUserIds: readonly string[], expected: { bodyType: 'text' | 'image'; content: string; startedAt: string }): string | undefined {
+  if (!Array.isArray(models)) return undefined;
+  const start = Date.parse(expected.startedAt);
+  if (!Number.isFinite(start)) return undefined;
+  const matches = models.map((model) => normalizeHistoryMessage(model, selfUserIds)).filter((message) =>
+    message?.direction === 'outbound'
+    && message.senderRef
+    && message.bodyType === expected.bodyType
+    && (expected.bodyType === 'text' ? message.bodyText : message.bodyRef) === expected.content
+    && !message.riskFlags?.includes('source_timestamp_invalid')
+    && Date.parse(message.createdAt) >= start
+    && Date.parse(message.createdAt) <= Date.now() + 5_000,
+  );
+  return matches.length === 1 ? matches[0]?.externalMessageRef : undefined;
+}
+
+export function confirmPartialDeliveryImage(models: unknown, selfUserIds: readonly string[], expected: { externalMessageRef: string; imageUrl: string; startedAt: string }): boolean {
+  if (!Array.isArray(models)) return false;
+  const start = Date.parse(expected.startedAt);
+  if (!Number.isFinite(start)) return false;
+  const outbound = models.map((model) => normalizeHistoryMessage(model, selfUserIds))
+    .filter((message) => message?.direction === 'outbound' && !message.riskFlags?.includes('source_timestamp_invalid'));
+  const image = outbound.filter((message) => message?.externalMessageRef === expected.externalMessageRef
+    && message.bodyType === 'image' && message.bodyRef === expected.imageUrl
+    && Date.parse(message.createdAt) >= start - 2_000);
+  if (image.length !== 1) return false;
+  const imageAt = Date.parse(image[0]!.createdAt);
+  return !outbound.some((message) => message?.externalMessageRef !== expected.externalMessageRef
+    && Date.parse(message!.createdAt) >= imageAt && (message?.bodyType === 'text' || message?.bodyType === 'image'));
+}
+
 function decodeCustom(value: unknown): { text?: string; images: string[] } {
   const custom = record(value);
   const encoded = string(custom.data);
@@ -1020,6 +1108,11 @@ function isRecoverableTextSendError(error: unknown): boolean {
   const code = recoveryErrorCode(error);
   const message = error instanceof Error ? error.message.toUpperCase() : String(error).toUpperCase();
   return isValidationTextSendError(error) || /XIANYU_IM_(?:CONNECTION_CLOSED|NOT_CONNECTED|WS_OPEN_TIMEOUT)|ECONNRESET|ETIMEDOUT|TIMEOUT|FAILED_TO_FETCH/u.test(code) || /FAILED TO FETCH|FETCH FAILED/u.test(message);
+}
+
+function isAmbiguousImSendError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /xianyu IM connection closed|XIANYU_IM_TIMEOUT:/iu.test(message);
 }
 
 function isValidationTextSendError(error: unknown): boolean {

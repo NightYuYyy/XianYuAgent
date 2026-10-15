@@ -135,6 +135,20 @@ export class MemoryStore implements Store {
   private readonly couponReservations = new Map<string, CouponReservationRecord>();
   private readonly couponReservationByExecutionKey = new Map<string, string>();
   private couponReservationMutex: Promise<void> = Promise.resolve();
+  private readonly outboundConversationMutexes = new Map<string, Promise<void>>();
+  async withOutboundConversationLock<T>(accountId: string, conversationRef: string, work: () => Promise<T>): Promise<T> {
+    const key = `${accountId}:${conversationRef}`;
+    const previous = this.outboundConversationMutexes.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.outboundConversationMutexes.set(key, current);
+    await previous;
+    try { return await work(); } finally {
+      if (this.outboundConversationMutexes.get(key) === current) this.outboundConversationMutexes.delete(key);
+      release();
+    }
+  }
+  async withVerifiedPartialDeliveryPlan<T>(_input: { accountId: string; orderNo: string; executionKey: string; reservationId: string }, work: () => Promise<T>): Promise<T> { return work(); }
   private readonly conversations = new Map<string, ConversationRecord>();
   private readonly messages = new Map<string, MessageRecord>();
   private readonly autoReplyRuns = new Map<string, AutoReplyRunRecord>();
@@ -651,11 +665,16 @@ export class MemoryStore implements Store {
   async bindDeliveryReservation(input: { adminId: string; accountId: string; orderNo: string; reservationId: string; executionKey: string }): Promise<boolean> {
     return this.withCouponReservationLock(async () => {
       const reservation = this.couponReservations.get(input.reservationId);
-      if (!reservation || reservation.adminId !== input.adminId || reservation.accountId !== input.accountId || reservation.executionKey !== input.executionKey || reservation.status !== 'reserved' || Date.parse(reservation.leaseUntil) <= Date.now() || !(await this.hasAccountScope(input.adminId, input.accountId))) return false;
+      if (!reservation || reservation.adminId !== input.adminId || reservation.accountId !== input.accountId || reservation.executionKey !== input.executionKey || reservation.status !== 'reserved' || !(await this.hasAccountScope(input.adminId, input.accountId))) return false;
       const key = `${input.accountId}:${input.orderNo}`;
       const guard = this.deliveryGuards.get(key);
       if (guard && (guard.executionKey !== input.executionKey || guard.status !== 'active')) return false;
+      if (Date.parse(reservation.leaseUntil) <= Date.now() && !guard) return false;
+      if (!reservation.items.length || reservation.items.some((entry) => this.couponItems.get(entry.itemId)?.status !== 'reserved')) return false;
       if (!guard) this.deliveryGuards.set(key, { executionKey: input.executionKey, status: 'active' });
+      const leaseUntil = new Date(Date.now() + 15 * 60_000).toISOString();
+      reservation.leaseUntil = leaseUntil;
+      for (const entry of reservation.items) this.couponItems.get(entry.itemId)!.reservedUntil = leaseUntil;
       return true;
     });
   }

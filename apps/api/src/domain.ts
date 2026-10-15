@@ -1402,6 +1402,8 @@ export interface WorkspaceConfirmationRecord {
 
 export interface Store {
   kind: 'memory' | 'postgres';
+  withOutboundConversationLock<T>(accountId: string, conversationRef: string, work: () => Promise<T>): Promise<T>;
+  withVerifiedPartialDeliveryPlan<T>(input: { accountId: string; orderNo: string; executionKey: string; reservationId: string }, work: () => Promise<T>): Promise<T>;
   health(): Promise<{ kind: string; reachable: boolean }>;
   countAdmins(): Promise<number>;
   listAdminIds(): Promise<string[]>;

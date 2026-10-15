@@ -59,6 +59,17 @@ export class XianyuProductAutomationExecutionAdapter implements ProductAutomatio
   }
 
   async sendCoupon(input: Parameters<AutomationExecutionPort['sendCoupon']>[0]): Promise<AutomationExternalResult> {
+    if (input.purpose !== 'delivery') return this.sendCouponWithVerifiedPlan(input);
+    try {
+      return await this.store.withVerifiedPartialDeliveryPlan({ accountId: input.accountId, orderNo: input.orderNo, executionKey: input.executionKey, reservationId: input.reservationId }, () => this.sendCouponWithVerifiedPlan(input));
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== 'DELIVERY_RECOVERY_COUPON_PLAN_CHANGED') throw error;
+      await this.store.quarantineCouponReservation({ adminId: requireAdminId(input.adminId), executionKey: input.executionKey, reason: error.message });
+      return unknownExternal(error.message, 'verified coupon plan changed before remaining content was sent');
+    }
+  }
+
+  private async sendCouponWithVerifiedPlan(input: Parameters<AutomationExecutionPort['sendCoupon']>[0]): Promise<AutomationExternalResult> {
     const adminId = requireAdminId(input.adminId);
     let sentAtLeastOne = false;
     const reservation = await this.store.getCouponReservation({ adminId, reservationId: input.reservationId, executionKey: input.executionKey });
@@ -268,7 +279,10 @@ export class XianyuProductAutomationExecutionAdapter implements ProductAutomatio
     if (!detail.success || !detail.detail) return undefined;
     const detailPayment = normalizePaymentStatus(detail.detail.paymentStatus, detail.detail.orderStatus);
     const detailDelivery = normalizeDeliveryStatus(detail.detail.deliveryStatus);
-    if (!detailPayment || !detailDelivery || detailPayment !== listed.paymentStatus || detailDelivery !== listed.deliveryStatus) return undefined;
+    const detailOrder = normalizeDetailOrderStatus(detail.detail.orderStatus);
+    if (!detailPayment || !detailDelivery || (detail.detail.orderStatus && !detailOrder)
+      || (detailOrder && detailOrder !== listed.orderStatus)
+      || detailPayment !== listed.paymentStatus || detailDelivery !== listed.deliveryStatus) return undefined;
     if (detail.detail.buyerId && detail.detail.buyerId !== listed.buyerId) return undefined;
     if (detail.detail.itemId && detail.detail.itemId !== listed.itemId) return undefined;
     return { ...mergeOrderSnapshot(local, detail.detail), paymentStatus: listed.paymentStatus, orderStatus: listed.orderStatus, deliveryStatus: listed.deliveryStatus, afterSalesStatus: listed.afterSalesStatus, buyerId: listed.buyerId, itemId: listed.itemId, updatedAt: new Date().toISOString() };
@@ -366,6 +380,18 @@ function normalizeDeliveryStatus(value?: string): AutomationOrderSnapshot['deliv
   // delivered for idempotent confirmation checks.
   if (['3', '4', 'delivered', 'consigned', 'shipped', '已发货', '交易成功'].includes(normalized)) return 'delivered';
   if (['1', '2', 'pending', 'wait_consign', 'not_delivered', '待发货', '未发货'].includes(normalized)) return 'pending';
+  return undefined;
+}
+
+function normalizeDetailOrderStatus(value?: string): AutomationOrderSnapshot['orderStatus'] | undefined {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (/canceling|cancelling|取消中/u.test(normalized)) return 'cancelling';
+  if (/cancelled|canceled|已取消|退款成功|已退款|退款关闭/u.test(normalized)) return 'cancelled';
+  if (normalized === '4' || /complete|finished|success|已完成|交易成功/u.test(normalized)) return 'completed';
+  if (/closed|关闭|交易关闭/u.test(normalized)) return 'closed';
+  if (/fail|失败/u.test(normalized)) return 'failed';
+  if (['1', '2', '3', 'open', 'wait_buyer_pay', 'wait_pay', 'wait_consign', 'shipped', '待付款', '待发货', '已发货'].includes(normalized)) return 'open';
   return undefined;
 }
 

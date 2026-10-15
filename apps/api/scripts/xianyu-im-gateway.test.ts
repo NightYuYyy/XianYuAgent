@@ -29,6 +29,25 @@ test('history request response does not emit an event by itself', async () => {
   }
 });
 
+test('history 400 does not reconnect the shared socket before a subsequent send', async () => {
+  const socket = new ReadRejectedSocket();
+  const client = new XianyuImClient({
+    accountId: 'account-1',
+    credential: { cookieHeader: 'unb=seller-1', accessToken: 'token', deviceId: 'device-1' },
+    heartbeatIntervalMs: 60_000,
+    webSocketFactory: () => socket,
+  });
+  const connecting = client.connect();
+  queueMicrotask(() => socket.emit('open'));
+  await connecting;
+  try {
+    await assert.rejects(() => client.listMessages('conversation-1'), /XIANYU_IM_REQUEST_REJECTED:400/);
+    assert.equal(client.connected, true);
+    assert.equal((await client.sendText('conversation-1', 'buyer-1', 'message')).externalMessageRef, 'sent-message.PNM');
+    assert.equal(socket.sent.filter((message) => message.lwp === '/reg').length, 1);
+  } finally { await client.disconnect(); }
+});
+
 test('sync extra state recovery requests getState then acknowledges returned state', async () => {
   const socket = new SyncStateSocket();
   const client = new XianyuImClient({
@@ -465,6 +484,21 @@ class RejectingSocket extends FakeSocket {
     const message = JSON.parse(data) as Record<string, any>;
     this.sent.push(message);
     if (message.lwp === '/reg') queueMicrotask(() => this.emit('message', JSON.stringify({ code: 400, headers: { mid: message.headers?.mid }, body: { reason: 'SESSION_EXPIRED' } })));
+  }
+}
+
+class ReadRejectedSocket extends FakeSocket {
+  override send(data: string): void {
+    const message = JSON.parse(data) as Record<string, any>;
+    if (message.lwp === '/r/MessageManager/listUserMessages') {
+      this.sent.push(message);
+      queueMicrotask(() => this.emit('message', JSON.stringify({ code: 400, headers: { mid: message.headers?.mid }, body: {} })));
+      return;
+    }
+    super.send(data);
+    if (message.lwp === '/r/MessageSend/sendByReceiverScope') {
+      queueMicrotask(() => this.emit('message', JSON.stringify({ code: 200, headers: { mid: message.headers?.mid }, body: { messageId: 'sent-message.PNM' } })));
+    }
   }
 }
 

@@ -477,9 +477,9 @@ export class AutomationWorkflowService {
     if (existing) {
       if (existing.fingerprint !== fingerprint && !existing.retryable && !recoverManualReview) throw new ServiceError(409, 'IDEMPOTENCY_CONFLICT', 'automation execution key reused with different input');
       if (!existing.retryable && !recoverManualReview) return existing.result;
-      if (existing.result.reason !== 'XIANYU_IM_NOT_READY' && (policy.maxAttempts ?? 5) <= existing.attemptCount) return { status: 'manual_review', executionKey: key, reason: 'retry_exhausted' };
+      if (existing.result.reason !== 'XIANYU_IM_NOT_READY' && existing.result.reason !== 'DELIVERY_VERIFIED_PARTIAL_RESUME' && (policy.maxAttempts ?? 5) <= existing.attemptCount) return { status: 'manual_review', executionKey: key, reason: 'retry_exhausted' };
       const backoffMs = Math.max(0, policy.retryBackoffSeconds ?? 0) * 1000;
-      if (backoffMs > 0 && Date.parse(existing.updatedAt) + backoffMs > Date.now()) return existing.result;
+      if (existing.result.reason !== 'DELIVERY_VERIFIED_PARTIAL_RESUME' && backoffMs > 0 && Date.parse(existing.updatedAt) + backoffMs > Date.now()) return existing.result;
     }
     const ownerToken = createId();
     const promise = (async () => {

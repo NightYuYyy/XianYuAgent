@@ -294,6 +294,7 @@ describe('xianyu IM credential refresh', () => {
   it('waits for the IM session before uploading an image', async () => {
     const order: string[] = [];
     const store = {
+      withOutboundConversationLock: async (_account: string, _conversation: string, work: () => Promise<unknown>) => work(),
       getConversation: async () => ({ id: 'conversation-1', accountId: 'account-1', externalConversationRef: 'conversation-external', buyerRef: 'buyer-1' }),
       getAccount: async () => ({ id: 'account-1', status: 'connected' }),
       clearAccountDegraded: async () => undefined,
@@ -317,7 +318,7 @@ describe('xianyu IM credential refresh', () => {
 
     await service.sendImage('admin-1', 'account-1', 'conversation-1', { filename: 'image.png', contentType: 'image/png', data: Buffer.from([1]) }, 'request-1', 'trace-1');
 
-    assert.deepEqual(order, ['connect', 'upload', 'sendImage']);
+    assert.deepEqual(order, ['connect', 'upload', 'connect', 'sendImage']);
     assert.deepEqual(sentImageRequestIds, ['request-1']);
   });
 
@@ -326,6 +327,7 @@ describe('xianyu IM credential refresh', () => {
     let refreshCalls = 0;
     let disconnectCalls = 0;
     const store = {
+      withOutboundConversationLock: async (_account: string, _conversation: string, work: () => Promise<unknown>) => work(),
       getConversation: async () => ({ id: 'conversation-1', accountId: 'account-1', externalConversationRef: 'conversation-external', buyerRef: 'buyer-1' }),
       getAccount: async () => ({ id: 'account-1', platform: 'xianyu', sellerRef: 'seller-1', status: 'connected' as const }),
       getCredential: async () => ({ cookieHeader: 'unb=seller-1; _m_h5_tk=token-1', accessToken: 'access-1', deviceId: 'device-1' }),

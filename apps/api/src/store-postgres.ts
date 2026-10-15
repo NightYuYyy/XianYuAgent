@@ -41,11 +41,61 @@ function readDurationSeconds(config: Record<string, unknown>, secondsKey: string
 export class PostgresStore implements Store {
   readonly kind = 'postgres' as const;
   readonly pool: Pool;
+  private readonly outboundLockPool: Pool;
+  private readonly deliveryPlanPool: Pool;
   constructor(databaseUrl: string) {
     this.pool = new Pool({ connectionString: databaseUrl });
+    this.outboundLockPool = new Pool({ connectionString: databaseUrl, max: 10 });
+    this.deliveryPlanPool = new Pool({ connectionString: databaseUrl, max: 2 });
     // A database restart emits errors on idle clients. Keep the process alive
     // so subsequent pool queries can reconnect and the runtime can recover.
     this.pool.on('error', () => undefined);
+    this.outboundLockPool.on('error', () => undefined);
+    this.deliveryPlanPool.on('error', () => undefined);
+  }
+  async withOutboundConversationLock<T>(accountId: string, conversationRef: string, work: () => Promise<T>): Promise<T> {
+    const queuedAt = Date.now();
+    const client = await this.outboundLockPool.connect();
+    const key = `xianyu-im-send:${accountId}:${conversationRef}`;
+    let locked = false;
+    try {
+      await client.query("set lock_timeout='30s'");
+      await client.query('select pg_advisory_lock(hashtextextended($1, 0))', [key]);
+      locked = true;
+      const waitMs = Date.now() - queuedAt;
+      if (waitMs > 1_000) console.warn(JSON.stringify({ component: 'xianyu-im', event: 'outbound_send_lock_wait', accountId, waitMs, poolWaiting: this.outboundLockPool.waitingCount }));
+      return await work();
+    } finally {
+      if (locked) await client.query('select pg_advisory_unlock(hashtextextended($1, 0))', [key]).finally(() => client.release());
+      else client.release();
+    }
+  }
+  async withVerifiedPartialDeliveryPlan<T>(input: { accountId: string; orderNo: string; executionKey: string; reservationId: string }, work: () => Promise<T>): Promise<T> {
+    const recovery = await this.pool.query(`select 1 from orders.delivery_send_steps s
+      join observability.audit_events a on a.trace_id='delivery-recovery:' || s.order_no || ':' || s.external_ref
+        and a.account_id=s.account_id and a.action='delivery.partial_recovery_verified'
+      where s.account_id=$1 and s.order_no=$2 and s.execution_key=$3
+        and s.step_key like '%:image:0' and s.status='succeeded' limit 1`, [input.accountId, input.orderNo, input.executionKey]);
+    if (!recovery.rows.length) return work();
+    const client = await this.deliveryPlanPool.connect();
+    try {
+      await client.query('begin');
+      const reservation = await client.query(`select batch_ids from coupons.coupon_reservations
+        where id=$1 and account_id=$2 and execution_key=$3 and status='reserved'`, [input.reservationId, input.accountId, input.executionKey]);
+      if (reservation.rows.length !== 1) throw new Error('DELIVERY_RECOVERY_RESERVATION_MISMATCH');
+      const steps = await client.query(`select created_at from orders.delivery_send_steps where account_id=$1 and order_no=$2
+        and execution_key=$3 and step_key like '%:image:0' and status='succeeded'`, [input.accountId, input.orderNo, input.executionKey]);
+      if (steps.rows.length !== 1) throw new Error('DELIVERY_RECOVERY_STEP_MISMATCH');
+      const batchIds: string[] = reservation.rows[0].batch_ids;
+      const batches = await client.query('select status,updated_at from coupons.coupon_batches where id=any($1::uuid[]) for share', [batchIds]);
+      const assets = await client.query('select updated_at from coupons.coupon_asset_refs where coupon_batch_id=any($1::uuid[]) for share', [batchIds]);
+      const startedAt = new Date(steps.rows[0].created_at).getTime();
+      if (batches.rows.length !== batchIds.length || batches.rows.some((batch) => batch.status !== 'active' || new Date(batch.updated_at).getTime() > startedAt)
+        || assets.rows.some((asset) => new Date(asset.updated_at).getTime() > startedAt)) throw new Error('DELIVERY_RECOVERY_COUPON_PLAN_CHANGED');
+      const result = await work();
+      await client.query('commit');
+      return result;
+    } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
   }
   async health(): Promise<{ kind: string; reachable: boolean }> { try { await this.pool.query('select 1'); return { kind: this.kind, reachable: true }; } catch { return { kind: this.kind, reachable: false }; } }
   async countAdmins(): Promise<number> { const result = await this.pool.query('select count(*)::int as count from auth.admins'); return Number(result.rows[0].count); }
@@ -633,14 +683,21 @@ export class PostgresStore implements Store {
     const client = await this.pool.connect();
     try {
       await client.query('begin');
-      const reservation = await client.query(`select r.id from coupons.coupon_reservations r
-        where r.id=$1 and r.admin_id=$2 and r.account_id=$3 and r.execution_key=$4 and r.status='reserved' and r.lease_until>now()
+      const reservation = await client.query(`select r.id,r.lease_until from coupons.coupon_reservations r
+        where r.id=$1 and r.admin_id=$2 and r.account_id=$3 and r.execution_key=$4 and r.status='reserved'
         and exists(select 1 from auth.account_scopes s where s.admin_id=$2 and s.account_id=r.account_id and s.status='active') for update`,
       [input.reservationId, input.adminId, input.accountId, input.executionKey]);
       if (!reservation.rows[0]) { await client.query('rollback'); return false; }
-      await client.query("insert into orders.delivery_send_guards(account_id,order_no,execution_key,status) values ($1,$2,$3,'active') on conflict do nothing", [input.accountId, input.orderNo, input.executionKey]);
+      if (new Date(reservation.rows[0].lease_until).getTime() > Date.now()) {
+        await client.query("insert into orders.delivery_send_guards(account_id,order_no,execution_key,status) values ($1,$2,$3,'active') on conflict do nothing", [input.accountId, input.orderNo, input.executionKey]);
+      }
       const guard = await client.query('select execution_key,status from orders.delivery_send_guards where account_id=$1 and order_no=$2 for update', [input.accountId, input.orderNo]);
       if (guard.rows[0]?.execution_key !== input.executionKey || guard.rows[0]?.status !== 'active') { await client.query('rollback'); return false; }
+      const items = await client.query(`select i.id,i.status from coupons.coupon_items i join coupons.coupon_reservation_items ri on ri.item_id=i.id
+        where ri.reservation_id=$1 for update of i`, [input.reservationId]);
+      if (!items.rows.length || items.rows.some((item) => item.status !== 'reserved')) { await client.query('rollback'); return false; }
+      await client.query("update coupons.coupon_reservations set lease_until=now()+interval '15 minutes',updated_at=now() where id=$1", [input.reservationId]);
+      await client.query("update coupons.coupon_items set reserved_until=now()+interval '15 minutes' where id=any($1::uuid[])", [items.rows.map((item) => item.id)]);
       await client.query('commit');
       return true;
     } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
@@ -670,6 +727,51 @@ export class PostgresStore implements Store {
       await client.query('begin');
       await client.query("update orders.delivery_send_guards set status='unknown',updated_at=now() where account_id=$1 and order_no=$2 and execution_key=$3", [input.accountId, input.orderNo, input.executionKey]);
       await client.query("update orders.delivery_send_steps set status='unknown',updated_at=now() where account_id=$1 and order_no=$2 and execution_key=$3 and step_key=$4 and status='sending'", [input.accountId, input.orderNo, input.executionKey, input.stepKey]);
+      await client.query('commit');
+    } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
+  }
+  async resumeVerifiedPartialDelivery(input: { adminId: string; accountId: string; orderNo: string; executionKey: string; stepKey: string; externalMessageRef: string }): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      const order = await client.query(`select o.* from orders.orders o where o.account_id=$1 and o.order_no=$2
+        and exists(select 1 from auth.account_scopes s where s.admin_id=$3 and s.account_id=o.account_id and s.status='active' and (s.expires_at is null or s.expires_at>now())) for update`, [input.accountId, input.orderNo, input.adminId]);
+      const row = order.rows[0];
+      if (!row || row.payment_status !== 'paid' || row.order_status !== 'open' || row.delivery_status !== 'pending' || row.after_sales_status !== 'none') throw new Error('DELIVERY_RECOVERY_ORDER_NOT_ELIGIBLE');
+      const guard = await client.query('select * from orders.delivery_send_guards where account_id=$1 and order_no=$2 for update', [input.accountId, input.orderNo]);
+      if (guard.rows.length !== 1 || guard.rows[0].execution_key !== input.executionKey || guard.rows[0].status !== 'unknown') throw new Error('DELIVERY_RECOVERY_GUARD_MISMATCH');
+      const steps = await client.query('select * from orders.delivery_send_steps where account_id=$1 and order_no=$2 for update', [input.accountId, input.orderNo]);
+      if (steps.rows.length !== 1 || steps.rows[0].step_key !== input.stepKey || steps.rows[0].execution_key !== input.executionKey || steps.rows[0].status !== 'unknown' || !input.stepKey.endsWith(':image:0')) throw new Error('DELIVERY_RECOVERY_STEP_MISMATCH');
+      const step = steps.rows[0];
+      const message = await client.query(`select 1 from messages.messages where account_id=$1 and conversation_id::text=$2 and external_message_ref=$3
+        and direction='outbound' and body_type='image' and body_ref is not null
+        and created_at between $4::timestamptz - interval '2 seconds' and $5::timestamptz + interval '5 seconds'`,
+      [input.accountId, row.conversation_id, input.externalMessageRef, step.created_at, step.updated_at]);
+      if (message.rows.length !== 1) throw new Error('DELIVERY_RECOVERY_IMAGE_EVIDENCE_MISSING');
+      const reservation = await client.query('select * from coupons.coupon_reservations where execution_key=$1 and admin_id=$2 and account_id=$3 for update', [input.executionKey, input.adminId, input.accountId]);
+      if (reservation.rows.length !== 1 || reservation.rows[0].status !== 'quarantined' || reservation.rows[0].reason !== 'DELIVERY_SEND_RESULT_UNKNOWN') throw new Error('DELIVERY_RECOVERY_RESERVATION_MISMATCH');
+      const batchIds: string[] = reservation.rows[0].batch_ids;
+      const batches = await client.query('select id,status,updated_at from coupons.coupon_batches where id=any($1::uuid[]) for update', [batchIds]);
+      const assets = await client.query('select coupon_batch_id,status,updated_at from coupons.coupon_asset_refs where coupon_batch_id=any($1::uuid[]) for update', [batchIds]);
+      const imageStartedAt = new Date(step.created_at).getTime();
+      if (batches.rows.length !== batchIds.length || batches.rows.some((batch) => batch.status !== 'active' || new Date(batch.updated_at).getTime() > imageStartedAt)
+        || assets.rows.some((asset) => new Date(asset.updated_at).getTime() > imageStartedAt)) throw new Error('DELIVERY_RECOVERY_COUPON_PLAN_CHANGED');
+      const items = await client.query('select i.* from coupons.coupon_items i join coupons.coupon_reservation_items ri on ri.item_id=i.id where ri.reservation_id=$1 for update of i', [reservation.rows[0].id]);
+      if (items.rows.length < 1 || items.rows.some((item) => item.status !== 'reserved')) throw new Error('DELIVERY_RECOVERY_INVENTORY_MISMATCH');
+      const ledger = await client.query('select * from automation.execution_ledger where execution_key=$1 for update', [input.executionKey]);
+      if (ledger.rows.length !== 1 || ledger.rows[0].status !== 'completed' || ledger.rows[0].result_json?.status !== 'manual_review' || ledger.rows[0].result_json?.reason !== 'DELIVERY_SEND_RESULT_UNKNOWN') throw new Error('DELIVERY_RECOVERY_LEDGER_MISMATCH');
+      const jobs = await client.query('select * from orders.payment_event_jobs where account_id=$1 and order_no=$2 for update', [input.accountId, input.orderNo]);
+      if (jobs.rows.length !== 1 || jobs.rows[0].admin_id !== input.adminId || jobs.rows[0].status !== 'manual_review') throw new Error('DELIVERY_RECOVERY_JOB_MISMATCH');
+      await client.query("update orders.delivery_send_steps set status='succeeded',external_ref=$4,updated_at=now() where account_id=$1 and order_no=$2 and step_key=$3", [input.accountId, input.orderNo, input.stepKey, input.externalMessageRef]);
+      await client.query("update orders.delivery_send_guards set status='active',updated_at=now() where account_id=$1 and order_no=$2", [input.accountId, input.orderNo]);
+      await client.query("update coupons.coupon_reservations set status='reserved',reason=null,lease_until=now()+interval '15 minutes',updated_at=now() where id=$1", [reservation.rows[0].id]);
+      await client.query("update coupons.coupon_items set reserved_until=now()+interval '15 minutes' where id=any($1::uuid[])", [items.rows.map((item) => item.id)]);
+      await client.query(`update automation.execution_ledger set result_json=jsonb_build_object('status','unknown','executionKey',$2::text,'reason','DELIVERY_VERIFIED_PARTIAL_RESUME'),retryable=true,updated_at=now() where execution_key=$1`, [input.executionKey, input.executionKey]);
+      await client.query("update orders.payment_event_jobs set status='pending',attempt_count=0,next_attempt_at=now(),last_error='DELIVERY_VERIFIED_PARTIAL_RESUME',owner_token=null,lease_until=null,updated_at=now() where id=$1", [jobs.rows[0].id]);
+      const traceId = `delivery-recovery:${input.orderNo}:${input.externalMessageRef}`;
+      await client.query(`insert into observability.audit_events(id,actor_type,account_id,action,target_ref,request_id,trace_id,payload_digest,reason)
+        values ($1,'system',$2,'delivery.partial_recovery_verified',$3,$4,$4,$5,'platform image confirmed; missing text queued')`,
+      [createId(), input.accountId, input.orderNo, traceId, createHash('sha256').update(`${input.executionKey}:${input.externalMessageRef}`).digest('hex')]);
       await client.query('commit');
     } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
   }
@@ -2267,7 +2369,7 @@ export class PostgresStore implements Store {
     const result = await this.pool.query("update execution.outbox_jobs set status='pending',available_at=coalesce($3::timestamptz,now()),locked_at=null,lease_expires_at=null,lease_owner=null,updated_at=now() where scope=$1 and id=$2 and status in ('retryable','dead_lettered') returning *", [input.scope, input.id, input.availableAt ?? null]);
     return result.rows[0] ? this.toAutoReplyOutbox(result.rows[0]) : undefined;
   }
-  async close(): Promise<void> { await this.pool.end(); }
+  async close(): Promise<void> { await Promise.all([this.pool.end(), this.outboundLockPool.end(), this.deliveryPlanPool.end()]); }
 
   private async expireCouponReservations(client: PoolClient): Promise<number> {
     const result = await client.query(`with expired as (
