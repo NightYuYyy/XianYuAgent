@@ -10,6 +10,8 @@ export class PaymentEventWorker {
   private claimInFlight?: Promise<PaymentEventJob[]>;
   private readonly activeJobs = new Set<Promise<void>>();
   private reconcileInFlight?: Promise<number>;
+  private readonly reconcileCursors = new Map<string, number>();
+  private readonly targetedScans = new Map<string, Promise<{ kind: 'complete' | 'handoff' } | { kind: 'retry'; error: string }>>();
 
   constructor(
     private readonly store: Store,
@@ -44,7 +46,7 @@ export class PaymentEventWorker {
 
   private async reconcileAccounts(): Promise<number> {
     let queued = 0;
-    const active: Array<{ adminId: string; accountId: string; page: number; startedAt: number }> = [];
+    const active: Array<{ adminId: string; accountId: string; page: number; firstPage: number; hot: boolean; startedAt: number }> = [];
     for (const adminId of await this.store.listAdminIds()) {
       const admin = await this.store.findAdminById(adminId);
       if (admin?.status !== 'active') continue;
@@ -55,7 +57,7 @@ export class PaymentEventWorker {
         totalPages = accounts.totalPages;
         for (const account of accounts.items) {
           if (!['connected', 'degraded', 'disconnected'].includes(account.status)) continue;
-          active.push({ adminId, accountId: account.id, page: 1, startedAt: Date.now() });
+          active.push({ adminId, accountId: account.id, page: 1, firstPage: 1, hot: true, startedAt: Date.now() });
         }
         page += 1;
       }
@@ -68,18 +70,43 @@ export class PaymentEventWorker {
           const account = round[cursor++]!;
           try {
             const result = await this.mtop.fetchOrderCandidates(account.adminId, account.accountId, undefined, account.page);
-            if (!result.success) continue;
+            if (!result.success) {
+              if (!account.hot && (this.reconcileCursors.get(account.accountId) ?? 0) < account.page) this.reconcileCursors.set(account.accountId, account.page);
+              this.options.onError?.({ scope: 'payment_reconcile_lookup', accountId: account.accountId, errorCode: result.errorCode });
+              if (account.hot && (this.reconcileCursors.get(account.accountId) ?? 1) > 100) {
+                const firstPage = this.reconcileCursors.get(account.accountId)!;
+                active.push({ ...account, page: firstPage, firstPage, hot: false });
+              }
+              continue;
+            }
             for (const item of result.items) {
               if (item.paymentStatus !== 'paid' || item.deliveryStatus !== 'pending' || item.orderStatus !== 'open' || item.afterSalesStatus !== 'none' || item.buyerId === 'unknown-buyer' || item.itemId === 'unknown-item') continue;
               await this.store.enqueuePaymentEvent({ adminId: account.adminId, accountId: account.accountId, eventRef: `reconcile:${item.orderNo}`, orderNo: item.orderNo, buyerRef: item.buyerId, itemRef: item.itemId, conversationRef: item.conversationId ?? '', receivedAt: new Date().toISOString() });
               queued += 1;
             }
-            if (result.hasMore && account.page < 100) active.push({ ...account, page: account.page + 1 });
-            else {
-              if (result.hasMore) this.options.onError?.({ scope: 'payment_reconcile_truncated', accountId: account.accountId });
-              console.info(JSON.stringify({ component: 'payment-reconcile', event: 'account_scan', accountId: account.accountId, pages: account.page, durationMs: Date.now() - account.startedAt }));
+            if (account.hot) {
+              if (result.hasMore && account.page < 100) active.push({ ...account, page: account.page + 1 });
+              else if (result.hasMore) {
+                const firstPage = Math.max(101, this.reconcileCursors.get(account.accountId) ?? 101);
+                active.push({ ...account, page: firstPage, firstPage, hot: false });
+              } else {
+                this.reconcileCursors.delete(account.accountId);
+                console.info(JSON.stringify({ component: 'payment-reconcile', event: 'account_scan', accountId: account.accountId, pages: account.page, durationMs: Date.now() - account.startedAt }));
+              }
+              continue;
             }
-          } catch (error) { this.options.onError?.({ scope: 'payment_reconcile', accountId: account.accountId, error }); }
+            if (result.hasMore && account.page < account.firstPage + 99) active.push({ ...account, page: account.page + 1 });
+            else {
+              if (result.hasMore) {
+                this.reconcileCursors.set(account.accountId, account.page + 1);
+                this.options.onError?.({ scope: 'payment_reconcile_continuing', accountId: account.accountId, nextPage: account.page + 1 });
+              } else if (this.reconcileCursors.get(account.accountId) === account.firstPage) this.reconcileCursors.delete(account.accountId);
+              console.info(JSON.stringify({ component: 'payment-reconcile', event: 'account_scan', accountId: account.accountId, pages: account.page - account.firstPage + 1, durationMs: Date.now() - account.startedAt }));
+            }
+          } catch (error) {
+            if (!account.hot && (this.reconcileCursors.get(account.accountId) ?? 0) < account.page) this.reconcileCursors.set(account.accountId, account.page);
+            this.options.onError?.({ scope: 'payment_reconcile', accountId: account.accountId, error });
+          }
         }
       }));
     }
@@ -111,12 +138,19 @@ export class PaymentEventWorker {
         await this.defer(job, 'ACCOUNT_NOT_READY');
         return;
       }
-      const conversation = job.conversationRef ? await this.store.findConversationByExternalRef(job.adminId, job.accountId, job.conversationRef) : undefined;
+      if (!job.orderNo) {
+        let scan: { kind: 'complete' | 'handoff' } | { kind: 'retry'; error: string };
+        try { scan = await this.scanAccountForExactOrders(job.adminId, job.accountId); }
+        catch (error) { await this.defer(job, error instanceof Error ? error.message : 'ORDER_SCAN_FAILED', undefined, true); return; }
+        if (scan.kind === 'retry') { await this.defer(job, scan.error, undefined, true); return; }
+        await this.store.finishPaymentEvent({ id: job.id, ownerToken: job.ownerToken!, status: 'completed', lastError: scan.kind === 'handoff' ? 'ORDER_ID_UNAVAILABLE_RECONCILE_HANDOFF' : 'ORDER_ID_UNAVAILABLE_SCAN_COMPLETE' });
+        return;
+      }
       let item: XianyuOrderItem | undefined;
       if (job.orderNo) {
         const targeted = await this.mtop.fetchOrderCandidates(job.adminId, job.accountId, job.orderNo);
         if (!targeted.success) { await this.defer(job, targeted.errorCode ?? 'ORDER_LOOKUP_FAILED', undefined, true); return; }
-        item = matchingCandidates(job, targeted, conversation?.id, true)[0];
+        item = matchingCandidates(job, targeted)[0];
       }
       if (!item) {
         const matches: XianyuOrderItem[] = [];
@@ -124,14 +158,17 @@ export class PaymentEventWorker {
         for (let orderPage = 1; orderPage <= 100; orderPage += 1) {
           const page = await this.mtop.fetchOrderCandidates(job.adminId, job.accountId, undefined, orderPage);
           if (!page.success) { await this.defer(job, page.errorCode ?? 'ORDER_LOOKUP_FAILED', undefined, true); return; }
-          matches.push(...matchingCandidates(job, page, conversation?.id, Boolean(job.orderNo)));
+          matches.push(...matchingCandidates(job, page));
           if (!page.hasMore) { complete = true; break; }
         }
         if (!complete) { await this.defer(job, 'ORDER_SCAN_TRUNCATED', undefined, true); return; }
         item = matches.length === 1 ? matches[0] : undefined;
       }
-      if (!item) { await this.defer(job, 'ORDER_NOT_VISIBLE_OR_AMBIGUOUS', undefined, true); return; }
-      if (item.deliveryStatus === 'delivered' || ['cancelled', 'completed', 'closed', 'failed'].includes(item.orderStatus) || item.paymentStatus === 'closed' || item.afterSalesStatus !== 'none') {
+      if (!item) {
+        await this.defer(job, 'ORDER_NOT_VISIBLE_OR_AMBIGUOUS', undefined, true);
+        return;
+      }
+      if (isTerminalOrder(item)) {
         await this.store.finishPaymentEvent({ id: job.id, ownerToken: job.ownerToken!, status: 'completed', orderNo: item.orderNo, lastError: 'ORDER_NOT_ELIGIBLE' });
         return;
       }
@@ -159,6 +196,28 @@ export class PaymentEventWorker {
     }
   }
 
+  private scanAccountForExactOrders(adminId: string, accountId: string): Promise<{ kind: 'complete' | 'handoff' } | { kind: 'retry'; error: string }> {
+    const existing = this.targetedScans.get(accountId);
+    if (existing) return existing;
+    const scan = this.runAccountScan(adminId, accountId).finally(() => { this.targetedScans.delete(accountId); });
+    this.targetedScans.set(accountId, scan);
+    return scan;
+  }
+
+  private async runAccountScan(adminId: string, accountId: string): Promise<{ kind: 'complete' | 'handoff' } | { kind: 'retry'; error: string }> {
+    for (let page = 1; page <= 100; page += 1) {
+      const result = await this.mtop.fetchOrderCandidates(adminId, accountId, undefined, page);
+      if (!result.success) return { kind: 'retry', error: result.errorCode ?? 'ORDER_LOOKUP_FAILED' };
+      for (const item of result.items) {
+        if (item.paymentStatus !== 'paid' || item.deliveryStatus !== 'pending' || item.orderStatus !== 'open' || item.afterSalesStatus !== 'none' || item.buyerId === 'unknown-buyer' || item.itemId === 'unknown-item') continue;
+        await this.store.enqueuePaymentEvent({ adminId, accountId, eventRef: `reconcile:${item.orderNo}`, orderNo: item.orderNo, buyerRef: item.buyerId, itemRef: item.itemId, conversationRef: item.conversationId ?? '', receivedAt: new Date().toISOString() });
+      }
+      if (!result.hasMore) return { kind: 'complete' };
+    }
+    if ((this.reconcileCursors.get(accountId) ?? 0) < 101) this.reconcileCursors.set(accountId, 101);
+    return { kind: 'handoff' };
+  }
+
   private async defer(job: PaymentEventJob, reason: string, orderNo?: string, observationFailure = false): Promise<void> {
     const awaitAccount = observationFailure || reason === 'ACCOUNT_NOT_READY' || /ACCOUNT_VALIDATION_REQUIRED|SESSION_EXPIRED|CREDENTIAL_MISSING|MTOP_RETRY_EXHAUSTED|XIANYU_IM_NOT_READY/.test(reason);
     const exhausted = !awaitAccount && job.attemptCount >= 12;
@@ -167,13 +226,12 @@ export class PaymentEventWorker {
   }
 }
 
-function matchingCandidates(job: PaymentEventJob, page: XianyuOrdersPageResult, conversationId: string | undefined, requireOrderNo: boolean): XianyuOrderItem[] {
+function isTerminalOrder(order: Pick<OrderRecord, 'deliveryStatus' | 'orderStatus' | 'paymentStatus' | 'afterSalesStatus'>): boolean {
+  return order.deliveryStatus === 'delivered' || ['cancelled', 'completed', 'closed', 'failed'].includes(order.orderStatus) || order.paymentStatus === 'closed' || order.afterSalesStatus !== 'none';
+}
+
+function matchingCandidates(job: PaymentEventJob, page: XianyuOrdersPageResult): XianyuOrderItem[] {
   return page.items.filter((item) => {
-    if (requireOrderNo) return item.orderNo === job.orderNo && item.buyerId !== 'unknown-buyer' && item.itemId !== 'unknown-item';
-    if (item.buyerId !== job.buyerRef) return false;
-    if (job.itemRef && item.itemId !== job.itemRef) return false;
-    if (job.conversationRef && item.conversationId && item.conversationId !== job.conversationRef && item.conversationId !== conversationId) return false;
-    if (!requireOrderNo && !job.itemRef && !job.conversationRef) return false;
-    return true;
+    return item.orderNo === job.orderNo && item.buyerId !== 'unknown-buyer' && item.itemId !== 'unknown-item';
   });
 }

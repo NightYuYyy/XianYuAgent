@@ -58,23 +58,27 @@ test('trusted order number dispatches despite system sender metadata and order-l
   assert.equal(await worker.pollOnce(), 0);
 });
 
-test('missing order number requires a unique buyer-item match and delay defers before delivery', async () => {
+test('missing-order IM event only enqueues exact-order jobs, including multiple buyer-item matches', async () => {
   const store = new MemoryStore();
   const admin = await store.createAdmin({ email: 'payment-resolve@example.com', passwordHash: 'hash', displayName: 'Resolve' });
   const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'seller-resolve' });
   await store.updateAccount(admin.id, account.id, { status: 'connected' });
-  let candidates = [order(), order({ orderNo: '2503688126356636371' })];
+  const candidates = [order(), order({ orderNo: '2503688126356636371' })];
   let dispatches = 0;
   const worker = new PaymentEventWorker(store, { fetchOrderCandidates: async () => ({ success: true, accountInvalid: false, cookieHeader: '', items: candidates, pageNumber: 1, pageSize: 100, hasMore: false }) }, async () => {
     dispatches += 1;
     return { processed: 1, results: [{ trigger: 'payment_paid', status: 'succeeded' }] };
   }, { workerId: 'test-resolve', resolveDelaySeconds: async () => 60 });
-  await store.enqueuePaymentEvent({ adminId: admin.id, accountId: account.id, eventRef: 'paid-no-id', buyerRef: 'buyer-1', itemRef: 'item-1', conversationRef: 'conversation-1', receivedAt: new Date().toISOString() });
+  const input = { adminId: admin.id, accountId: account.id, eventRef: 'paid-no-id', buyerRef: 'buyer-1', itemRef: 'item-1', conversationRef: 'conversation-1', receivedAt: new Date().toISOString() };
+  await store.enqueuePaymentEvent(input);
   assert.equal(await worker.pollOnce(), 1);
   assert.equal(dispatches, 0);
-  candidates = [order()];
-  const retry = await store.claimPaymentEvents({ workerId: 'test', limit: 1, leaseMs: 1 });
-  assert.equal(retry.length, 0, 'ambiguous job backs off instead of selecting an arbitrary order');
+  const source = await store.enqueuePaymentEvent(input);
+  assert.equal(source.status, 'completed');
+  assert.equal(source.orderNo, undefined);
+  assert.equal(source.lastError, 'ORDER_ID_UNAVAILABLE_SCAN_COMPLETE');
+  assert.equal((await store.enqueuePaymentEvent({ ...input, eventRef: `reconcile:${ORDER_NO}`, orderNo: ORDER_NO })).status, 'pending');
+  assert.equal((await store.enqueuePaymentEvent({ ...input, eventRef: 'reconcile:2503688126356636371', orderNo: '2503688126356636371' })).status, 'pending');
 });
 
 test('expired claim can be reclaimed and stale owner cannot finish it', async () => {
@@ -90,7 +94,7 @@ test('expired claim can be reclaimed and stale owner cannot finish it', async ()
   assert.equal(await store.finishPaymentEvent({ id: second.id, ownerToken: second.ownerToken!, status: 'completed' }), true);
 });
 
-test('missing-order event scans later pages and does not pick an ambiguous first-page candidate', async () => {
+test('missing-order event scans later pages and delivers only through the exact-order job', async () => {
   const store = new MemoryStore();
   const admin = await store.createAdmin({ email: 'payment-pages@example.com', passwordHash: 'hash', displayName: 'Pages' });
   const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'seller-pages' });
@@ -100,7 +104,7 @@ test('missing-order event scans later pages and does not pick an ambiguous first
   const delivered: string[] = [];
   const worker = new PaymentEventWorker(store, { fetchOrderCandidates: async (_adminId, _accountId, _orderNo, page = 1) => {
     pages.push(page);
-    return { success: true, accountInvalid: false, cookieHeader: '', items: page === 2 ? [order()] : [order({ orderNo: '2503688126356636399', buyerId: 'other' })], pageNumber: page, pageSize: 100, hasMore: page === 1 };
+    return { success: true, accountInvalid: false, cookieHeader: '', items: page === 2 ? [order()] : [order({ orderNo: '2503688126356636399', buyerId: 'other', paymentStatus: 'unpaid' })], pageNumber: page, pageSize: 100, hasMore: page === 1 };
   } }, async (input) => {
     delivered.push(input.items[0]!.orderNo);
     return { processed: 1, results: [{ trigger: 'payment_paid', status: 'succeeded' }] };
@@ -108,6 +112,8 @@ test('missing-order event scans later pages and does not pick an ambiguous first
   await store.enqueuePaymentEvent({ adminId: admin.id, accountId: account.id, eventRef: 'paid-page-2', buyerRef: 'buyer-1', itemRef: 'item-1', conversationRef: 'conversation-1', receivedAt: new Date().toISOString() });
   await worker.pollOnce();
   assert.deepEqual(pages, [1, 2]);
+  assert.deepEqual(delivered, []);
+  assert.equal(await worker.pollOnce(), 1);
   assert.deepEqual(delivered, [ORDER_NO]);
 });
 
@@ -247,6 +253,241 @@ test('payment card before order-list convergence retries until paid state appear
   finally { Date.now = realNow; }
   assert.equal(delivered, 1);
   assert.equal((await store.enqueuePaymentEvent(input)).status, 'completed');
+});
+
+for (const terminal of [
+  { name: 'delivered', state: { deliveryStatus: 'delivered' as const } },
+  { name: 'closed', state: { orderStatus: 'closed' as const, paymentStatus: 'closed' as const } },
+]) {
+  test(`missing-order historical ${terminal.name} event never binds a local terminal order`, async () => {
+    const store = new MemoryStore();
+    const admin = await store.createAdmin({ email: `terminal-${terminal.name}@example.com`, passwordHash: 'hash', displayName: 'Terminal' });
+    const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: `seller-${terminal.name}` });
+    await store.updateAccount(admin.id, account.id, { status: 'connected' });
+    const conversation = await store.createConversation({ adminId: admin.id, accountId: account.id, buyerRef: 'buyer-1', itemRef: 'item-1', externalConversationRef: 'external-conversation' });
+    const createdAt = new Date(Date.now() - 30_000).toISOString();
+    await store.createOrder({ adminId: admin.id, order: { ...order({ ...terminal.state, createdAt }), accountId: account.id, conversationId: conversation.id, source: 'xianyu' } });
+    const calls: Array<string | undefined> = [];
+    let dispatches = 0;
+    const worker = new PaymentEventWorker(store, { fetchOrderCandidates: async (_adminId, _accountId, orderNo?: string) => {
+      calls.push(orderNo);
+      return { success: true, accountInvalid: false, cookieHeader: '', items: orderNo ? [order({ ...terminal.state, createdAt })] : [], pageNumber: 1, pageSize: 100, hasMore: false };
+    } }, async () => { dispatches += 1; return { processed: 0, results: [] }; }, { workerId: `terminal-${terminal.name}` });
+    const input = { adminId: admin.id, accountId: account.id, eventRef: `terminal-${terminal.name}`, buyerRef: 'buyer-1', itemRef: 'item-1', conversationRef: 'external-conversation', receivedAt: new Date().toISOString() };
+    await store.enqueuePaymentEvent(input);
+    assert.equal(await worker.pollOnce(), 1);
+    assert.deepEqual(calls, [undefined]);
+    assert.equal(dispatches, 0);
+    assert.equal((await store.enqueuePaymentEvent(input)).status, 'completed');
+    assert.equal((await store.enqueuePaymentEvent(input)).orderNo, undefined);
+    assert.equal((await store.enqueuePaymentEvent(input)).lastError, 'ORDER_ID_UNAVAILABLE_SCAN_COMPLETE');
+    assert.equal(await worker.pollOnce(), 0);
+  });
+}
+
+for (const scenario of ['future_local', 'stale', 'ambiguous', 'active_competitor'] as const) {
+  test(`missing-order event ignores ${scenario} local order evidence`, async () => {
+    const store = new MemoryStore();
+    const admin = await store.createAdmin({ email: `terminal-${scenario}@example.com`, passwordHash: 'hash', displayName: 'Terminal' });
+    const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: `seller-${scenario}` });
+    await store.updateAccount(admin.id, account.id, { status: 'connected' });
+    const conversation = await store.createConversation({ adminId: admin.id, accountId: account.id, buyerRef: 'buyer-1', itemRef: 'item-1', externalConversationRef: 'external-conversation' });
+    const createdAt = new Date(Date.now() + (scenario === 'future_local' ? 60_000 : scenario === 'stale' ? -86_400_000 : -30_000)).toISOString();
+    await store.createOrder({ adminId: admin.id, order: { ...order({ deliveryStatus: 'delivered', createdAt }), accountId: account.id, conversationId: conversation.id, source: 'xianyu' } });
+    if (scenario === 'ambiguous' || scenario === 'active_competitor') await store.createOrder({ adminId: admin.id, order: { ...order({ orderNo: '2503688126356636371', deliveryStatus: scenario === 'active_competitor' ? 'pending' : 'delivered', createdAt }), accountId: account.id, conversationId: conversation.id, source: 'xianyu' } });
+    const calls: Array<string | undefined> = [];
+    const worker = new PaymentEventWorker(store, { fetchOrderCandidates: async (_adminId, _accountId, orderNo?: string) => {
+      calls.push(orderNo);
+      return { success: true, accountInvalid: false, cookieHeader: '', items: orderNo ? [order({ deliveryStatus: 'delivered', createdAt })] : [], pageNumber: 1, pageSize: 100, hasMore: false };
+    } }, async () => { assert.fail('historical terminal event must not dispatch delivery'); }, { workerId: `terminal-${scenario}` });
+    const input = { adminId: admin.id, accountId: account.id, eventRef: `terminal-${scenario}`, buyerRef: 'buyer-1', itemRef: 'item-1', conversationRef: 'external-conversation', receivedAt: new Date().toISOString() };
+    await store.enqueuePaymentEvent(input);
+    assert.equal(await worker.pollOnce(), 1);
+    assert.deepEqual(calls, [undefined]);
+    const job = await store.enqueuePaymentEvent(input);
+    assert.equal(job.status, 'completed');
+    assert.equal(job.orderNo, undefined);
+  });
+}
+
+test('missing-order event does not bind a newer order even when it is the only list item', async () => {
+    const store = new MemoryStore();
+    const admin = await store.createAdmin({ email: 'payment-future@example.com', passwordHash: 'hash', displayName: 'Payment' });
+    const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'seller-future' });
+    await store.updateAccount(admin.id, account.id, { status: 'connected' });
+    const receivedAt = new Date(Date.now() - 3_600_000).toISOString();
+    const createdAt = new Date(Date.parse(receivedAt) + 60_000).toISOString();
+    const calls: Array<string | undefined> = [];
+    const worker = new PaymentEventWorker(store, { fetchOrderCandidates: async (_adminId, _accountId, orderNo?: string) => {
+      calls.push(orderNo);
+      return { success: true, accountInvalid: false, cookieHeader: '', items: [order({ createdAt })], pageNumber: 1, pageSize: 100, hasMore: false };
+    } }, async () => { assert.fail('unrelated order must not dispatch delivery'); }, { workerId: 'payment-future' });
+    const input = { adminId: admin.id, accountId: account.id, eventRef: 'payment-future', buyerRef: 'buyer-1', itemRef: 'item-1', conversationRef: 'external-conversation', receivedAt };
+    await store.enqueuePaymentEvent(input);
+    assert.equal(await worker.pollOnce(), 1);
+    assert.deepEqual(calls, [undefined]);
+    const source = await store.enqueuePaymentEvent(input);
+    assert.equal(source.status, 'completed');
+    assert.equal(source.orderNo, undefined);
+    assert.equal((await store.enqueuePaymentEvent({ ...input, eventRef: `reconcile:${ORDER_NO}`, orderNo: ORDER_NO })).status, 'pending');
+});
+
+test('late payment is delivered through the exact-order reconciliation job', async () => {
+  const store = new MemoryStore();
+  const admin = await store.createAdmin({ email: 'payment-late@example.com', passwordHash: 'hash', displayName: 'Payment' });
+  const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'seller-late' });
+  await store.updateAccount(admin.id, account.id, { status: 'connected' });
+  await store.createProduct({ adminId: admin.id, accountId: account.id, externalProductRef: 'item-1', title: 'Product', status: 'published' });
+  const receivedAt = new Date().toISOString();
+  const createdAt = new Date(Date.parse(receivedAt) - 3_600_000).toISOString();
+  const delivered: string[] = [];
+  const worker = new PaymentEventWorker(store, { fetchOrderCandidates: async () => ({ success: true, accountInvalid: false, cookieHeader: '', items: [order({ createdAt })], pageNumber: 1, pageSize: 100, hasMore: false }) }, async (input) => {
+    delivered.push(input.items[0]!.orderNo);
+    return { processed: 1, results: [{ trigger: 'payment_paid', orderNo: ORDER_NO, status: 'succeeded' }] };
+  }, { workerId: 'payment-late' });
+  const input = { adminId: admin.id, accountId: account.id, eventRef: 'payment-late', buyerRef: 'buyer-1', itemRef: 'item-1', conversationRef: 'external-conversation', receivedAt };
+  await store.enqueuePaymentEvent(input);
+  assert.equal(await worker.pollOnce(), 1);
+  assert.deepEqual(delivered, []);
+  assert.equal((await store.enqueuePaymentEvent(input)).orderNo, undefined);
+  assert.equal(await worker.pollOnce(), 1);
+  assert.deepEqual(delivered, [ORDER_NO]);
+  assert.equal((await store.enqueuePaymentEvent({ ...input, eventRef: `reconcile:${ORDER_NO}`, orderNo: ORDER_NO })).status, 'completed');
+});
+
+test('missing platform creation time waits for exact-order reconciliation instead of guessing', async () => {
+  const store = new MemoryStore();
+  const admin = await store.createAdmin({ email: 'payment-no-create-time@example.com', passwordHash: 'hash', displayName: 'Payment' });
+  const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'seller-no-create-time' });
+  await store.updateAccount(admin.id, account.id, { status: 'connected' });
+  await store.createProduct({ adminId: admin.id, accountId: account.id, externalProductRef: 'item-1', title: 'Product', status: 'published' });
+  const item = order({ createdAtReliable: false });
+  const delivered: string[] = [];
+  const worker = new PaymentEventWorker(store, { fetchOrderCandidates: async () => ({ success: true, accountInvalid: false, cookieHeader: '', items: [item], pageNumber: 1, pageSize: 100, hasMore: false }) }, async (input) => {
+    delivered.push(input.items[0]!.orderNo);
+    return { processed: 1, results: [{ trigger: 'payment_paid', orderNo: ORDER_NO, status: 'succeeded' }] };
+  }, { workerId: 'payment-no-create-time' });
+  const input = { adminId: admin.id, accountId: account.id, eventRef: 'payment-no-create-time', buyerRef: 'buyer-1', itemRef: 'item-1', conversationRef: 'external-conversation', receivedAt: new Date(Date.now() - 60_000).toISOString() };
+  await store.enqueuePaymentEvent(input);
+  assert.equal(await worker.pollOnce(), 1);
+  assert.deepEqual(delivered, []);
+  assert.equal((await store.enqueuePaymentEvent(input)).status, 'completed');
+  assert.equal(await worker.pollOnce(), 1);
+  assert.deepEqual(delivered, [ORDER_NO]);
+  assert.equal((await store.enqueuePaymentEvent({ ...input, eventRef: `reconcile:${ORDER_NO}`, orderNo: ORDER_NO })).status, 'completed');
+});
+
+test('no-ID event remains retryable after a failed scan and completes after recovery', async () => {
+  const store = new MemoryStore();
+  const admin = await store.createAdmin({ email: 'payment-scan-recovery@example.com', passwordHash: 'hash', displayName: 'Recovery' });
+  const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'seller-scan-recovery' });
+  await store.updateAccount(admin.id, account.id, { status: 'connected' });
+  const input = { adminId: admin.id, accountId: account.id, eventRef: 'scan-recovery', buyerRef: 'buyer-1', itemRef: 'item-1', conversationRef: 'conversation-1', receivedAt: new Date().toISOString() };
+  await store.enqueuePaymentEvent(input);
+  let available = false;
+  const worker = new PaymentEventWorker(store, { fetchOrderCandidates: async () => ({ success: available, accountInvalid: false, cookieHeader: '', errorCode: available ? undefined : 'NETWORK_TIMEOUT', items: [], pageNumber: 1, pageSize: 100, hasMore: false }) }, async () => { assert.fail('no-ID job cannot dispatch delivery'); }, { workerId: 'scan-recovery' });
+  assert.equal(await worker.pollOnce(), 1);
+  assert.equal((await store.enqueuePaymentEvent(input)).status, 'resolve_pending');
+  available = true;
+  const realNow = Date.now;
+  Date.now = () => realNow() + 61_000;
+  try { assert.equal(await worker.pollOnce(), 1); }
+  finally { Date.now = realNow; }
+  const completed = await store.enqueuePaymentEvent(input);
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.orderNo, undefined);
+});
+
+test('thrown no-ID scan errors do not exhaust the payment event before recovery', async () => {
+  const store = new MemoryStore();
+  const admin = await store.createAdmin({ email: 'payment-scan-throw@example.com', passwordHash: 'hash', displayName: 'Recovery' });
+  const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'seller-scan-throw' });
+  await store.updateAccount(admin.id, account.id, { status: 'connected' });
+  const input = { adminId: admin.id, accountId: account.id, eventRef: 'scan-throw', buyerRef: 'buyer-1', itemRef: 'item-1', conversationRef: 'conversation-1', receivedAt: new Date().toISOString() };
+  await store.enqueuePaymentEvent(input);
+  let available = false;
+  const worker = new PaymentEventWorker(store, { fetchOrderCandidates: async () => {
+    if (!available) throw new Error('NETWORK_TIMEOUT');
+    return { success: true, accountInvalid: false, cookieHeader: '', items: [], pageNumber: 1, pageSize: 100, hasMore: false };
+  } }, async () => { assert.fail('no-ID job cannot dispatch delivery'); }, { workerId: 'scan-throw' });
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  try {
+    for (let attempt = 0; attempt < 13; attempt += 1) {
+      assert.equal(await worker.pollOnce(), 1);
+      now += 61_000;
+    }
+    assert.equal((await store.enqueuePaymentEvent(input)).status, 'resolve_pending');
+    available = true;
+    assert.equal(await worker.pollOnce(), 1);
+    assert.equal((await store.enqueuePaymentEvent(input)).status, 'completed');
+  } finally { Date.now = realNow; }
+});
+
+test('no-ID scan hands off deep pages without repeated claims or rewinding the cursor', async () => {
+  const store = new MemoryStore();
+  const admin = await store.createAdmin({ email: 'payment-scan-pages@example.com', passwordHash: 'hash', displayName: 'Pages' });
+  const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'seller-scan-pages' });
+  await store.updateAccount(admin.id, account.id, { status: 'connected' });
+  const input = { adminId: admin.id, accountId: account.id, eventRef: 'scan-pages', buyerRef: 'buyer-1', itemRef: 'item-1', conversationRef: 'conversation-1', receivedAt: new Date().toISOString() };
+  await store.enqueuePaymentEvent(input);
+  const pages: number[] = [];
+  const worker = new PaymentEventWorker(store, { fetchOrderCandidates: async (_adminId, _accountId, _orderNo, page = 1) => {
+    pages.push(page);
+    return { success: true, accountInvalid: false, cookieHeader: '', items: [], pageNumber: page, pageSize: 100, hasMore: page <= 250 };
+  } }, async () => { assert.fail('no-ID job cannot dispatch delivery'); }, { workerId: 'scan-pages' });
+  assert.equal(await worker.pollOnce(), 1);
+  assert.equal(pages.length, 100);
+  assert.equal((await store.enqueuePaymentEvent(input)).status, 'completed');
+  assert.equal((await store.enqueuePaymentEvent(input)).lastError, 'ORDER_ID_UNAVAILABLE_RECONCILE_HANDOFF');
+  assert.equal(await worker.pollOnce(), 0);
+  await worker.reconcileOnce();
+  assert.equal(pages[100], 1);
+  assert.equal(pages[199], 100);
+  assert.equal(pages[200], 101);
+  assert.equal(pages[299], 200);
+  assert.equal(pages.length, 300);
+  await store.enqueuePaymentEvent({ ...input, eventRef: 'scan-pages-second' });
+  assert.equal(await worker.pollOnce(), 1);
+  assert.equal(pages.length, 400);
+  assert.equal((await store.enqueuePaymentEvent({ ...input, eventRef: 'scan-pages-second' })).lastError, 'ORDER_ID_UNAVAILABLE_RECONCILE_HANDOFF');
+  await worker.reconcileOnce();
+  assert.equal(pages[400], 1);
+  assert.equal(pages[499], 100);
+  assert.equal(pages[500], 201);
+  assert.equal(pages.at(-1), 251);
+  assert.equal(await worker.pollOnce(), 0);
+});
+
+test('deep-page reconciliation scans page 50 for late payment every cycle', async () => {
+  const store = new MemoryStore();
+  const admin = await store.createAdmin({ email: 'payment-hot-page@example.com', passwordHash: 'hash', displayName: 'Pages' });
+  const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'seller-hot-page' });
+  await store.updateAccount(admin.id, account.id, { status: 'connected' });
+  await store.createProduct({ adminId: admin.id, accountId: account.id, externalProductRef: 'item-1', title: 'Product', status: 'published' });
+  const pages: number[] = [];
+  let cycle = 0;
+  const delivered: string[] = [];
+  const worker = new PaymentEventWorker(store, { fetchOrderCandidates: async (_adminId, _accountId, orderNo?: string, page = 1) => {
+    if (orderNo) return { success: true, accountInvalid: false, cookieHeader: '', items: [order()], pageNumber: 1, pageSize: 10, hasMore: false };
+    pages.push(page);
+    if (page === 1) cycle += 1;
+    return { success: true, accountInvalid: false, cookieHeader: '', items: page === 50 && cycle >= 2 ? [order()] : [], pageNumber: page, pageSize: 100, hasMore: page <= 250 };
+  } }, async (input) => {
+    delivered.push(input.items[0]!.orderNo);
+    return { processed: 1, results: [{ trigger: 'payment_paid', orderNo: ORDER_NO, status: 'succeeded' }] };
+  }, { workerId: 'hot-page' });
+  assert.equal(await worker.reconcileOnce(), 0);
+  assert.equal(pages.length, 200);
+  assert.equal(await worker.reconcileOnce(), 1);
+  assert.equal(pages[200], 1);
+  assert.equal(pages[249], 50);
+  assert.equal(pages[299], 100);
+  assert.equal(pages[300], 201);
+  assert.equal(pages.at(-1), 251);
+  await worker.stop();
+  assert.deepEqual(delivered, [ORDER_NO]);
 });
 
 test('reconciliation visits each healthy account first page before deep pagination and skips risk accounts', async () => {

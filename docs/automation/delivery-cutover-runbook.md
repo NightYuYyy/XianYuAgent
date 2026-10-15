@@ -39,6 +39,16 @@ ORDER BY g.account_id, g.order_no;
 
 普通 `pending`/`resolve_pending` 任务的延迟恢复由 worker 自动处理：原定延迟尚未到期时继续等待，到期且平台订单、账号状态可用时领取。历史 `unknown` 单独走上述人工履约，不纳入自动补发成功率。任何新出现的 `unknown` 继续人工核查，不通过重复点击或重启绕过。
 
+无订单号的支付 IM 事件只唤醒该账号的 `NOT_SHIP` 扫描，不能凭买家、商品或会话把它绑定到某个旧订单。完整扫描后，源任务以 `completed`、`order_no IS NULL`、`last_error='ORDER_ID_UNAVAILABLE_SCAN_COMPLETE'` 结束；超过 100 页时扫描前 100 页后移交周期对账，以 `last_error='ORDER_ID_UNAVAILABLE_RECONCILE_HANDOFF'` 结束，深页继续从游标扫描，不再每分钟重扫源任务。这两种 `completed` 都只表示事件信号已消费，**不表示订单已发货或深页已扫描完成**。扫描发现的待发订单会以 `reconcile:<orderNo>` 创建独立的精确订单号任务，之后仍须经过平台 `ALL` 查询、权威详情和发货护栏。扫描请求失败时源任务保持 `resolve_pending` 并重试；周期对账每轮扫前 100 页并续扫至多 100 个深页，直到扫完后再回卷。排查漏发时按 `order_no` 核查精确任务与平台订单，不将无号任务的 `completed` 计入发货成功数。深页对账的恢复时间取决于总页数和平台响应耗时，超过 100 页的晚付款不承诺 30 秒内发现。
+
+```sql
+SELECT status, last_error, count(*) AS jobs
+FROM orders.payment_event_jobs
+WHERE order_no IS NULL
+GROUP BY status, last_error
+ORDER BY status, last_error;
+```
+
 ## 回滚
 
 新版本运行后的数据库迁移与旧二进制的写入语义不兼容。只回滚前端或 API 镜像而继续旧版自动发货会绕过新的发送护栏；回滚时应先停 API/worker，保持发货 gate 关闭或暂停相关写入，按备份和逐单审计制定恢复步骤，不直接启动旧版写入进程。

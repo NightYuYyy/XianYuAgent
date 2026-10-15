@@ -131,9 +131,13 @@ test('product automation full E2E executes each configured rule from order state
 
     const calls: ExternalCall[] = [];
     const fakeMtop = {
+      fetchOrderCandidates: async (_adminId: string, _accountId: string, orderNo?: string) => {
+        const order = orders.get(orderNo ?? '');
+        return { success: true, accountInvalid: false, cookieHeader: '', items: order ? [order] : [], pageNumber: 1, pageSize: 10, hasMore: false };
+      },
       readOrderDetail: async (_adminId: string, _accountId: string, orderNo: string) => {
         const order = orders.get(orderNo);
-        return { success: true, accountInvalid: false, cookieHeader: '', detail: order ? { orderNo, itemId: order.itemId, itemTitle: order.itemTitle, buyerId: order.buyerId, conversationId: order.conversationId, paymentStatus: order.paymentStatus, deliveryStatus: order.deliveryStatus } : undefined };
+        return { success: true, accountInvalid: false, cookieHeader: '', detail: order ? { orderNo, itemId: order.itemId, itemTitle: order.itemTitle, buyerId: order.buyerId, conversationId: order.conversationId, paymentStatus: order.paymentStatus, orderStatus: order.orderStatus, deliveryStatus: order.deliveryStatus, afterSalesStatus: order.afterSalesStatus } : undefined };
       },
       confirmShipment: async (_adminId: string, _accountId: string, orderNo: string) => { calls.push({ kind: 'confirmShipment', orderNo }); return { status: 'succeeded', externalRef: `shipment:${orderNo}`, cookieHeader: '' }; },
       repriceOrder: async (_adminId: string, _accountId: string, orderNo: string, targetPriceMinor: number) => { calls.push({ kind: 'repriceOrder', orderNo, targetPriceMinor }); return { status: 'succeeded', externalRef: `reprice:${orderNo}`, cookieHeader: '' }; },
