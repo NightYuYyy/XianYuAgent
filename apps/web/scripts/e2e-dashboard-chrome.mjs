@@ -129,7 +129,7 @@ async function run() {
   await evaluate(cdp, `localStorage.setItem('xianyu.activeAccountId', ${JSON.stringify(accountId)})`);
   await cdp.send('Page.navigate', { url: `${webUrl}/dashboard` });
   await waitFor(async () => String(await evaluate(cdp, 'document.readyState')) === 'complete', 'dashboard page');
-  await waitFor(async () => String(await evaluate(cdp, 'document.body.innerText')).includes('订单与 AI 闭环趋势'), 'dashboard content');
+  await waitFor(async () => Boolean(await evaluate(cdp, 'Boolean(document.querySelector(".dashboard-trend-panel")) && document.body.innerText.includes("总销售额")')), 'dashboard content');
   const dashboardBody = String(await evaluate(cdp, 'document.body.innerText'));
   const dashboardRequests = cdp.events.filter((event) => event.method === 'Network.requestWillBeSent' && event.params?.request?.url?.includes('/api/v1/dashboard/snapshot'));
   if (dashboardRequests.length > 0) throw new Error('dashboard unexpectedly requested live snapshot API under explicit mock override');
@@ -157,7 +157,7 @@ async function run() {
   await evaluate(cdp, 'document.querySelector(".dashboard-desktop-content .dashboard-pending-manual-card .dashboard-icon-button").click()');
   await waitFor(async () => Boolean(await evaluate(cdp, 'Boolean(document.querySelector(".dashboard-desktop-content .dashboard-risk-popover"))')), 'pending manual risk popover');
   await assertText(cdp, '待处理风险');
-  await assertText(cdp, '考研英语资料缺少发货凭证');
+  await assertText(cdp, '考研英语资料付款后未发货');
   const desktopBadgeStyle = await evaluate(cdp, '(() => { const badge = document.querySelector(".dashboard-desktop-content .dashboard-pending-manual-card .dashboard-icon-button b"); if (!badge) return null; const style = getComputedStyle(badge); const rect = badge.getBoundingClientRect(); return { color: style.color, backgroundColor: style.backgroundColor, fontSize: style.fontSize, fontWeight: style.fontWeight, width: rect.width, height: rect.height, borderTopWidth: style.borderTopWidth }; })()');
   if (!desktopBadgeStyle || desktopBadgeStyle.color !== 'rgb(255, 255, 255)' || desktopBadgeStyle.backgroundColor !== 'rgb(192, 0, 0)' || desktopBadgeStyle.fontSize !== '12px' || Number(desktopBadgeStyle.width) < 16 || Number(desktopBadgeStyle.height) < 16 || desktopBadgeStyle.borderTopWidth !== '2px') throw new Error(`desktop unread badge contrast is insufficient: ${JSON.stringify(desktopBadgeStyle)}`);
   const desktopPopoverGeometry = await evaluate(cdp, '(() => { const bell = document.querySelector(".dashboard-desktop-content .dashboard-pending-manual-card .dashboard-icon-button"); const popover = document.querySelector(".dashboard-desktop-content .dashboard-risk-popover"); if (!bell || !popover) return null; const bellRect = bell.getBoundingClientRect(); const popoverRect = popover.getBoundingClientRect(); return { gap: popoverRect.top - bellRect.bottom, rightDelta: Math.abs(popoverRect.right - bellRect.right) }; })()');
@@ -188,7 +188,7 @@ async function run() {
   if (!mobilePopoverGeometry || mobilePopoverGeometry.gap > 10 || mobilePopoverGeometry.rightDelta > 12 || mobilePopoverGeometry.viewportRight > 390) throw new Error(`mobile risk popover is not anchored to bell: ${JSON.stringify(mobilePopoverGeometry)}`);
   await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
   await waitFor(async () => Boolean(await evaluate(cdp, '!document.querySelector(".dashboard-mobile-content .dashboard-risk-popover")')), 'mobile pending manual risk popover close');
-  const drawerTrigger = await evaluate(cdp, '(() => { const button = Array.from(document.querySelectorAll("button")).find((candidate) => candidate.textContent?.includes("考研英语资料缺少发货凭证")); if (!button) return false; button.click(); return true; })()');
+  const drawerTrigger = await evaluate(cdp, '(() => { const button = Array.from(document.querySelectorAll(".dashboard-mobile-task-row")).find((candidate) => candidate.textContent?.includes("考研英语资料付款后未发货")); if (!button) return false; button.click(); return true; })()');
   if (!drawerTrigger) throw new Error('risk todo trigger missing');
   await waitFor(async () => Boolean(await evaluate(cdp, 'Boolean(document.querySelector(".dashboard-risk-drawer"))')), 'risk todo drawer');
   await assertText(cdp, '付款后未发货');

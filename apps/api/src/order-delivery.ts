@@ -32,9 +32,12 @@ export class OrderDeliveryService {
 
   async preview(input: { adminId: string; accountId: string; orderNo: string; deliveryType?: OrderDeliveryType; couponBatchIds?: string[]; trackingRef?: string }): Promise<DeliveryPreview> {
     const order = await this.deps.orders.get({ adminId: input.adminId, orderNo: input.orderNo, accountId: input.accountId });
+    const account = await this.deps.store.getAccount(input.adminId, input.accountId);
     const deliveryType = input.deliveryType ?? order.deliveryType;
     const checks: DeliveryPreview['checks'] = [];
+    checks.push(account?.status === 'verification_required' || account?.status === 'expired' ? block('ACCOUNT_NOT_READY', '账号需要安全验证或重新登录') : pass('ACCOUNT_READY', '账号可用'));
     checks.push(order.paymentStatus === 'paid' ? pass('PAYMENT_PAID', '订单已支付') : block('PAYMENT_NOT_PAID', '订单尚未支付'));
+    checks.push(order.orderStatus === 'open' ? pass('ORDER_OPEN', '订单可交付') : block('ORDER_NOT_OPEN', '订单状态不可交付'));
     checks.push(['requested', 'refunding', 'refunded'].includes(order.afterSalesStatus) ? block('AFTER_SALES_BLOCKED', '订单处于售后或退款流程') : pass('AFTER_SALES_CLEAR', '订单无进行中的售后阻断'));
     checks.push(['delivered', 'cancelled'].includes(order.deliveryStatus) ? block('DELIVERY_STATE_INVALID', `订单当前交付状态为 ${order.deliveryStatus}，不可重复交付`) : pass('DELIVERY_STATE_READY', '订单处于可交付状态'));
     const couponBatchIds = [...new Set((input.couponBatchIds ?? await this.resolveCouponBatchIds(input.adminId, order)).map((value) => String(value).trim()).filter(Boolean))];
@@ -63,6 +66,12 @@ export class OrderDeliveryService {
     const preview = await this.preview(input);
     if (preview.state !== 'ready') throw new ServiceError(422, 'DELIVERY_NOT_READY', 'order delivery preview is blocked', { preview });
     const order = await this.deps.orders.get({ adminId: input.adminId, orderNo: input.orderNo, accountId: input.accountId });
+    if (order.source === 'xianyu') {
+      const live = await this.deps.execution.readOrder({ adminId: input.adminId, accountId: input.accountId, productId: order.productId, itemId: order.itemId, itemTitle: order.itemTitle, orderNo: order.orderNo });
+      if (!live || live.paymentStatus !== 'paid' || live.orderStatus !== 'open' || live.afterSalesStatus !== 'none' || live.deliveryStatus !== 'pending' || live.buyerId !== order.buyerId || live.itemId !== order.itemId) {
+        throw new ServiceError(409, 'DELIVERY_LIVE_ORDER_BLOCKED', 'platform order is not confirmed deliverable');
+      }
+    }
     const records = await this.deps.store.listDeliveryRecords(input.adminId, { accountId: input.accountId, orderNo: input.orderNo });
     const attempt = Math.max(0, ...records.map((record) => record.attempt)) + 1;
     const scope = `order-delivery:${input.adminId}:${input.accountId}`;
@@ -84,6 +93,7 @@ export class OrderDeliveryService {
         return { record: updatedRecord, order: updatedOrder, idempotent: false };
       }
       const status = external.status === 'unknown' ? 'unknown' : 'failed';
+      if (external.status === 'unknown') await this.deps.execution.markManualReview({ adminId: input.adminId, accountId: input.accountId, productId: order.productId, itemId: order.itemId, itemTitle: order.itemTitle, orderNo: order.orderNo, executionKey: `manual-delivery:${input.accountId}:${input.orderNo}`, reason: external.errorCode ?? 'DELIVERY_RESULT_UNKNOWN' });
       const updatedRecord = await this.deps.store.updateDeliveryRecord({ adminId: input.adminId, id: record.id, status, externalOutcome: external.status === 'unknown' ? 'unknown' : 'known_failure', externalRef: external.externalRef, couponItemId: external.couponItemId, failureCode: external.errorCode, failureMessage: external.message });
       await this.deps.store.updateOrderDelivery({ adminId: input.adminId, accountId: order.accountId, orderNo: order.orderNo, deliveryStatus: 'failed', deliveryFailReason: external.errorCode ?? external.message ?? 'DELIVERY_FAILED' });
       await this.deps.store.completeAutoReplyOutbox({ id: outbox.record.id, workerId, externalOutcome: external.status === 'unknown' ? 'unknown' : 'known_failure', externalMessageRef: external.externalRef });
@@ -93,9 +103,10 @@ export class OrderDeliveryService {
     } catch (error) {
       const code = error instanceof ServiceError ? error.code : 'DELIVERY_EXECUTION_FAILED';
       const message = error instanceof Error ? error.message : String(error);
-      await this.deps.store.updateDeliveryRecord({ adminId: input.adminId, id: record.id, status: 'failed', externalOutcome: 'known_failure', failureCode: code, failureMessage: message });
+      await this.deps.execution.markManualReview({ adminId: input.adminId, accountId: input.accountId, productId: order.productId, itemId: order.itemId, itemTitle: order.itemTitle, orderNo: order.orderNo, executionKey: `manual-delivery:${input.accountId}:${input.orderNo}`, reason: code });
+      await this.deps.store.updateDeliveryRecord({ adminId: input.adminId, id: record.id, status: 'unknown', externalOutcome: 'unknown', failureCode: code, failureMessage: message });
       await this.deps.store.updateOrderDelivery({ adminId: input.adminId, accountId: order.accountId, orderNo: order.orderNo, deliveryStatus: 'failed', deliveryFailReason: code });
-      await this.deps.store.retryAutoReplyOutbox({ id: outbox.record.id, workerId, errorCode: code, errorDigest: message.slice(0, 240), availableAt: new Date().toISOString() });
+      await this.deps.store.completeAutoReplyOutbox({ id: outbox.record.id, workerId, externalOutcome: 'unknown' });
       throw error;
     }
   }
@@ -113,7 +124,7 @@ export class OrderDeliveryService {
         if (!reconciled) throw new ServiceError(500, 'DELIVERY_RECORD_READBACK_FAILED', 'delivery record readback failed');
         return { record: reconciled, order: updatedOrder, idempotent: false };
       }
-      if (!snapshot || snapshot.deliveryStatus !== 'pending') throw new ServiceError(409, 'DELIVERY_EXTERNAL_STATE_UNKNOWN', '外部发货结果仍未知，需要人工恢复');
+      throw new ServiceError(409, 'DELIVERY_EXTERNAL_STATE_UNKNOWN', '外部发货结果仍未知，需要人工核对');
     }
     return this.deliver({ ...input, deliveryType: latest.deliveryType, trackingRef: latest.trackingRef, idempotencyKey: input.idempotencyKey });
   }

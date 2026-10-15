@@ -60,4 +60,12 @@ const refundedPage = mapXianyuOrderPage({
 }, 1, 30);
 assert.equal(refundedPage.items[0].afterSalesStatus, 'refunded');
 assert.equal(refundedPage.items[0].orderStatus, 'cancelled');
+for (const [status, payment, delivery] of [['1', 'unpaid', 'pending'], ['2', 'paid', 'pending'], ['3', 'paid', 'delivered'], ['4', 'paid', 'delivered']]) {
+  const numericPage = mapXianyuOrderPage({ data: { module: { items: [{
+    commonData: { orderId: `X-${status}`, itemId: 'item-numeric', orderStatus: status },
+    buyerInfoVO: { buyerId: 'buyer-numeric' },
+  }] } } });
+  assert.equal(numericPage.items[0].paymentStatus, payment);
+  assert.equal(numericPage.items[0].deliveryStatus, delivery);
+}
 console.log('xianyu order mapper smoke passed');

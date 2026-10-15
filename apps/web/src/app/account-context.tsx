@@ -6,12 +6,14 @@ const STORAGE_KEY = 'xianyu.activeAccountId';
 
 export interface AccountContextValue {
   accounts: AccountVM[];
+  riskNotifications: Array<{ id: string; accountId: string; eventType: 'verification_required' | 'verification_cleared'; createdAt: string }>;
+  acknowledgeRiskNotifications: () => Promise<void>;
   accountsLoading: boolean;
   accountsError: string | null;
   currentAccountId?: string;
   currentAccount?: AccountVM;
   setCurrentAccountId: (accountId?: string) => Promise<void>;
-  refreshAccounts: () => Promise<void>;
+  refreshAccounts: (silent?: boolean) => Promise<void>;
   removeAccount: (accountId: string) => Promise<void>;
 }
 
@@ -55,6 +57,7 @@ export function chooseFirstAvailableAccountId(accounts: AccountVM[], preferredAc
 
 export function AccountContextProvider({ api, children }: { api: AccountsApi; children: ReactNode }) {
   const [accounts, setAccounts] = useState<AccountVM[]>([]);
+  const [riskNotifications, setRiskNotifications] = useState<AccountContextValue['riskNotifications']>([]);
   const [accountsLoading, setAccountsLoading] = useState(true);
   const [accountsError, setAccountsError] = useState<string | null>(null);
   const [currentAccountId, setCurrentAccountIdState] = useState<string | undefined>(() => readCachedAccountId());
@@ -67,14 +70,15 @@ export function AccountContextProvider({ api, children }: { api: AccountsApi; ch
     writeCachedAccountId(accountId);
   }, []);
 
-  const refreshAccounts = useCallback(async () => {
+  const refreshAccounts = useCallback(async (silent = false) => {
     const currentRequest = ++requestId.current;
-    setAccountsLoading(true);
-    setAccountsError(null);
+    if (!silent) { setAccountsLoading(true); setAccountsError(null); }
     try {
-      const page = await api.list({ page: 1, pageSize: 100 });
+      const [page, notifications] = await Promise.all([api.list({ page: 1, pageSize: 100 }), api.listRiskNotifications()]);
       if (currentRequest !== requestId.current) return;
       setAccounts(page.items);
+      setRiskNotifications(notifications);
+      setAccountsError(null);
       const nextAccountId = chooseInitialAccountId(page.items, currentAccountIdRef.current);
       setCurrent(nextAccountId);
     } catch (error) {
@@ -86,6 +90,21 @@ export function AccountContextProvider({ api, children }: { api: AccountsApi; ch
   }, [api, setCurrent]);
 
   useEffect(() => { void refreshAccounts(); }, [refreshAccounts]);
+  useEffect(() => {
+    const timer = window.setInterval(() => { if (!document.hidden) void refreshAccounts(true); }, 3_000);
+    return () => window.clearInterval(timer);
+  }, [refreshAccounts]);
+  useEffect(() => {
+    const refreshVisible = () => { if (!document.hidden) void refreshAccounts(true); };
+    window.addEventListener('focus', refreshVisible);
+    document.addEventListener('visibilitychange', refreshVisible);
+    return () => { window.removeEventListener('focus', refreshVisible); document.removeEventListener('visibilitychange', refreshVisible); };
+  }, [refreshAccounts]);
+
+  const acknowledgeRiskNotifications = useCallback(async () => {
+    await Promise.all(riskNotifications.map((notification) => api.acknowledgeRiskNotification(notification.id)));
+    await refreshAccounts(true);
+  }, [api, refreshAccounts, riskNotifications]);
 
   const setCurrentAccountId = useCallback(async (accountId?: string) => {
     const previous = currentAccountIdRef.current;
@@ -113,6 +132,8 @@ export function AccountContextProvider({ api, children }: { api: AccountsApi; ch
 
   const value = useMemo<AccountContextValue>(() => ({
     accounts,
+    riskNotifications,
+    acknowledgeRiskNotifications,
     accountsLoading,
     accountsError,
     currentAccountId,
@@ -120,7 +141,7 @@ export function AccountContextProvider({ api, children }: { api: AccountsApi; ch
     setCurrentAccountId,
     refreshAccounts,
     removeAccount,
-  }), [accounts, accountsError, accountsLoading, currentAccountId, refreshAccounts, removeAccount, setCurrentAccountId]);
+  }), [accounts, riskNotifications, acknowledgeRiskNotifications, accountsError, accountsLoading, currentAccountId, refreshAccounts, removeAccount, setCurrentAccountId]);
 
   return <AccountContext.Provider value={value}>{children}</AccountContext.Provider>;
 }

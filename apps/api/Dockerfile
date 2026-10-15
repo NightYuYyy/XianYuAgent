@@ -26,11 +26,12 @@ COPY package*.json ./
 RUN npm install --omit=dev
 COPY --from=build /app/dist ./dist
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
-RUN chmod 755 ./docker-entrypoint.sh
+RUN sed -i 's/\r$//' ./docker-entrypoint.sh && chmod 755 ./docker-entrypoint.sh
 # Keep the idempotent migration runner and SQL files in the runtime image so
 # production deploys can migrate the existing PostgreSQL volume before the
 # API/Worker processes start serving new code.
 COPY scripts/migrate.mjs ./scripts/migrate.mjs
+COPY scripts/verify-delivery-cutover.mjs ./scripts/verify-delivery-cutover.mjs
 COPY migrations ./migrations
 ENTRYPOINT ["./docker-entrypoint.sh"]
 CMD ["node", "dist/index.js"]

@@ -19,7 +19,7 @@ import { OrdersPage } from '../features/orders/components/OrdersPage';
 import { createAutoReplyAgentSettingsApi, createCredentialApi, createOpenAISettingsApi } from '../features/settings/api';
 import { createModelProviderApi } from '../features/settings/model-provider-api';
 import { SettingsPage } from '../features/settings/components/SettingsPage';
-import { AccountContextProvider } from './account-context';
+import { AccountContextProvider, useAccountContext } from './account-context';
 import { navItems, pathForPage, type PageKey } from './navigation';
 import { createDashboardApi } from '../features/dashboard/api';
 import { createMockDashboardApi } from '../features/dashboard/api.mock';
@@ -118,6 +118,8 @@ export function AuthenticatedShell({ admin, onLogout = async () => undefined, lo
   const adminEmail = admin?.email ?? '—';
   const adminInitial = Array.from(adminName)[0] ?? '管';
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const accountContext = useAccountContext();
+  const riskAccounts = accountContext.accounts.filter((account) => account.status === 'verification_required');
 
   async function handleLogout() {
     setAccountMenuOpen(false);
@@ -159,6 +161,9 @@ export function AuthenticatedShell({ admin, onLogout = async () => undefined, lo
           <div className="sidebar-bottom"><div className="agent-card"><span className="online-dot" /> <strong>Agent Runtime</strong><small>独立服务 · 正常</small></div><div className="desktop-account-anchor"><button className="sidebar-user sidebar-account-trigger" type="button" data-testid="account-menu-trigger" aria-label="打开账户菜单" aria-expanded={accountMenuOpen} aria-haspopup="menu" onClick={() => setAccountMenuOpen((open) => !open)}><div className="avatar">{adminInitial}</div><div><strong>{adminName}</strong><span>{adminEmail}</span></div><ChevronIcon open={accountMenuOpen} /></button>{accountMenu}</div></div>
         </aside>
         <div className="desktop-body">
+          {accountContext.accountsError && <div className="account-risk-banner" role="alert"><strong>账号状态暂时未知</strong><span>账号状态刷新失败，请检查服务连接。</span><button type="button" onClick={() => void accountContext.refreshAccounts()}>重试</button></div>}
+          {!accountContext.accountsError && accountContext.riskNotifications.length > 0 && <div className="account-risk-banner" role="alert"><strong>{accountContext.riskNotifications.length} 条风控通知未读</strong><span>{accountContext.riskNotifications.some((item) => item.eventType === 'verification_required') ? '账号需要安全验证' : '账号验证状态已更新'}</span><button type="button" onClick={() => navigate('accounts')}>查看账号</button><button type="button" onClick={() => void accountContext.acknowledgeRiskNotifications()}>已知晓</button></div>}
+          {!accountContext.accountsError && riskAccounts.length > 0 && <div className="account-risk-banner" role="alert"><strong>{riskAccounts.length} 个闲鱼账号需要安全验证</strong><span>{riskAccounts.map((account) => account.displayName || account.sellerRef).join('、')}</span><button type="button" onClick={() => navigate('accounts')}>查看账号</button></div>}
           <main className={page === 'products' ? 'products-main' : page === 'accounts' ? 'accounts-main' : page === 'orders' ? 'orders-main' : page === 'settings' ? 'settings-main' : page === 'agent-dynamics' ? 'agent-dynamics-main-host' : undefined}>
             <div hidden={page !== 'messages'}>
               <MessagesPage api={messagesApi} active={page === 'messages'} />

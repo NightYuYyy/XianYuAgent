@@ -320,7 +320,7 @@ test('runs a named product automation cancellation through Workspace confirmatio
   assert.match(messages.at(-1)?.content ?? '', /商品自动化规则已落库/);
   assert.match(messages.at(-1)?.content ?? '', /规则明细/);
   const events = await store.listRunEvents(admin.id, created.run.id);
-  const completed = events.find((event) => event.eventType === 'workspace.command.completed');
+  const completed = events.find((event) => event.eventType === 'workspace.command.completed' && event.payload.messageType === 'final_answer');
   assert.equal(completed?.payload.messageType, 'final_answer');
   assert.match(String(completed?.payload.content ?? ''), /已重新读取保存记录/);
 });

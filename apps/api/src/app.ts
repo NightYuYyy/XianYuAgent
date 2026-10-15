@@ -47,6 +47,8 @@ import { ProductPublishService } from './product-publish.js';
 import { ProductKnowledgeBaseService } from './product-knowledge-base.js';
 import { classifyXianyuFailure } from './xianyu-account-health.js';
 import { PiSkillManager } from './pi-skills.js';
+import { PaymentEventWorker } from './payment-event-worker.js';
+import { extractTrustedOrderNo, isTrustedPaidEvent, trustedPaymentOccurredAt } from './payment-event-parser.js';
 
 export interface AppRuntime {
   config: AppConfig;
@@ -62,6 +64,7 @@ export interface AppRuntime {
   productAutomation: ProductAutomationService;
   productAutomationTrigger: ProductAutomationTrigger;
   productAutomationWorker: ProductAutomationWorker;
+  paymentEventWorker: PaymentEventWorker;
   productSync: ProductSyncService;
   credentials: CredentialService;
   apiKeyCredentials: ApiKeyCredentialService;
@@ -364,7 +367,12 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
     },
     onFailure: async ({ adminId, accountId, api, errorCode, message, accountInvalid }) => {
       console.warn(JSON.stringify({ component: 'xianyu-mtop', event: 'external_failure', adminId, accountId, api, errorCode, accountInvalid, message: message?.slice(0, 160) }));
-      await markXianyuAccountFailure(store, adminId, accountId, { errorCode, message, accountInvalid });
+      await markXianyuAccountFailure(store, adminId, accountId, { errorCode, message, accountInvalid, source: api });
+    },
+    onSuccess: async ({ adminId, accountId, api, startedAt }) => {
+      const account = await store.getAccount(adminId, accountId);
+      if (account?.riskEpisode) await store.clearAccountRisk({ adminId, accountId, episode: account.riskEpisode, source: api, startedAt });
+      if (account) await store.clearAccountDegraded({ adminId, accountId, source: api, startedAt });
     },
   });
   const productAudit = async (input: { actorId: string; action: string; targetRef?: string; requestId: string; traceId: string; payload: unknown; accountId?: string }) => {
@@ -388,7 +396,13 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
     const auditId = createId();
     await store.recordAudit({ id: auditId, actorType: 'admin', actorId: input.actorId, action: input.action, targetRef: input.targetRef, requestId: input.requestId, traceId: input.traceId, payloadDigest: digestJson(input.payload), accountId: input.accountId, createdAt: new Date().toISOString() });
     return auditId;
-  }, async (input) => productAutomationWorker.processOrderRefresh(input));
+  }, async (input) => {
+    for (const order of input.items) {
+      if (order.paymentStatus !== 'paid' || order.deliveryStatus === 'delivered') continue;
+      await store.enqueuePaymentEvent({ adminId: input.adminId, accountId: input.accountId, eventRef: `reconcile:${order.orderNo}`, orderNo: order.orderNo, buyerRef: order.buyerId, itemRef: order.itemId, conversationRef: '', receivedAt: new Date().toISOString() });
+    }
+    return productAutomationWorker.processOrderRefresh({ ...input, items: input.items.filter((item) => item.paymentStatus !== 'paid') });
+  });
   const orderDelivery = new OrderDeliveryService({
     store,
     orders,
@@ -400,13 +414,21 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
       return auditId;
     },
   });
+  const paymentEventWorker = new PaymentEventWorker(store, xianyu, (input) => productAutomationWorker.processOrderRefresh(input), {
+    workerId: `payment:${process.pid}:${createId()}`,
+    resolveDelaySeconds: async (adminId, order) => {
+      if (!order.productId) return 0;
+      const rule = (await productAutomation.get(adminId, order.productId)).config.paidAutoDelivery;
+      if (!rule.enabled) return 0;
+      const batches = await Promise.all(rule.couponBatchIds.map((id) => store.getCouponBatch(adminId, id)));
+      return batches.reduce((sum, batch) => sum + Math.max(0, Math.min(3600, Number(batch?.metadata?.delaySeconds ?? 0) || 0)), 0);
+    },
+    onError: (error) => console.error(JSON.stringify({ component: 'payment-event-worker', event: 'poll_failed', error: error instanceof Error ? error.message : String(error) })),
+  });
   xianyuIm = new XianyuImService(store, xianyu, messages, autoReply, productAutomationTrigger, verificationBrowser, async ({ adminId, accountId, event }) => {
-    await orders.refresh({
-      adminId,
-      accountId,
-      requestId: `xianyu:order-state:${event.externalMessageRef}`,
-      traceId: `xianyu:order-state:${event.externalMessageRef}`,
-    });
+    if (!isTrustedPaidEvent(event)) return;
+    await store.enqueuePaymentEvent({ adminId, accountId, eventRef: event.externalMessageRef, orderNo: extractTrustedOrderNo(event.raw), buyerRef: event.senderRef, itemRef: event.itemRef, conversationRef: event.externalConversationRef, receivedAt: trustedPaymentOccurredAt(event), observedAt: new Date().toISOString() });
+    void paymentEventWorker.pollOnce().catch((error) => console.error(JSON.stringify({ component: 'payment-event-worker', event: 'wake_failed', accountId, error: error instanceof Error ? error.message : String(error) })));
   });
 
   const workspaceCommands = new WorkspaceCommandOrchestrator({
@@ -455,7 +477,7 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
 
   const server = createServer((request, response) => { void handleRequest(runtime, request, response); });
   const runtime: AppRuntime = {
-    config, store, auth, accounts, coupons, orders, orderDelivery, products, productPublisher, productKnowledgeBase, productAutomation, productAutomationTrigger, productAutomationWorker, productSync, credentials, apiKeyCredentials, openaiSettings, modelProviderRuntime, dashboard, messages, autoReply, autoReplyRepair, autoReplyAgentSettings, autoReplyActivity, redisRealtime, workspace, piSkills, workspaceCommands, workspaceRuntime, qrLogin, xianyu, xianyuItemDetail, objectStorage, xianyuIm,
+    config, store, auth, accounts, coupons, orders, orderDelivery, products, productPublisher, productKnowledgeBase, productAutomation, productAutomationTrigger, productAutomationWorker, paymentEventWorker, productSync, credentials, apiKeyCredentials, openaiSettings, modelProviderRuntime, dashboard, messages, autoReply, autoReplyRepair, autoReplyAgentSettings, autoReplyActivity, redisRealtime, workspace, piSkills, workspaceCommands, workspaceRuntime, qrLogin, xianyu, xianyuItemDetail, objectStorage, xianyuIm,
     server,
     async listen() {
       await new Promise<void>((resolve) => runtime.server.listen(config.port, config.host, resolve));
@@ -512,7 +534,7 @@ async function startXianyuListenerBestEffort(runtime: AppRuntime, adminId: strin
       await runtime.xianyuIm.startListener(adminId, accountId);
       return;
     } catch (error) {
-      await markXianyuAccountFailure(runtime.store, adminId, accountId, { errorCode: listenerErrorCode(error), message: error instanceof Error ? error.message : String(error), accountInvalid: false });
+      await markXianyuAccountFailure(runtime.store, adminId, accountId, { errorCode: listenerErrorCode(error), message: error instanceof Error ? error.message : String(error), accountInvalid: false, source: 'im_listener' });
       const retryInMs = attempt < maxAttempts ? 100 * 2 ** (attempt - 1) : 0;
       console.warn(JSON.stringify({ component: 'xianyu-im-listener', event: 'start_failed', adminId, accountId, attempt, maxAttempts, retryInMs, errorCode: listenerErrorCode(error) }));
       if (retryInMs > 0) await delay(retryInMs);
@@ -520,24 +542,21 @@ async function startXianyuListenerBestEffort(runtime: AppRuntime, adminId: strin
   }
 }
 
-async function markXianyuAccountFailure(store: Store, adminId: string, accountId: string, input: { errorCode?: string; message?: string; accountInvalid: boolean }): Promise<void> {
-  try {
+async function markXianyuAccountFailure(store: Store, adminId: string, accountId: string, input: { errorCode?: string; message?: string; accountInvalid: boolean; source?: string }): Promise<void> {
     const account = await store.getAccount(adminId, accountId);
     if (!account || account.status === 'disabled') return;
     const classification = classifyXianyuFailure(input);
-    // A valid QR/Cookie login can still be blocked by a separate slider
-    // challenge during IM or product bootstrap. Keep the authenticated
-    // account state intact; the caller still exposes the verification error.
-    if (classification.kind === 'verification_required') return;
+    if (classification.kind === 'verification_required') {
+      await store.recordAccountRisk({ adminId, accountId, code: input.errorCode ?? 'ACCOUNT_VALIDATION_REQUIRED', source: input.source ?? 'xianyu' });
+      return;
+    }
     const status = classification.accountStatus!;
     if (classification.kind === 'reauth_required') {
       try { await store.markCredentialVerified({ adminId, accountId, status: 'expired' }); } catch { /* account status remains the primary signal */ }
     }
     if (account.status === 'expired' && status === 'degraded') return;
-    if (account.status !== status) await store.updateAccount(adminId, accountId, { status });
-  } catch {
-    // Status reporting is best-effort and must not mask the original Xianyu error.
-  }
+    if (status === 'degraded') await store.recordAccountDegraded({ adminId, accountId, source: input.source ?? 'xianyu' });
+    else if (account.status !== status) await store.updateAccount(adminId, accountId, { status });
 }
 
 export async function startRecoverableListenersBestEffort(runtime: AppRuntime, adminId: string): Promise<void> {
@@ -1223,6 +1242,13 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
     });
   }
 
+  if (ctx.path === '/api/v1/accounts/risk-notifications' && ctx.method === 'GET') {
+    return { statusCode: 200, body: success(ctx, { items: await store.listRiskNotifications(authContext.admin.id) }).body };
+  }
+  const riskNotificationMatch = ctx.path.match(/^\/api\/v1\/accounts\/risk-notifications\/([0-9a-f-]+)\/read$/i);
+  if (riskNotificationMatch && ctx.method === 'POST') {
+    return mutation(runtime, ctx, authContext, undefined, async () => success(ctx, { acknowledged: await store.acknowledgeRiskNotification(authContext.admin.id, riskNotificationMatch[1]) }));
+  }
   const accountMatch = ctx.path.match(/^\/api\/v1\/accounts\/([^/]+)(?:\/(scopes|connection|connection\/verify))?$/);
   if (ctx.path === '/api/v1/accounts' && ctx.method === 'GET') return { statusCode: 200, body: success(ctx, await accounts.list(authContext.admin.id, parseAccountListQuery(ctx.query))).body };
   if (ctx.path === '/api/v1/accounts' && ctx.method === 'POST') {
@@ -1784,21 +1810,23 @@ async function mutation(runtime: AppRuntime, ctx: RequestContext, authContext: A
 }
 function setSessionCookies(response: ServerResponse, csrfToken: string, sessionId: string, secure: boolean): void { setCookie(response, 'session_id', sessionId, { httpOnly: true, secure }); setCookie(response, 'csrf_token', csrfToken, { secure }); }
 
-function connectionView(account: { status: string; lastConnectedAt?: string }) {
-  const status = account.status === 'connected'
+function connectionView(account: { status: string; lastConnectedAt?: string; riskCode?: string; riskSource?: string; riskFirstSeenAt?: string; transportStatus?: string; transportSeenAt?: string }) {
+  const transportFresh = account.transportStatus === 'connected' && account.transportSeenAt !== undefined && Date.parse(account.transportSeenAt) > Date.now() - 15_000;
+  const status = transportFresh && !['verification_required', 'expired', 'disabled'].includes(account.status)
     ? 'online'
     : account.status === 'pending'
       ? 'connecting'
       : account.status === 'expired'
         ? 'expired'
-        : account.status === 'degraded'
+        : account.status === 'degraded' || account.status === 'verification_required'
           ? 'unknown'
           : 'offline';
   return {
     status,
     lastConnectedAt: account.lastConnectedAt,
-    failureCode: account.status === 'degraded' ? 'ADAPTER_UNKNOWN' : undefined,
-    failureMessage: account.status === 'degraded' ? '外部闲鱼连接结果未知，需要人工复核。' : undefined,
+    failureCode: account.status === 'verification_required' ? account.riskCode ?? 'ACCOUNT_VALIDATION_REQUIRED' : account.status === 'degraded' ? 'ADAPTER_UNKNOWN' : undefined,
+    failureMessage: account.status === 'verification_required' ? `闲鱼要求安全验证（${account.riskSource ?? '账号'}）` : account.status === 'degraded' ? '外部闲鱼连接结果未知，需要人工复核。' : undefined,
+    failureAt: account.riskFirstSeenAt,
   };
 }
 

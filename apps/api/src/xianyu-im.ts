@@ -200,17 +200,8 @@ export class XianyuImClient {
     }
   }
 
-  private notifyFailure(error: unknown): void {
-    try {
-      const result = this.onFailure?.(error);
-      if (result && typeof (result as PromiseLike<void>).then === 'function') {
-        void Promise.resolve(result).catch((callbackError) => {
-          console.warn(JSON.stringify({ component: 'xianyu-im-listener', event: 'failure_callback_failed', accountId: this.accountId, errorCode: eventErrorCode(callbackError) }));
-        });
-      }
-    } catch (callbackError) {
-      console.warn(JSON.stringify({ component: 'xianyu-im-listener', event: 'failure_callback_failed', accountId: this.accountId, errorCode: eventErrorCode(callbackError) }));
-    }
+  private async notifyFailure(error: unknown): Promise<void> {
+    await this.onFailure?.(error);
   }
 
   async connect(): Promise<void> {
@@ -284,8 +275,8 @@ export class XianyuImClient {
       { actualReceivers: [`${toId}@goofish`, `${this.myId}@goofish`] },
     ], { retryAfterReconnect: false });
     try { assertSendAccepted(response); } catch (error) {
-      this.notifyFailure(error);
       this.setStatus('failed');
+      await this.notifyFailure(error);
       throw error;
     }
     const body = asRecord(response.body);
@@ -315,8 +306,8 @@ export class XianyuImClient {
       { actualReceivers: [`${toId}@goofish`, `${this.myId}@goofish`] },
     ], { retryAfterReconnect: false });
     try { assertSendAccepted(response); } catch (error) {
-      this.notifyFailure(error);
       this.setStatus('failed');
+      await this.notifyFailure(error);
       throw error;
     }
     const body = asRecord(response.body);
@@ -367,10 +358,10 @@ export class XianyuImClient {
         try { this.sendRaw({ lwp: '/!', headers: { mid: createMid() } }); } catch { /* close handler exposes status */ }
       }, this.heartbeatIntervalMs);
     } catch (error) {
-      this.notifyFailure(error);
       this.setStatus('failed');
       await this.cleanupSocket();
       this.scheduleReconnect();
+      await this.notifyFailure(error);
       throw error;
     }
   }
@@ -411,7 +402,9 @@ export class XianyuImClient {
     });
     socket.on('error', (error: unknown) => {
       if (this.socket === socket && this._status === 'connecting') {
-        this.notifyFailure(error);
+        void this.notifyFailure(error).catch((callbackError) => {
+          console.warn(JSON.stringify({ component: 'xianyu-im-listener', event: 'failure_callback_failed', accountId: this.accountId, errorCode: eventErrorCode(callbackError) }));
+        });
         this.setStatus('failed');
       }
     });
@@ -495,8 +488,8 @@ export class XianyuImClient {
       const authRejected = error instanceof XianyuImRequestRejected && error.code === 401;
       const transientRejected = retryAfterReconnect && error instanceof XianyuImRequestRejected && error.code === 400;
       if (!authRejected && !transientRejected) {
-        this.notifyFailure(error);
         this.setStatus('failed');
+        await this.notifyFailure(error);
         throw error;
       }
       try {
@@ -506,8 +499,8 @@ export class XianyuImClient {
         const retryMid = createMid();
         return await this.sendAndWait(retryMid, { lwp, headers: { mid: retryMid }, body });
       } catch (retryError) {
-        this.notifyFailure(retryError);
         this.setStatus('failed');
+        await this.notifyFailure(retryError);
         throw retryError;
       }
     }

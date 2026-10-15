@@ -24,6 +24,7 @@ export class XianyuImService {
   private readonly verificationRetryAfter = new Map<string, number>();
   private readonly recoveryInFlight = new Map<string, Promise<void>>();
   private readonly credentialRefreshTimers = new Map<string, ReturnType<typeof setInterval>>();
+  private readonly transportHeartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
   private readonly credentialRefreshInFlight = new Map<string, Promise<void>>();
   private readonly identityCache = new Map<string, { buyerDisplayName?: string; buyerAvatarUrl?: string }>();
   private readonly inboundInboxWorker: InboundInboxWorker;
@@ -54,7 +55,7 @@ export class XianyuImService {
     let nextCursor: number | undefined;
     const maxPages = startCursor === undefined ? 20 : 1;
     for (let pageIndex = 0; pageIndex < maxPages; pageIndex += 1) {
-      const page = await this.withAccountFailure(adminId, accountId, () => client.listConversations(cursor, limit));
+      const page = await this.withAccountFailure(adminId, accountId, () => client.listConversations(cursor, limit), 'im_read');
       const items = Array.isArray(page.userConvs) ? page.userConvs : [];
       const parsedItems = items.map((item) => normalizeConversation(item, client.selfUserIds)).filter((item): item is NonNullable<ReturnType<typeof normalizeConversation>> => Boolean(item));
       // The conversation payload is not consistent across account/session
@@ -85,7 +86,7 @@ export class XianyuImService {
     const externalRef = conversation.externalConversationRef;
     if (!externalRef) throw new ServiceError(409, 'EXTERNAL_CONVERSATION_MISSING', 'conversation is not linked to xianyu');
     const client = await this.ensureClient(adminId, accountId);
-    const page = await this.withAccountFailure(adminId, accountId, () => client.listMessages(externalRef, startCursor, limit));
+    const page = await this.withAccountFailure(adminId, accountId, () => client.listMessages(externalRef, startCursor, limit), 'im_read');
     const models = Array.isArray(page.userMessageModels) ? page.userMessageModels : [];
     for (const item of [...models].reverse()) {
       const parsed = normalizeHistoryMessage(item, client.selfUserIds);
@@ -121,9 +122,9 @@ export class XianyuImService {
           .filter((message) => message.direction === 'inbound' && message.externalMessageRef)
           .map((message) => message.externalMessageRef!)
           .filter(Boolean);
-        await this.withAccountFailure(adminId, accountId, () => client.markRead(refs));
+        await this.withAccountFailure(adminId, accountId, () => client.markRead(refs), 'im_read');
       } catch (error) {
-        await this.markAccountFailure(adminId, accountId, error);
+        await this.markAccountFailure(adminId, accountId, error, 'im_read');
         // Local unread state is authoritative for the UI. A transient Xianyu
         // receipt failure must not leave the conversation badge stuck.
       }
@@ -138,8 +139,10 @@ export class XianyuImService {
     const externalRef = conversation.externalConversationRef;
     if (!externalRef) throw new ServiceError(409, 'EXTERNAL_CONVERSATION_MISSING', 'conversation is not linked to xianyu');
     let client = await this.ensureClient(adminId, accountId);
+    const startedAt = new Date().toISOString();
+    let sent: { externalMessageRef?: string };
     try {
-      return await this.withAccountFailure(adminId, accountId, () => client.sendText(externalRef, conversation.buyerRef, normalizedText, requestId));
+      sent = await this.withAccountFailure(adminId, accountId, () => client.sendText(externalRef, conversation.buyerRef, normalizedText, requestId));
     } catch (error) {
       if (!isRecoverableTextSendError(error)) throw error;
       await this.resetClient(adminId, accountId);
@@ -153,8 +156,10 @@ export class XianyuImService {
         await this.refreshCredential(adminId, account, credential);
       }
       client = await this.ensureClient(adminId, accountId, { forceCredentialRefresh: isValidationTextSendError(error) });
-      return this.withAccountFailure(adminId, accountId, () => client.sendText(externalRef, conversation.buyerRef, normalizedText, requestId));
+      sent = await this.withAccountFailure(adminId, accountId, () => client.sendText(externalRef, conversation.buyerRef, normalizedText, requestId));
     }
+    await this.clearImSendRisk(adminId, accountId, startedAt);
+    return sent;
   }
 
   async sendText(adminId: string, accountId: string, conversationId: string, text: string, requestId: string, traceId: string): Promise<unknown> {
@@ -191,7 +196,9 @@ export class XianyuImService {
     const client = await this.ensureClient(adminId, accountId);
     const upload = await this.mtop.uploadChatImage(adminId, accountId, file.filename, file.contentType, file.data);
     if (!upload.success || !upload.url) throw new ServiceError(upload.accountInvalid ? 401 : 502, upload.errorCode ?? 'IMAGE_UPLOAD_FAILED', upload.message ?? 'unable to upload image');
+    const startedAt = new Date().toISOString();
     const sent = await this.withAccountFailure(adminId, accountId, () => client.sendImage(externalRef, conversation.buyerRef, upload.url!, upload.width, upload.height, requestId));
+    await this.clearImSendRisk(adminId, accountId, startedAt);
     const created = await this.messages.createMessage({
       adminId,
       conversationId,
@@ -211,6 +218,8 @@ export class XianyuImService {
     await this.inboundInboxWakeInFlight;
     for (const timer of this.credentialRefreshTimers.values()) clearInterval(timer);
     this.credentialRefreshTimers.clear();
+    for (const timer of this.transportHeartbeatTimers.values()) clearInterval(timer);
+    this.transportHeartbeatTimers.clear();
     this.credentialRefreshInFlight.clear();
     const inFlight = [...this.clientInFlight.values()];
     this.clientInFlight.clear();
@@ -275,7 +284,7 @@ export class XianyuImService {
       if (!conversation.externalConversationRef) continue;
       const local = await this.store.listMessages(adminId, conversation.id, { limit: 1 });
       const latestLocalCreatedAt = local.items[local.items.length - 1]?.createdAt;
-      const page = await this.withAccountFailure(adminId, accountId, () => client.listMessages(conversation.externalConversationRef!, undefined, messageLimit));
+      const page = await this.withAccountFailure(adminId, accountId, () => client.listMessages(conversation.externalConversationRef!, undefined, messageLimit), 'im_read');
       const models = Array.isArray(page.userMessageModels) ? page.userMessageModels : [];
       for (const item of [...models].reverse()) {
         const parsed = normalizeHistoryMessage(item, client.selfUserIds);
@@ -297,6 +306,14 @@ export class XianyuImService {
           traceId: `xianyu:recovery:${parsed.externalMessageRef}`,
         });
         if (importedMessage.created) imported += 1;
+        if (parsed.direction === 'inbound' && parsed.platformSystemMessage && parseXianyuSystemMessageKind(parsed.bodyText) === 'paid_waiting_shipment' && this.refreshOrdersForTrustedOrderEvent) {
+          await this.refreshOrdersForTrustedOrderEvent({ adminId, accountId, event: {
+            accountId, externalConversationRef: conversation.externalConversationRef, externalMessageRef: parsed.externalMessageRef,
+            senderRef: parsed.senderRef ?? conversation.buyerRef, itemRef: parsed.itemRef ?? conversation.itemRef,
+            direction: 'inbound', bodyType: 'system', bodyText: parsed.bodyText, platformSystemMessage: true,
+            occurredAt: parsed.createdAt, raw: record(item),
+          } });
+        }
         if (!this.autoReply || parsed.direction !== 'inbound' || !['text', 'image'].includes(classified.bodyType)) continue;
         if (latestLocalCreatedAt && parsed.createdAt < latestLocalCreatedAt) continue;
         const inbox = await this.store.enqueueInboundInbox({
@@ -319,6 +336,7 @@ export class XianyuImService {
     const client = this.clients.get(key);
     if (!client) return;
     this.clients.delete(key);
+    this.stopTransportHeartbeat(key);
     await client.disconnect();
   }
 
@@ -340,7 +358,7 @@ export class XianyuImService {
     const existing = this.clients.get(key);
     if (existing) {
       try { await existing.connect(); return existing; } catch (error) {
-        await this.markAccountFailure(adminId, accountId, error);
+        await this.markAccountFailure(adminId, accountId, error, 'im_listener');
         if (this.clients.get(key) === existing) this.clients.delete(key);
         // Existing clients can schedule their own reconnect timer before
         // connect() rejects. Stop that timer before dropping the reference;
@@ -358,6 +376,7 @@ export class XianyuImService {
         let credential = await this.store.getCredential(adminId, accountId);
         if (!credential?.cookieHeader) throw new ServiceError(409, 'CREDENTIAL_MISSING', 'account credential is missing');
         if (!credential.accessToken) credential = await this.refreshCredential(adminId, account, credential);
+        let connectionAttemptStartedAt = new Date().toISOString();
         const client = new XianyuImClient({
           accountId,
           credential: toImCredential(credential),
@@ -368,12 +387,21 @@ export class XianyuImService {
             return toImCredential(await this.refreshCredential(adminId, account, current));
           },
           onStatusChange: async (status) => {
+            if (status === 'connecting' || status === 'reconnecting') connectionAttemptStartedAt = new Date().toISOString();
+            const transport = status === 'connected' ? 'connected' : status === 'connecting' || status === 'reconnecting' ? 'connecting' : status === 'failed' ? 'failed' : 'disconnected';
+            if (transport !== 'connected') this.stopTransportHeartbeat(key);
+            await this.store.setAccountTransport({ adminId, accountId, status: transport });
             if (status === 'connected') {
-              await this.store.updateAccount(adminId, accountId, { status: 'connected', lastConnectedAt: new Date().toISOString() });
+              const accountWithRisk = await this.store.getAccount(adminId, accountId);
+              if (accountWithRisk?.riskEpisode) {
+                for (const source of ['im_listener', 'xianyu']) await this.store.clearAccountRisk({ adminId, accountId, episode: accountWithRisk.riskEpisode, source, startedAt: connectionAttemptStartedAt });
+              }
+              await this.store.clearAccountDegraded({ adminId, accountId, source: 'im_listener', startedAt: connectionAttemptStartedAt });
+              this.startTransportHeartbeat(key, adminId, accountId, client);
               this.scheduleRecentMessageRecovery(adminId, accountId);
             }
           },
-          onFailure: async (error) => { await this.markAccountFailure(adminId, accountId, error); },
+          onFailure: async (error) => { await this.markAccountFailure(adminId, accountId, error, 'im_listener'); },
           onEvent: async (event) => {
             await this.handleExternalEvent(adminId, event, { deferAutoReply: true });
             // The dedicated worker remains the durable primary path. Wake a
@@ -396,7 +424,7 @@ export class XianyuImService {
         this.clients.set(key, client);
         return client;
       } catch (error) {
-        await this.markAccountFailure(adminId, accountId, error);
+        await this.markAccountFailure(adminId, accountId, error, 'im_listener');
         throw error;
       }
     })();
@@ -514,22 +542,20 @@ export class XianyuImService {
     return task;
   }
 
-  private async markAccountFailure(adminId: string, accountId: string, error: unknown): Promise<void> {
-    try {
+  private async markAccountFailure(adminId: string, accountId: string, error: unknown, source = 'im'): Promise<void> {
       const account = await this.store.getAccount(adminId, accountId);
       if (!account || account.status === 'disabled') return;
       const code = error instanceof ServiceError ? error.code : (error as { code?: unknown } | null)?.code;
       const normalizedCode = typeof code === 'string' ? code : error instanceof Error ? error.message : String(error);
       const classification = classifyXianyuFailure({ errorCode: normalizedCode });
-      // Slider validation is an external challenge, not proof that the QR
-      // login cookie is invalid. Preserve the authenticated account state.
-      if (classification.kind === 'verification_required') return;
+      if (classification.kind === 'verification_required') {
+        await this.store.recordAccountRisk({ adminId, accountId, code: normalizedCode.slice(0, 120), source });
+        return;
+      }
       const status = classification.accountStatus!;
       if (account.status === 'expired' && status === 'degraded') return;
-      if (account.status !== status) await this.store.updateAccount(adminId, accountId, { status });
-    } catch {
-      // Account-state persistence must never hide the original Xianyu failure.
-    }
+      if (status === 'degraded') await this.store.recordAccountDegraded({ adminId, accountId, source });
+      else if (account.status !== status) await this.store.updateAccount(adminId, accountId, { status });
   }
 
   private scheduleRecentMessageRecovery(adminId: string, accountId: string): void {
@@ -555,13 +581,45 @@ export class XianyuImService {
     this.recoveryInFlight.set(key, task);
   }
 
-  private async withAccountFailure<T>(adminId: string, accountId: string, operation: () => Promise<T>): Promise<T> {
+  private async withAccountFailure<T>(adminId: string, accountId: string, operation: () => Promise<T>, source = 'im'): Promise<T> {
+    const startedAt = new Date().toISOString();
     try {
-      return await operation();
+      const result = await operation();
+      if (source === 'im_read') {
+        const account = await this.store.getAccount(adminId, accountId);
+        if (account?.riskEpisode) await this.store.clearAccountRisk({ adminId, accountId, episode: account.riskEpisode, source, startedAt });
+        if (account) await this.store.clearAccountDegraded({ adminId, accountId, source, startedAt });
+      }
+      return result;
     } catch (error) {
-      await this.markAccountFailure(adminId, accountId, error);
+      await this.markAccountFailure(adminId, accountId, error, source);
       throw error;
     }
+  }
+
+  private async clearImSendRisk(adminId: string, accountId: string, startedAt: string): Promise<void> {
+    const account = await this.store.getAccount(adminId, accountId);
+    if (account?.riskEpisode) {
+      await this.store.clearAccountRisk({ adminId, accountId, episode: account.riskEpisode, source: 'im', startedAt });
+    }
+    if (account) await this.store.clearAccountDegraded({ adminId, accountId, source: 'im', startedAt });
+  }
+
+  private startTransportHeartbeat(key: string, adminId: string, accountId: string, client: XianyuImClient): void {
+    this.stopTransportHeartbeat(key);
+    const timer = setInterval(() => {
+      if (!client.connected) { this.stopTransportHeartbeat(key); return; }
+      void this.store.setAccountTransport({ adminId, accountId, status: 'connected' }).catch((error) => {
+        console.error(JSON.stringify({ component: 'xianyu-im-listener', event: 'transport_heartbeat_failed', accountId, errorCode: recoveryErrorCode(error) }));
+      });
+    }, 5_000);
+    this.transportHeartbeatTimers.set(key, timer);
+  }
+
+  private stopTransportHeartbeat(key: string): void {
+    const timer = this.transportHeartbeatTimers.get(key);
+    if (timer) clearInterval(timer);
+    this.transportHeartbeatTimers.delete(key);
   }
 
   private async saveCredential(adminId: string, account: AccountRecord, credential: XianyuImCredential): Promise<void> {
@@ -629,11 +687,7 @@ export class XianyuImService {
     let effectiveEvent = reconcileMessageDirection(event, selfUserIds, conversation?.buyerRef);
     const trustedOrderEventKind = trustedOrderRefreshKind(effectiveEvent);
     if (trustedOrderEventKind && this.refreshOrdersForTrustedOrderEvent) {
-      try {
-        await this.refreshOrdersForTrustedOrderEvent({ adminId, accountId: event.accountId, event: effectiveEvent });
-      } catch (error) {
-        console.warn(JSON.stringify({ component: 'xianyu-im', event: 'trusted_order_refresh_failed', orderEventKind: trustedOrderEventKind, adminId, accountId: event.accountId, externalMessageRef: event.externalMessageRef, error: error instanceof Error ? error.message : String(error) }));
-      }
+      await this.refreshOrdersForTrustedOrderEvent({ adminId, accountId: event.accountId, event: effectiveEvent });
     }
     const classified = await this.classifySystemCandidate(adminId, event.accountId, conversation?.id, effectiveEvent);
     effectiveEvent = { ...effectiveEvent, bodyType: classified.bodyType, riskFlags: classified.riskFlags };

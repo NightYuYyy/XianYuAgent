@@ -209,10 +209,14 @@ export class ProductAutomationTrigger {
             itemTitle: order.itemTitle,
             orderNo: order.orderNo,
           });
-          if (authoritative) effectiveOrder = { ...order, ...authoritative };
-        } catch {
-          // Keep the synced snapshot when the live detail is temporarily unavailable.
+          if (!authoritative) return this.finish(trigger, order.orderNo, { trigger, orderNo: order.orderNo, status: 'manual_review', reason: 'AUTHORITATIVE_ORDER_UNAVAILABLE' }, adminId, order.accountId, requestId, traceId);
+          effectiveOrder = authoritative;
+        } catch (error) {
+          return this.finish(trigger, order.orderNo, { trigger, orderNo: order.orderNo, status: 'manual_review', reason: `AUTHORITATIVE_ORDER_FAILED:${errorCode(error)}` }, adminId, order.accountId, requestId, traceId);
         }
+      }
+      if (trigger === 'payment_paid' && ruleEnabled(config, trigger) && (effectiveOrder.paymentStatus !== 'paid' || effectiveOrder.orderStatus !== 'open' || effectiveOrder.afterSalesStatus !== 'none' || effectiveOrder.deliveryStatus === 'delivered' || effectiveOrder.deliveryStatus === 'cancelled')) {
+        return this.finish(trigger, order.orderNo, { trigger, orderNo: order.orderNo, status: 'manual_review', reason: 'ORDER_NOT_DELIVERABLE' }, adminId, order.accountId, requestId, traceId);
       }
       const result = trigger === 'payment_paid'
         ? await this.workflow.handlePaymentPaid({ adminId, config, order: effectiveOrder, eventId: eventId ?? `order-refresh:${order.orderNo}:${order.updatedAt}` })

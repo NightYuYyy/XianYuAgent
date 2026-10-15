@@ -40,7 +40,7 @@ export function AccountTable({ accounts, activeAccountId, page, total, totalPage
                 <small>{account.remark || account.sellerRef}</small>
               </span>
             </div>
-            <span role="cell"><AccountStatusBadge status={account.status} /></span>
+            <span role="cell"><AccountStatusBadge status={account.status} />{account.status === 'verification_required' && <small title={account.riskSource}>{account.riskCode ?? '闲鱼安全验证'}{account.riskFirstSeenAt ? ` · ${formatUpdatedAt(account.riskFirstSeenAt)}` : ''}</small>}</span>
             <span role="cell"><AccountConnectionBadge status={account.connection.status} /></span>
             <span role="cell"><span className={account.aiEnabled ? 'accounts-domain-enabled' : 'accounts-domain-muted'}>{account.aiEnabled ? '已启用' : '未启用'}</span></span>
             <span role="cell"><AccountCredentialBadge state={account.credentialState} /></span>

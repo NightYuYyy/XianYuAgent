@@ -72,7 +72,7 @@ export class AccountService {
     const pageSize = query.pageSize ?? 20;
     if (!Number.isInteger(page) || page < 1) throw new ServiceError(422, 'VALIDATION_FAILED', 'page must be a positive integer');
     if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new ServiceError(422, 'VALIDATION_FAILED', 'pageSize must be between 1 and 100');
-    if (query.status && !['pending', 'connected', 'degraded', 'disconnected', 'expired', 'disabled'].includes(query.status)) throw new ServiceError(422, 'VALIDATION_FAILED', 'invalid account status');
+    if (query.status && !['pending', 'connected', 'degraded', 'disconnected', 'expired', 'verification_required', 'disabled'].includes(query.status)) throw new ServiceError(422, 'VALIDATION_FAILED', 'invalid account status');
     if (query.connectionStatus && !['online', 'offline', 'connecting', 'expired', 'unknown'].includes(query.connectionStatus)) throw new ServiceError(422, 'VALIDATION_FAILED', 'invalid account connection status');
     return this.store.listAccounts(adminId, { ...query, search: query.search?.trim() || undefined, page, pageSize });
   }
@@ -545,7 +545,7 @@ export class CredentialService {
     if (!cookieHeader && !accessToken && !deviceId && Object.keys(metadata).length === 0) throw new ServiceError(422, 'VALIDATION_FAILED', 'at least one credential field is required');
     if (input.expiresAt && !Number.isFinite(Date.parse(input.expiresAt))) throw new ServiceError(422, 'VALIDATION_FAILED', 'expiresAt must be an ISO timestamp');
     const credential = await this.store.upsertCredential({ adminId: input.adminId, accountId: input.accountId, platform: account.platform, cookieHeader, accessToken, deviceId, metadata, expiresAt: input.expiresAt ?? current?.expiresAt });
-    await this.store.updateAccount(input.adminId, input.accountId, { status: 'connected', lastConnectedAt: new Date().toISOString() });
+    // Saving a Cookie is not proof that a platform verification challenge cleared.
     await this.audit({ actorId: input.adminId, action: current ? 'account.credential.updated' : 'account.credential.created', targetRef: credential.id, requestId: input.requestId, traceId: input.traceId, payload: { fields: Object.keys({ cookieHeader: input.cookieHeader, accessToken: input.accessToken, deviceId: input.deviceId, metadata: input.metadata, expiresAt: input.expiresAt }).filter((key) => input[key as keyof typeof input] !== undefined) }, accountId: input.accountId });
     return credential;
   }

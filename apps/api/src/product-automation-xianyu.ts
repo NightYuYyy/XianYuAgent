@@ -51,19 +51,31 @@ export class XianyuProductAutomationExecutionAdapter implements ProductAutomatio
     const formBatch = usableBatches.find((batch) => batch.metadata?.useNoLogisticsForm === true);
     const noLogisticsForm = input.purpose === 'delivery' && Boolean(formBatch);
     const tradeText = noLogisticsForm ? formBatch?.metadata?.textContent?.trim() : undefined;
+    if (input.purpose === 'delivery' && input.orderNo) {
+      await this.store.saveDeliveryConfirmation({ adminId, accountId: input.accountId, orderNo: input.orderNo, executionKey: input.executionKey, noLogisticsForm, tradeText });
+    }
     await this.recordAudit({ adminId, action: 'product.automation.coupon.reserved', accountId: input.accountId, executionKey: input.executionKey, payload: { reservationId: reservation.reservationId, quantity: reservation.quantity, purpose: input.purpose, batchIds: usableBatches.map((batch) => batch.id), noLogisticsForm } });
     return { reservationId: reservation.reservationId, quantity: reservation.quantity, noLogisticsForm, tradeText };
   }
 
   async sendCoupon(input: Parameters<AutomationExecutionPort['sendCoupon']>[0]): Promise<AutomationExternalResult> {
     const adminId = requireAdminId(input.adminId);
+    let sentAtLeastOne = false;
     const reservation = await this.store.getCouponReservation({ adminId, reservationId: input.reservationId, executionKey: input.executionKey });
     if (!reservation) return failedExternal('COUPON_RESERVATION_NOT_FOUND', 'coupon reservation not found');
     if (reservation.status === 'committed') return { status: 'succeeded', externalRef: `coupon-reservation:${reservation.reservationId}` };
     if (reservation.status !== 'reserved') return failedExternal('COUPON_RESERVATION_NOT_ACTIVE', 'coupon reservation is not active');
+    if (input.purpose === 'delivery' && !await this.store.bindDeliveryReservation({ adminId, accountId: input.accountId, orderNo: input.orderNo, reservationId: input.reservationId, executionKey: input.executionKey })) {
+      return unknownExternal('DELIVERY_RESERVATION_FENCE_FAILED', 'reservation expired or order send is already fenced');
+    }
 
     const order = await this.loadScopedOrder(adminId, input.accountId, input.orderNo, input.productId, input.itemId);
     if (!order) return failedExternal('ORDER_NOT_FOUND', 'order or product scope not found');
+    if (input.purpose === 'delivery') {
+      const live = await this.readOrder({ adminId, accountId: input.accountId, orderNo: input.orderNo, productId: input.productId, itemId: input.itemId, itemTitle: input.itemTitle });
+      if (!live) return unknownExternal('AUTHORITATIVE_ORDER_UNAVAILABLE', 'platform order facts are unavailable before send');
+      if (live.paymentStatus !== 'paid' || live.orderStatus !== 'open' || live.deliveryStatus !== 'pending' || live.afterSalesStatus !== 'none') return failedExternal('ORDER_NOT_DELIVERABLE', 'platform order is not deliverable');
+    }
     try {
       const batches = await Promise.all(reservation.batchIds.map((batchId) => this.store.getCouponBatch(adminId, batchId)));
       const noLogisticsBatchIds: string[] = [];
@@ -75,7 +87,7 @@ export class XianyuProductAutomationExecutionAdapter implements ProductAutomatio
         if (useNoLogisticsForm && (batch.purpose !== 'text' || !batch.metadata?.textContent?.trim())) return failedExternal('NO_LOGISTICS_FORM_INVALID', 'no logistics form requires fixed text content');
         if (useNoLogisticsForm) {
           noLogisticsBatchIds.push(batch.id);
-          await waitForDelay(Number(batch.metadata?.delaySeconds ?? 0));
+          if (input.purpose !== 'delivery') await waitForDelay(Number(batch.metadata?.delaySeconds ?? 0));
         } else {
           deliverableItems.push({ item, batch });
         }
@@ -109,29 +121,49 @@ export class XianyuProductAutomationExecutionAdapter implements ProductAutomatio
       for (const { item, batch } of deliverableItems) {
         const imageUrls = this.couponAssets?.imageUrls(batch) ?? batch.metadata?.imageUrls ?? [];
         const resolved = await resolveCouponDelivery({ ...batch, metadata: { ...(batch.metadata ?? {}), imageUrls } }, item, context, input.purpose);
-        await waitForDelay(resolved.delaySeconds);
+        if (input.purpose !== 'delivery') await waitForDelay(resolved.delaySeconds);
         let imageIndex = 0;
         for (const imageUrl of resolved.imageUrls) {
           const file = await this.resolveImage(adminId, batch.id, imageUrl);
-          const requestId = `automation:${input.executionKey}:batch:${batch.id}:image:${imageIndex}`;
-          const sent = await sendImageWithReconnectRetry(im, adminId, input.accountId, order.conversationId, file, requestId) as { externalMessageRef?: string };
-          externalMessageRef = sent.externalMessageRef ?? externalMessageRef;
+          const stepKey = `${item.itemId}:image:${imageIndex}`;
+          const requestId = `automation:${input.executionKey}:${stepKey}`;
+          if (input.purpose === 'delivery') {
+            const result = await this.sendCheckedDeliveryStep({ adminId, accountId: input.accountId, orderNo: input.orderNo, executionKey: input.executionKey, stepKey }, () => im.sendImage(adminId, input.accountId, order.conversationId!, file, requestId, requestId));
+            if (result.status !== 'succeeded') return result;
+            sentAtLeastOne = true;
+            externalMessageRef = result.externalRef ?? externalMessageRef;
+          } else {
+            const sent = await sendImageWithReconnectRetry(im, adminId, input.accountId, order.conversationId, file, requestId) as { externalMessageRef?: string };
+            externalMessageRef = sent.externalMessageRef ?? externalMessageRef;
+          }
           imageIndex += 1;
         }
         if (resolved.text) {
           let textIndex = 0;
           for (const message of splitMessages(resolved.text)) {
-            const requestId = `automation:${input.executionKey}:batch:${batch.id}:text:${textIndex}`;
-            const sent = await sendTextWithReconnectRetry(im, adminId, input.accountId, order.conversationId, message, requestId) as { externalMessageRef?: string };
-            externalMessageRef = sent.externalMessageRef ?? externalMessageRef;
+            const stepKey = `${item.itemId}:text:${textIndex}`;
+            const requestId = `automation:${input.executionKey}:${stepKey}`;
+            if (input.purpose === 'delivery') {
+              const result = await this.sendCheckedDeliveryStep({ adminId, accountId: input.accountId, orderNo: input.orderNo, executionKey: input.executionKey, stepKey }, () => im.sendText(adminId, input.accountId, order.conversationId!, message, requestId, requestId));
+              if (result.status !== 'succeeded') return result;
+              sentAtLeastOne = true;
+              externalMessageRef = result.externalRef ?? externalMessageRef;
+            } else {
+              const sent = await sendTextWithReconnectRetry(im, adminId, input.accountId, order.conversationId, message, requestId) as { externalMessageRef?: string };
+              externalMessageRef = sent.externalMessageRef ?? externalMessageRef;
+            }
             textIndex += 1;
           }
         }
       }
-      if (!externalMessageRef) return failedExternal('COUPON_CONTENT_EMPTY', 'coupon reservation has no deliverable content');
+      if (!externalMessageRef) return sentAtLeastOne ? unknownExternal('COUPON_SEND_ACK_MISSING', 'message may have been sent without an acknowledgement') : failedExternal('COUPON_CONTENT_EMPTY', 'coupon reservation has no deliverable content');
       await this.recordAudit({ adminId, action: 'product.automation.coupon.sent', accountId: input.accountId, orderNo: input.orderNo, executionKey: input.executionKey, payload: { reservationId: reservation.reservationId, externalMessageRef } });
       return { status: 'succeeded', externalRef: externalMessageRef };
     } catch (error) {
+      if (input.purpose === 'delivery' && sentAtLeastOne) {
+        await this.store.quarantineCouponReservation({ adminId, executionKey: input.executionKey, reason: 'DELIVERY_PARTIAL_RESULT_UNKNOWN' });
+        return unknownExternal('DELIVERY_PARTIAL_RESULT_UNKNOWN', error instanceof Error ? error.message : 'partial delivery outcome unknown');
+      }
       return classifyExternalError(error, 'coupon_send');
     }
   }
@@ -151,16 +183,26 @@ export class XianyuProductAutomationExecutionAdapter implements ProductAutomatio
   async confirmShipment(input: Parameters<AutomationExecutionPort['confirmShipment']>[0]): Promise<AutomationExternalResult> {
     const adminId = requireAdminId(input.adminId);
     if (!await this.loadScopedOrder(adminId, input.accountId, input.orderNo, input.productId, input.itemId)) return failedExternal('ORDER_SCOPE_MISMATCH', 'order or product scope does not match');
-    const detail = await this.getMtop().readOrderDetail(adminId, input.accountId, input.orderNo);
-    // The reference implementation calls the remote Consign mutation directly.
-    // A missing or incomplete detail snapshot must not prevent the real shipment
-    // API from running; the mutation itself is idempotent and returns
-    // ORDER_ALREADY_DELIVERY when the platform has already shipped the order.
-    if (detail.success && detail.detail && isDelivered(detail.detail)) return this.persistDeliveredOrder(adminId, input, input.orderNo);
-    const result = await this.getMtop().confirmShipment(adminId, input.accountId, input.orderNo, input.noLogisticsForm ? input.tradeText ?? '' : '');
+    const snapshot = await this.readOrder(input);
+    if (!snapshot) return unknownExternal('AUTHORITATIVE_ORDER_UNAVAILABLE', 'order facts are incomplete');
+    if (snapshot.deliveryStatus === 'delivered') return this.persistDeliveredOrder(adminId, input, input.orderNo);
+    if (snapshot.paymentStatus !== 'paid' || snapshot.orderStatus !== 'open' || snapshot.afterSalesStatus !== 'none' || snapshot.deliveryStatus !== 'pending') return failedExternal('ORDER_NOT_DELIVERABLE', 'order is not eligible for shipment');
+    const confirmation = await this.store.getDeliveryConfirmation({ adminId, accountId: input.accountId, orderNo: input.orderNo, executionKey: input.executionKey });
+    if (!confirmation && input.executionKey.startsWith('paid_auto_delivery:')) return unknownExternal('DELIVERY_CONFIRMATION_SNAPSHOT_MISSING', 'delivery confirmation parameters require manual review');
+    const step = { adminId, accountId: input.accountId, orderNo: input.orderNo, executionKey: input.executionKey, stepKey: 'shipment' };
+    const claim = await this.store.beginDeliverySendStep(step);
+    if (claim.status === 'blocked') return unknownExternal('SHIPMENT_RESULT_UNKNOWN', 'shipment requires manual reconciliation');
+    if (claim.status === 'succeeded') return this.persistDeliveredOrder(adminId, input, claim.externalRef ?? input.orderNo);
+    const noLogisticsForm = confirmation?.noLogisticsForm ?? input.noLogisticsForm;
+    const tradeText = confirmation?.tradeText ?? input.tradeText;
+    const result = await this.getMtop().confirmShipment(adminId, input.accountId, input.orderNo, noLogisticsForm ? tradeText ?? '' : '');
     const mapped = mapMutationResult(result);
-    if (mapped.status === 'succeeded') return this.persistDeliveredOrder(adminId, input, mapped.externalRef ?? input.orderNo);
-    if (mapped.status === 'failed' && isAlreadyDeliveredResult(mapped)) return this.persistDeliveredOrder(adminId, input, mapped.externalRef ?? input.orderNo);
+    if (mapped.status === 'succeeded' || (mapped.status === 'failed' && isAlreadyDeliveredResult(mapped))) {
+      const completed = await this.store.completeDeliverySendStep({ ...step, externalRef: mapped.externalRef ?? input.orderNo });
+      if (!completed) return unknownExternal('SHIPMENT_CHECKPOINT_FAILED', 'shipment succeeded but checkpoint failed');
+      return this.persistDeliveredOrder(adminId, input, mapped.externalRef ?? input.orderNo);
+    }
+    await this.store.markDeliverySendUnknown(step);
     return mapped;
   }
 
@@ -216,15 +258,45 @@ export class XianyuProductAutomationExecutionAdapter implements ProductAutomatio
     const adminId = requireAdminId(input.adminId);
     const local = await this.store.getOrder(adminId, input.orderNo, input.accountId);
     if (!local) return undefined;
+    const page = await this.getMtop().fetchOrderCandidates(adminId, input.accountId, input.orderNo);
+    if (!page.success) return undefined;
+    const matching = page.items.filter((item) => item.orderNo === input.orderNo);
+    if (matching.length !== 1) return undefined;
+    const listed = matching[0]!;
+    if (listed.buyerId === 'unknown-buyer' || listed.itemId === 'unknown-item' || listed.buyerId !== local.buyerId || listed.itemId !== local.itemId) return undefined;
     const detail = await this.getMtop().readOrderDetail(adminId, input.accountId, input.orderNo);
     if (!detail.success || !detail.detail) return undefined;
-    if (!normalizePaymentStatus(detail.detail.paymentStatus, detail.detail.orderStatus) || !normalizeDeliveryStatus(detail.detail.deliveryStatus)) return undefined;
-    return mergeOrderSnapshot(local, detail.detail);
+    const detailPayment = normalizePaymentStatus(detail.detail.paymentStatus, detail.detail.orderStatus);
+    const detailDelivery = normalizeDeliveryStatus(detail.detail.deliveryStatus);
+    if (!detailPayment || !detailDelivery || detailPayment !== listed.paymentStatus || detailDelivery !== listed.deliveryStatus) return undefined;
+    if (detail.detail.buyerId && detail.detail.buyerId !== listed.buyerId) return undefined;
+    if (detail.detail.itemId && detail.detail.itemId !== listed.itemId) return undefined;
+    return { ...mergeOrderSnapshot(local, detail.detail), paymentStatus: listed.paymentStatus, orderStatus: listed.orderStatus, deliveryStatus: listed.deliveryStatus, afterSalesStatus: listed.afterSalesStatus, buyerId: listed.buyerId, itemId: listed.itemId, updatedAt: new Date().toISOString() };
   }
 
   async markManualReview(input: Parameters<AutomationExecutionPort['markManualReview']>[0]): Promise<void> {
     const adminId = requireAdminId(input.adminId);
+    await this.store.quarantineCouponReservation({ adminId, executionKey: input.executionKey, reason: input.reason });
     await this.recordAudit({ adminId, action: 'product.automation.manual_review', accountId: input.accountId, orderNo: input.orderNo, executionKey: input.executionKey, payload: { reason: input.reason, productId: input.productId, itemId: input.itemId } });
+  }
+
+  private async sendCheckedDeliveryStep(input: { adminId: string; accountId: string; orderNo: string; executionKey: string; stepKey: string }, send: () => Promise<unknown>): Promise<AutomationExternalResult> {
+    const claim = await this.store.beginDeliverySendStep(input);
+    if (claim.status === 'succeeded') return { status: 'succeeded', externalRef: claim.externalRef };
+    if (claim.status === 'blocked') {
+      await this.store.quarantineCouponReservation({ adminId: input.adminId, executionKey: input.executionKey, reason: 'DELIVERY_SEND_RESULT_UNKNOWN' });
+      return unknownExternal('DELIVERY_SEND_RESULT_UNKNOWN', 'delivery send requires manual reconciliation');
+    }
+    try {
+      const sent = await send() as { externalMessageRef?: string };
+      const completed = await this.store.completeDeliverySendStep({ ...input, externalRef: sent.externalMessageRef });
+      if (!completed) throw new Error('DELIVERY_SEND_CHECKPOINT_FAILED');
+      return { status: 'succeeded', externalRef: sent.externalMessageRef };
+    } catch (error) {
+      try { await this.store.markDeliverySendUnknown(input); } catch { /* a persisted sending step still blocks replay */ }
+      await this.store.quarantineCouponReservation({ adminId: input.adminId, executionKey: input.executionKey, reason: 'DELIVERY_SEND_RESULT_UNKNOWN' });
+      return unknownExternal('DELIVERY_SEND_RESULT_UNKNOWN', error instanceof Error ? error.message : 'delivery send outcome unknown');
+    }
   }
 
   private async loadScopedOrder(adminId: string, accountId: string, orderNo: string, productId?: string, itemId?: string): Promise<AutomationOrderSnapshot | undefined> {
@@ -280,7 +352,7 @@ function normalizePaymentStatus(value?: string, orderStatus?: string): Automatio
     .map((candidate) => candidate?.trim().toLowerCase())
     .filter((candidate): candidate is string => Boolean(candidate));
   for (const normalized of candidates) {
-    if (['paid', 'success', 'pay_success', 'trade_success', 'wait_consign', 'shipped', 'completed', '已付款', '待发货', '已发货', '交易成功', '已完成'].includes(normalized)) return 'paid';
+    if (['2', '3', '4', 'paid', 'success', 'pay_success', 'trade_success', 'wait_consign', 'shipped', 'completed', '已付款', '待发货', '已发货', '交易成功', '已完成'].includes(normalized)) return 'paid';
     if (['1', 'unpaid', 'wait_buyer_pay', 'wait_pay', 'pending', 'processing', '待付款', '未付款', '处理中'].includes(normalized)) return 'unpaid';
   }
   return undefined;

@@ -1,4 +1,4 @@
-export type AccountStatus = 'pending' | 'connected' | 'degraded' | 'disconnected' | 'expired' | 'disabled';
+export type AccountStatus = 'pending' | 'connected' | 'degraded' | 'disconnected' | 'expired' | 'verification_required' | 'disabled';
 
 export type AccountConnectionStatus = 'online' | 'offline' | 'connecting' | 'expired' | 'unknown';
 
@@ -27,6 +27,9 @@ export interface AccountVM {
   credentialState: AccountCredentialState;
   version: number;
   updatedAt: string;
+  riskCode?: string;
+  riskSource?: string;
+  riskFirstSeenAt?: string;
 }
 
 export interface AccountListFilters {

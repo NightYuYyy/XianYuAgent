@@ -5,6 +5,7 @@ import { createId, digestJson } from './security.js';
 import { decodeConversationCursor, encodeConversationCursor, isAfterConversationCursor } from './conversation-cursor.js';
 import { decodeMessageHistoryCursor } from './message-history-cursor.js';
 import type { AgentSessionRecord, RunEventRecord, RunRecord, RunStatus, StepRecord, StepStatus, WorkspaceConfirmationRecord, WorkspaceMessageRecord, WorkspaceMessageType } from './domain.js';
+import type { PaymentEventJob } from './domain.js';
 import { cloneCouponReservation, normalizeCouponReservationInput, normalizeLeaseSeconds, reservationFingerprint } from './coupon-reservation.js';
 import { validatePersistedAutoReplyRepairPolicyBundle } from './auto-reply-repair-config.js';
 import { readAutoReplyProductDescription, readAutoReplyProductMetrics } from './auto-reply-product-metrics.js';
@@ -117,6 +118,13 @@ export class MemoryStore implements Store {
   private readonly products = new Map<string, ProductRecord>();
   private readonly productAutomations = new Map<string, ProductAutomationConfigRecord>();
   private readonly orders = new Map<string, OrderRecord>();
+  private readonly paymentEvents = new Map<string, PaymentEventJob & { leaseUntil?: string }>();
+  private readonly deliveryGuards = new Map<string, { executionKey: string; status: 'active' | 'unknown' }>();
+  private readonly deliveryConfirmations = new Map<string, { executionKey: string; noLogisticsForm: boolean; tradeText?: string }>();
+  private readonly deliverySteps = new Map<string, { executionKey: string; status: 'sending' | 'succeeded' | 'unknown'; externalRef?: string }>();
+  private readonly riskAlerts = new Map<string, { id: string; accountId: string; episode: string; eventType: 'verification_required' | 'verification_cleared'; delivered: boolean }>();
+  private readonly riskNotifications = new Map<string, { id: string; adminId: string; accountId: string; eventType: 'verification_required' | 'verification_cleared'; createdAt: string; read: boolean }>();
+  private readonly healthSignals = new Map<string, { accountId: string; kind: 'verification_required' | 'degraded'; source: string; code?: string; episode?: string; seenAt: string }>();
   private readonly deliveryRecords = new Map<string, DeliveryRecord>();
   private readonly automationExecutions = new Map<string, AutomationExecutionLedgerRecord>();
   private readonly reviewFacts = new Map<string, { accountId: string; orderNo: string; eventId: string; reviewedAt: string }>();
@@ -184,7 +192,7 @@ export class MemoryStore implements Store {
   async listAccounts(adminId: string, query: AccountListQuery = {}): Promise<AccountListResult> {
     const ids = new Set((await this.listScopes(adminId)).map((scope) => scope.accountId));
     const search = query.search?.trim().toLowerCase();
-    const connectionStatus = (status: AccountRecord['status']): AccountListQuery['connectionStatus'] => status === 'connected' ? 'online' : status === 'pending' ? 'connecting' : status === 'expired' ? 'expired' : status === 'degraded' ? 'unknown' : 'offline';
+    const connectionStatus = (status: AccountRecord['status']): AccountListQuery['connectionStatus'] => status === 'connected' ? 'online' : status === 'pending' ? 'connecting' : status === 'expired' ? 'expired' : status === 'degraded' || status === 'verification_required' ? 'unknown' : 'offline';
     const filtered = [...this.accounts.values()].filter((account) => ids.has(account.id) && account.status !== 'disabled')
       .filter((account) => !query.accountId || account.id === query.accountId)
       .filter((account) => !search || [account.id, account.sellerRef, account.displayName ?? '', account.remark ?? ''].some((value) => value.toLowerCase().includes(search)))
@@ -223,7 +231,110 @@ export class MemoryStore implements Store {
     await this.grantScope({ adminId: input.adminId, accountId: account.id, scope: 'manage' });
     return account;
   }
-  async updateAccount(adminId: string, accountId: string, patch: { sellerRef?: string; displayName?: string; remark?: string; avatarUrl?: string; platformUserId?: string; status?: AccountRecord['status']; lastConnectedAt?: string }): Promise<AccountRecord | undefined> { const account = await this.getAccount(adminId, accountId); if (!account) return undefined; if (patch.sellerRef !== undefined) account.sellerRef = patch.sellerRef; if (patch.displayName !== undefined) account.displayName = patch.displayName; if (patch.remark !== undefined) account.remark = patch.remark; if (patch.avatarUrl !== undefined) account.avatarUrl = patch.avatarUrl; if (patch.platformUserId !== undefined) account.platformUserId = patch.platformUserId; if (patch.status !== undefined) account.status = patch.status; if (patch.lastConnectedAt !== undefined) account.lastConnectedAt = patch.lastConnectedAt; account.updatedAt = new Date().toISOString(); return account; }
+  async updateAccount(adminId: string, accountId: string, patch: { sellerRef?: string; displayName?: string; remark?: string; avatarUrl?: string; platformUserId?: string; status?: AccountRecord['status']; lastConnectedAt?: string }): Promise<AccountRecord | undefined> { const account = await this.getAccount(adminId, accountId); if (!account) return undefined; if (patch.sellerRef !== undefined) account.sellerRef = patch.sellerRef; if (patch.displayName !== undefined) account.displayName = patch.displayName; if (patch.remark !== undefined) account.remark = patch.remark; if (patch.avatarUrl !== undefined) account.avatarUrl = patch.avatarUrl; if (patch.platformUserId !== undefined) account.platformUserId = patch.platformUserId; if (patch.status !== undefined && !account.riskEpisode && !account.degradedSource) account.status = patch.status; if (patch.lastConnectedAt !== undefined) account.lastConnectedAt = patch.lastConnectedAt; account.updatedAt = new Date().toISOString(); return account; }
+  async recordAccountDegraded(input: { adminId: string; accountId: string; source: string }): Promise<AccountRecord | undefined> {
+    const account = await this.getAccount(input.adminId, input.accountId);
+    if (!account || ['disabled', 'expired'].includes(account.status)) return account;
+    if (!account.riskEpisode) account.status = 'degraded';
+    account.degradedSource = input.source;
+    account.degradedAt = new Date().toISOString();
+    account.updatedAt = account.degradedAt;
+    this.healthSignals.set(`${account.id}:degraded:${input.source}`, { accountId: account.id, kind: 'degraded', source: input.source, seenAt: account.degradedAt });
+    return account;
+  }
+  async clearAccountDegraded(input: { adminId: string; accountId: string; source: string; startedAt: string }): Promise<AccountRecord | undefined> {
+    const account = await this.getAccount(input.adminId, input.accountId);
+    if (!account) return account;
+    const key = `${account.id}:degraded:${input.source}`;
+    const signal = this.healthSignals.get(key);
+    if (!signal || signal.seenAt > input.startedAt) return account;
+    this.healthSignals.delete(key);
+    const remaining = [...this.healthSignals.values()].filter((item) => item.accountId === account.id && item.kind === 'degraded').sort((a, b) => b.seenAt.localeCompare(a.seenAt))[0];
+    account.degradedSource = remaining?.source;
+    account.degradedAt = remaining?.seenAt;
+    if (!account.riskEpisode && account.status !== 'expired') account.status = remaining ? 'degraded' : account.transportStatus === 'connected' && account.transportSeenAt && Date.parse(account.transportSeenAt) > Date.now() - 15_000 ? 'connected' : 'disconnected';
+    account.updatedAt = new Date().toISOString();
+    return account;
+  }
+  async recordAccountRisk(input: { adminId: string; accountId: string; code: string; source: string }): Promise<AccountRecord | undefined> {
+    const account = await this.getAccount(input.adminId, input.accountId);
+    if (!account || account.status === 'disabled') return undefined;
+    const now = new Date().toISOString();
+    if (!account.riskEpisode) { account.riskEpisode = createId(); account.riskFirstSeenAt = now; }
+    this.healthSignals.set(`${account.id}:verification_required:${input.source}`, { accountId: account.id, kind: 'verification_required', source: input.source, code: input.code, episode: account.riskEpisode, seenAt: now });
+    account.status = 'verification_required';
+    account.riskCode = input.code;
+    account.riskSource = input.source;
+    account.riskLastSeenAt = now;
+    account.updatedAt = now;
+    const key = `${account.id}:${account.riskEpisode}:verification_required`;
+    if (!this.riskAlerts.has(key)) this.riskAlerts.set(key, { id: createId(), accountId: account.id, episode: account.riskEpisode!, eventType: 'verification_required', delivered: false });
+    return { ...account };
+  }
+  async clearAccountRisk(input: { adminId: string; accountId: string; episode: string; source: string; startedAt: string }): Promise<AccountRecord | undefined> {
+    const account = await this.getAccount(input.adminId, input.accountId);
+    if (!account || account.status !== 'verification_required' || account.riskEpisode !== input.episode) return account;
+    const signalKey = `${account.id}:verification_required:${input.source}`;
+    const signal = this.healthSignals.get(signalKey);
+    if (!signal || signal.episode !== input.episode || signal.seenAt > input.startedAt) return account;
+    this.healthSignals.delete(signalKey);
+    const remaining = [...this.healthSignals.values()].filter((item) => item.accountId === account.id && item.kind === 'verification_required' && item.episode === input.episode).sort((a, b) => b.seenAt.localeCompare(a.seenAt))[0];
+    if (remaining) {
+      account.riskCode = remaining.code;
+      account.riskSource = remaining.source;
+      account.riskLastSeenAt = remaining.seenAt;
+      account.updatedAt = new Date().toISOString();
+      return { ...account };
+    }
+    account.status = account.degradedSource ? 'degraded' : account.transportStatus === 'connected' && account.transportSeenAt && Date.parse(account.transportSeenAt) > Date.now() - 15_000 ? 'connected' : 'disconnected';
+    account.riskCode = undefined;
+    account.riskSource = undefined;
+    account.riskFirstSeenAt = undefined;
+    account.riskLastSeenAt = undefined;
+    account.riskEpisode = undefined;
+    account.updatedAt = new Date().toISOString();
+    for (const job of this.paymentEvents.values()) if (job.accountId === account.id && ['pending', 'resolve_pending'].includes(job.status) && /ACCOUNT_NOT_READY|ACCOUNT_VALIDATION_REQUIRED|SESSION_EXPIRED|CREDENTIAL_MISSING|MTOP_RETRY_EXHAUSTED/.test(job.lastError ?? '')) job.nextAttemptAt = account.updatedAt;
+    const key = `${account.id}:${input.episode}:verification_cleared`;
+    if (!this.riskAlerts.has(key)) this.riskAlerts.set(key, { id: createId(), accountId: account.id, episode: input.episode, eventType: 'verification_cleared', delivered: false });
+    return { ...account };
+  }
+  async flushAccountRiskAlerts(limit: number): Promise<number> {
+    const pending = [...this.riskAlerts.values()].filter((alert) => !alert.delivered).slice(0, limit);
+    let delivered = 0;
+    for (const alert of pending) {
+      const recipients = (await Promise.all((await this.listAdminIds()).map(async (adminId) => await this.hasAccountScope(adminId, alert.accountId) ? adminId : undefined))).filter((id): id is string => Boolean(id));
+      if (!recipients.length) continue;
+      for (const adminId of recipients) this.riskNotifications.set(`${alert.id}:${adminId}`, { id: alert.id, adminId, accountId: alert.accountId, eventType: alert.eventType, createdAt: new Date().toISOString(), read: false });
+      await this.recordAudit({ id: alert.id, actorType: 'system', action: `account.risk.${alert.eventType}`, accountId: alert.accountId, targetRef: alert.episode, requestId: `risk:${alert.episode}`, traceId: `risk:${alert.episode}`, payloadDigest: alert.id, createdAt: new Date().toISOString() });
+      alert.delivered = true;
+      delivered += 1;
+    }
+    return delivered;
+  }
+  async listRiskNotifications(adminId: string): Promise<Array<{ id: string; accountId: string; eventType: 'verification_required' | 'verification_cleared'; createdAt: string }>> {
+    const result = [];
+    for (const notification of this.riskNotifications.values()) if (notification.adminId === adminId && !notification.read && await this.hasAccountScope(adminId, notification.accountId)) result.push({ id: notification.id, accountId: notification.accountId, eventType: notification.eventType, createdAt: notification.createdAt });
+    return result.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 100);
+  }
+  async acknowledgeRiskNotification(adminId: string, id: string): Promise<boolean> {
+    const notification = this.riskNotifications.get(`${id}:${adminId}`);
+    if (!notification || notification.read || !(await this.hasAccountScope(adminId, notification.accountId))) return false;
+    notification.read = true;
+    return true;
+  }
+  async setAccountTransport(input: { adminId: string; accountId: string; status: 'connecting' | 'connected' | 'disconnected' | 'failed' }): Promise<void> {
+    const account = await this.getAccount(input.adminId, input.accountId);
+    if (!account) return;
+    const wasConnected = account.transportStatus === 'connected';
+    account.transportStatus = input.status;
+    if (input.status === 'connected') account.transportSeenAt = new Date().toISOString();
+    if (!account.riskEpisode && !['disabled', 'expired', 'verification_required'].includes(account.status)) {
+      if (input.status === 'connected' && ['pending', 'disconnected', 'connected'].includes(account.status)) account.status = 'connected';
+      else if (input.status !== 'connected' && account.status === 'connected') account.status = 'disconnected';
+    }
+    account.updatedAt = new Date().toISOString();
+    if (input.status === 'connected' && !wasConnected) for (const job of this.paymentEvents.values()) if (job.accountId === input.accountId && (job.status === 'pending' || job.status === 'resolve_pending') && job.lastError === 'XIANYU_IM_NOT_READY') job.nextAttemptAt = new Date().toISOString();
+  }
   async deleteAccount(adminId: string, accountId: string): Promise<AccountRecord | undefined> { const account = await this.getAccount(adminId, accountId); if (!account) return undefined; account.status = 'disabled'; account.updatedAt = new Date().toISOString(); const credential = this.credentials.get(accountId); if (credential && credential.status === 'active') { credential.status = 'revoked'; credential.updatedAt = account.updatedAt; } for (const scope of this.scopes.values()) { if (scope.accountId === accountId && scope.status === 'active') { scope.status = 'revoked'; scope.revokedAt = account.updatedAt; } } return { ...account }; }
   async listProducts(adminId: string, query: ProductListQuery): Promise<ProductListResult> {
     const scopedAccountIds = new Set((await this.listScopes(adminId)).map((scope) => scope.accountId));
@@ -474,6 +585,116 @@ export class MemoryStore implements Store {
     const order = [...this.orders.values()].find((item) => item.orderNo === orderNo && (!accountId || item.accountId === accountId));
     if (!order || !(await this.hasAccountScope(adminId, order.accountId))) return undefined;
     return this.enrichOrder(order);
+  }
+  async enqueuePaymentEvent(input: { adminId: string; accountId: string; eventRef: string; orderNo?: string; buyerRef: string; itemRef?: string; conversationRef: string; receivedAt: string; observedAt?: string }): Promise<PaymentEventJob> {
+    if (!(await this.hasAccountScope(input.adminId, input.accountId))) throw new Error('ACCOUNT_SCOPE_FORBIDDEN');
+    const existing = [...this.paymentEvents.values()].find((job) => job.accountId === input.accountId && (job.eventRef === input.eventRef || (input.orderNo && job.orderNo === input.orderNo)));
+    if (existing) return { ...existing };
+    const job: PaymentEventJob = { ...input, observedAt: input.observedAt ?? new Date().toISOString(), id: createId(), status: input.orderNo ? 'pending' : 'resolve_pending', attemptCount: 0, nextAttemptAt: new Date().toISOString() };
+    this.paymentEvents.set(job.id, job);
+    return { ...job };
+  }
+  async claimPaymentEvents(input: { workerId: string; limit: number; leaseMs: number; accountId?: string }): Promise<PaymentEventJob[]> {
+    const now = Date.now();
+    const claimed: PaymentEventJob[] = [];
+    for (const job of [...this.paymentEvents.values()].sort((a, b) => a.nextAttemptAt.localeCompare(b.nextAttemptAt))) {
+      if (input.accountId && job.accountId !== input.accountId) continue;
+      if (claimed.length >= input.limit) break;
+      if (job.status === 'completed' || job.status === 'manual_review' || Date.parse(job.nextAttemptAt) > now) continue;
+      if (job.status === 'running' && Date.parse(job.leaseUntil ?? '') > now) continue;
+      job.status = 'running';
+      job.attemptCount += 1;
+      job.ownerToken = `${input.workerId}:${createId()}`;
+      job.leaseUntil = new Date(now + input.leaseMs).toISOString();
+      claimed.push({ ...job });
+    }
+    return claimed;
+  }
+  async isDeliveryCutoverActive(): Promise<boolean> { return true; }
+  async finishPaymentEvent(input: { id: string; ownerToken: string; status: Exclude<PaymentEventJob['status'], 'running'>; orderNo?: string; nextAttemptAt?: string; lastError?: string }): Promise<boolean> {
+    const job = this.paymentEvents.get(input.id);
+    if (!job || job.status !== 'running' || job.ownerToken !== input.ownerToken) return false;
+    if (input.orderNo && [...this.paymentEvents.values()].some((other) => other.id !== job.id && other.accountId === job.accountId && other.orderNo === input.orderNo)) {
+      job.status = 'completed';
+      job.lastError = 'DUPLICATE_ORDER_JOB';
+      job.ownerToken = undefined;
+      job.leaseUntil = undefined;
+      return true;
+    }
+    job.status = input.status;
+    job.orderNo = input.orderNo ?? job.orderNo;
+    job.nextAttemptAt = input.nextAttemptAt ?? job.nextAttemptAt;
+    job.lastError = input.lastError;
+    job.ownerToken = undefined;
+    job.leaseUntil = undefined;
+    return true;
+  }
+  async setPaymentEventDue(input: { id: string; ownerToken: string; dueAt: string }): Promise<string | undefined> {
+    const job = this.paymentEvents.get(input.id);
+    if (!job || job.status !== 'running' || job.ownerToken !== input.ownerToken) return undefined;
+    job.dueAt ??= input.dueAt;
+    return job.dueAt;
+  }
+  async beginDeliverySendStep(input: { adminId: string; accountId: string; orderNo: string; executionKey: string; stepKey: string }): Promise<{ status: 'ready' | 'succeeded' | 'blocked'; externalRef?: string }> {
+    if (!(await this.hasAccountScope(input.adminId, input.accountId))) throw new Error('ACCOUNT_SCOPE_FORBIDDEN');
+    const key = `${input.accountId}:${input.orderNo}`;
+    const guard = this.deliveryGuards.get(key);
+    if (guard && (guard.executionKey !== input.executionKey || guard.status === 'unknown')) return { status: 'blocked' };
+    if (!guard) this.deliveryGuards.set(key, { executionKey: input.executionKey, status: 'active' });
+    const stepKey = `${key}:${input.stepKey}`;
+    const step = this.deliverySteps.get(stepKey);
+    if (step?.status === 'succeeded') return { status: 'succeeded', externalRef: step.externalRef };
+    if (step) { this.deliveryGuards.get(key)!.status = 'unknown'; step.status = 'unknown'; return { status: 'blocked' }; }
+    this.deliverySteps.set(stepKey, { executionKey: input.executionKey, status: 'sending' });
+    return { status: 'ready' };
+  }
+  async bindDeliveryReservation(input: { adminId: string; accountId: string; orderNo: string; reservationId: string; executionKey: string }): Promise<boolean> {
+    return this.withCouponReservationLock(async () => {
+      const reservation = this.couponReservations.get(input.reservationId);
+      if (!reservation || reservation.adminId !== input.adminId || reservation.accountId !== input.accountId || reservation.executionKey !== input.executionKey || reservation.status !== 'reserved' || Date.parse(reservation.leaseUntil) <= Date.now() || !(await this.hasAccountScope(input.adminId, input.accountId))) return false;
+      const key = `${input.accountId}:${input.orderNo}`;
+      const guard = this.deliveryGuards.get(key);
+      if (guard && (guard.executionKey !== input.executionKey || guard.status !== 'active')) return false;
+      if (!guard) this.deliveryGuards.set(key, { executionKey: input.executionKey, status: 'active' });
+      return true;
+    });
+  }
+  async saveDeliveryConfirmation(input: { adminId: string; accountId: string; orderNo: string; executionKey: string; noLogisticsForm: boolean; tradeText?: string }): Promise<void> {
+    if (!(await this.hasAccountScope(input.adminId, input.accountId))) throw new Error('ACCOUNT_SCOPE_FORBIDDEN');
+    const key = `${input.accountId}:${input.orderNo}`;
+    const current = this.deliveryConfirmations.get(key);
+    if (current && (current.executionKey !== input.executionKey || current.noLogisticsForm !== input.noLogisticsForm || current.tradeText !== input.tradeText)) throw new Error('DELIVERY_CONFIRMATION_SNAPSHOT_CONFLICT');
+    if (!current) this.deliveryConfirmations.set(key, { executionKey: input.executionKey, noLogisticsForm: input.noLogisticsForm, tradeText: input.tradeText });
+  }
+  async getDeliveryConfirmation(input: { adminId: string; accountId: string; orderNo: string; executionKey: string }): Promise<{ noLogisticsForm: boolean; tradeText?: string } | undefined> {
+    if (!(await this.hasAccountScope(input.adminId, input.accountId))) return undefined;
+    const current = this.deliveryConfirmations.get(`${input.accountId}:${input.orderNo}`);
+    return current?.executionKey === input.executionKey ? { noLogisticsForm: current.noLogisticsForm, tradeText: current.tradeText } : undefined;
+  }
+  async completeDeliverySendStep(input: { accountId: string; orderNo: string; executionKey: string; stepKey: string; externalRef?: string }): Promise<boolean> {
+    const step = this.deliverySteps.get(`${input.accountId}:${input.orderNo}:${input.stepKey}`);
+    if (!step || step.executionKey !== input.executionKey || step.status !== 'sending') return false;
+    step.status = 'succeeded';
+    step.externalRef = input.externalRef;
+    return true;
+  }
+  async markDeliverySendUnknown(input: { accountId: string; orderNo: string; executionKey: string; stepKey: string }): Promise<void> {
+    const key = `${input.accountId}:${input.orderNo}`;
+    const guard = this.deliveryGuards.get(key);
+    if (guard?.executionKey === input.executionKey) guard.status = 'unknown';
+    const step = this.deliverySteps.get(`${key}:${input.stepKey}`);
+    if (step?.executionKey === input.executionKey && step.status === 'sending') step.status = 'unknown';
+  }
+  async quarantineCouponReservation(input: { adminId: string; executionKey: string; reason: string }): Promise<boolean> {
+    return this.withCouponReservationLock(async () => {
+      const reservation = [...this.couponReservations.values()].find((item) => item.executionKey === input.executionKey && item.adminId === input.adminId);
+      if (!reservation || reservation.status !== 'reserved') return false;
+      reservation.status = 'quarantined';
+      reservation.reason = input.reason;
+      reservation.updatedAt = new Date().toISOString();
+      for (const ref of reservation.items) { const item = this.couponItems.get(ref.itemId); if (item?.status === 'reserved') item.reservedUntil = undefined; }
+      return true;
+    });
   }
   async createOrder(input: { adminId: string; order: Omit<OrderRecord, 'id' | 'createdAt' | 'updatedAt' | 'configVersion' | 'source'> & { id?: string; createdAt?: string; updatedAt?: string; configVersion?: number; source?: OrderSource } }): Promise<OrderRecord> {
     if (!(await this.hasAccountScope(input.adminId, input.order.accountId))) throw new Error('ACCOUNT_SCOPE_FORBIDDEN');
@@ -764,6 +985,7 @@ export class MemoryStore implements Store {
       const existing = existingId ? this.couponReservations.get(existingId) : undefined;
       if (existing) {
         if (existing.fingerprint !== fingerprint || existing.adminId !== input.adminId || existing.accountId !== input.accountId) throw new Error('COUPON_RESERVATION_KEY_CONFLICT');
+        if (existing.status === 'quarantined') throw new Error('COUPON_RESERVATION_QUARANTINED');
         if (existing.status === 'committed' || existing.status === 'reserved') return cloneCouponReservation(existing);
       }
       for (const batch of uniqueBatches) this.ensureConfiguredCouponItems(batch, normalized.quantity);
@@ -829,7 +1051,7 @@ export class MemoryStore implements Store {
       if (reservation.status === 'committed') return cloneCouponReservation(reservation);
       if (reservation.status === 'expired') throw new Error('COUPON_RESERVATION_EXPIRED');
       if (reservation.status !== 'reserved') throw new Error('COUPON_RESERVATION_NOT_ACTIVE');
-      if (Date.parse(reservation.leaseUntil) <= Date.now()) {
+      if (Date.parse(reservation.leaseUntil) <= Date.now() && ![...this.deliveryGuards.values()].some((guard) => guard.executionKey === input.executionKey)) {
         await this.expireCouponReservations();
         throw new Error('COUPON_RESERVATION_EXPIRED');
       }
@@ -852,7 +1074,14 @@ export class MemoryStore implements Store {
       if (!reservation || !(await this.hasAccountScope(input.adminId, reservation.accountId)) || reservation.adminId !== input.adminId) throw new Error('COUPON_RESERVATION_NOT_FOUND');
       if (reservation.executionKey !== input.executionKey) throw new Error('COUPON_RESERVATION_KEY_CONFLICT');
       if (reservation.status === 'committed') throw new Error('COUPON_RESERVATION_FINALIZED');
+      if (reservation.status === 'quarantined') throw new Error('COUPON_RESERVATION_QUARANTINED');
       if (reservation.status === 'released' || reservation.status === 'expired') return cloneCouponReservation(reservation);
+      if ([...this.deliveryGuards.values()].some((guard) => guard.executionKey === input.executionKey)) {
+        reservation.status = 'quarantined';
+        reservation.reason = input.reason;
+        reservation.updatedAt = new Date().toISOString();
+        return cloneCouponReservation(reservation);
+      }
       const nowIso = new Date().toISOString();
       for (const itemRef of reservation.items) {
         const item = this.couponItems.get(itemRef.itemId);
@@ -1399,7 +1628,7 @@ export class MemoryStore implements Store {
     if (credential.status === 'active' && credential.expiresAt && Date.parse(credential.expiresAt) <= Date.now()) {
       credential.status = 'expired';
       const account = this.accounts.get(accountId);
-      if (account && account.status === 'connected') { account.status = 'expired'; account.updatedAt = new Date().toISOString(); }
+      if (account && ['pending', 'disconnected', 'connected'].includes(account.status) && !account.riskEpisode && !account.degradedSource) { account.status = 'expired'; account.updatedAt = new Date().toISOString(); }
     }
     return credential;
   }
@@ -1883,6 +2112,7 @@ export class MemoryStore implements Store {
     let expiredCount = 0;
     for (const reservation of this.couponReservations.values()) {
       if (reservation.status !== 'reserved' || Date.parse(reservation.leaseUntil) > now) continue;
+      if ([...this.deliveryGuards.values()].some((guard) => guard.executionKey === reservation.executionKey)) continue;
       for (const itemRef of reservation.items) {
         const item = this.couponItems.get(itemRef.itemId);
         if (item?.status === 'reserved') { item.status = 'available'; item.reservedUntil = undefined; }
@@ -2007,6 +2237,13 @@ export class MemoryStore implements Store {
     record.retryable = input.retryable;
     record.leaseUntil = undefined;
     record.updatedAt = new Date().toISOString();
+  }
+  async renewAutomationExecution(input: { executionKey: string; ownerToken: string; leaseUntil: string }): Promise<boolean> {
+    const record = this.automationExecutions.get(input.executionKey);
+    if (!record || record.status !== 'running' || record.ownerToken !== input.ownerToken || !record.leaseUntil || Date.parse(record.leaseUntil) <= Date.now()) return false;
+    record.leaseUntil = input.leaseUntil;
+    record.updatedAt = new Date().toISOString();
+    return true;
   }
   async recordReviewFact(input: { accountId: string; orderNo: string; eventId: string; reviewedAt?: string }): Promise<{ created: boolean }> {
     const key = `${input.accountId}:${input.orderNo}`;

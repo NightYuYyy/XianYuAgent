@@ -13,6 +13,7 @@ import { normalizeProductSearchTerms, normalizeProductSearchText, normalizeProdu
 import { splitDataContent } from './coupon-delivery.js';
 import { removeCouponBatchFromAutomationConfig } from './product-automation-coupon.js';
 import { DEFAULT_AUTO_REPLY_AGENT_CONFIG, millisecondsToSeconds } from './auto-reply-agent-settings.js';
+import type { PaymentEventJob } from './domain.js';
 
 type Row = Record<string, unknown>;
 const PRODUCT_COUPON_BATCHES_SELECT = `(select coalesce(json_agg(json_build_object('id', cb.sequence_id, 'label', cb.label) order by binding.priority desc, binding.created_at, cb.sequence_id), '[]'::json) from coupons.coupon_bindings binding join coupons.coupon_batches cb on cb.id=binding.coupon_batch_id where binding.product_id=p.id and binding.status='active' and cb.status <> 'voided') as coupon_batches`;
@@ -65,14 +66,15 @@ export class PostgresStore implements Store {
   async listAccounts(adminId: string, query: AccountListQuery = {}): Promise<AccountListResult> {
     const params: unknown[] = [adminId];
     const conditions = ["EXISTS (SELECT 1 FROM auth.account_scopes scope WHERE scope.account_id=a.id AND scope.admin_id=$1 AND scope.status='active' AND (scope.expires_at IS NULL OR scope.expires_at>now()))", "a.status <> 'disabled'"];
+    const effectiveStatus = "(case when a.risk_episode is not null then 'verification_required' when a.status in ('disabled','expired') then a.status when a.degraded_source is not null then 'degraded' when a.status='connected' and not (a.transport_status='connected' and a.transport_seen_at>now()-interval '15 seconds') then 'disconnected' else a.status end)";
     const addParam = (value: unknown) => { params.push(value); return `$${params.length}`; };
     const search = query.search?.trim();
     if (query.accountId) conditions.push(`a.id = ${addParam(query.accountId)}`);
     if (search) { const param = addParam(`%${search}%`); conditions.push(`(a.id ILIKE ${param} OR a.seller_ref ILIKE ${param} OR a.display_name ILIKE ${param} OR a.remark ILIKE ${param})`); }
-    if (query.status) conditions.push(`a.status = ${addParam(query.status)}`);
+    if (query.status) conditions.push(`${effectiveStatus} = ${addParam(query.status)}`);
     if (query.connectionStatus) {
-      const statusByConnection: Record<NonNullable<AccountListQuery['connectionStatus']>, AccountRecord['status']> = { online: 'connected', connecting: 'pending', expired: 'expired', unknown: 'degraded', offline: 'disconnected' };
-      conditions.push(`a.status = ${addParam(statusByConnection[query.connectionStatus])}`);
+      const statusByConnection: Record<Exclude<NonNullable<AccountListQuery['connectionStatus']>, 'unknown'>, AccountRecord['status']> = { online: 'connected', connecting: 'pending', expired: 'expired', offline: 'disconnected' };
+      conditions.push(query.connectionStatus === 'unknown' ? `${effectiveStatus} IN ('degraded', 'verification_required')` : `${effectiveStatus} = ${addParam(statusByConnection[query.connectionStatus])}`);
     }
     const where = conditions.join(' AND ');
     const page = query.page ?? 1;
@@ -98,7 +100,123 @@ export class PostgresStore implements Store {
     } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
   }
   async createAccount(input: { platform: string; sellerRef: string; displayName?: string; adminId: string }): Promise<AccountRecord> { const client = await this.pool.connect(); try { await client.query('begin'); const accountResult = await client.query('insert into accounts.accounts (id,platform,seller_ref,display_name,status) values ($1,$2,$3,$4,\'pending\') returning *', [createId(), input.platform, input.sellerRef, input.displayName ?? null]); const account = this.toAccount(accountResult.rows[0]); await client.query('insert into auth.account_scopes (id,admin_id,account_id,scope,status) values ($1,$2,$3,\'manage\',\'active\')', [createId(), input.adminId, account.id]); await client.query('commit'); return account; } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); } }
-  async updateAccount(adminId: string, accountId: string, patch: { sellerRef?: string; displayName?: string; remark?: string; avatarUrl?: string; platformUserId?: string; status?: AccountRecord['status']; lastConnectedAt?: string }): Promise<AccountRecord | undefined> { const current = await this.getAccount(adminId, accountId); if (!current) return undefined; const result = await this.pool.query('update accounts.accounts set seller_ref=coalesce($2,seller_ref), display_name=coalesce($3,display_name), remark=coalesce($4,remark), avatar_url=coalesce($5,avatar_url), platform_user_id=coalesce($6,platform_user_id), status=coalesce($7,status), last_connected_at=coalesce($8,last_connected_at), updated_at=now() where id=$1 returning *', [accountId, patch.sellerRef ?? null, patch.displayName ?? null, patch.remark ?? null, patch.avatarUrl ?? null, patch.platformUserId ?? null, patch.status ?? null, patch.lastConnectedAt ?? null]); return result.rows[0] ? this.toAccount(result.rows[0]) : undefined; }
+  async updateAccount(adminId: string, accountId: string, patch: { sellerRef?: string; displayName?: string; remark?: string; avatarUrl?: string; platformUserId?: string; status?: AccountRecord['status']; lastConnectedAt?: string }): Promise<AccountRecord | undefined> { const current = await this.getAccount(adminId, accountId); if (!current) return undefined; const result = await this.pool.query("update accounts.accounts set seller_ref=coalesce($2,seller_ref), display_name=coalesce($3,display_name), remark=coalesce($4,remark), avatar_url=coalesce($5,avatar_url), platform_user_id=coalesce($6,platform_user_id), status=case when risk_episode is not null then 'verification_required' when degraded_source is not null then 'degraded' else coalesce($7,status) end, last_connected_at=coalesce($8,last_connected_at), updated_at=now() where id=$1 returning *", [accountId, patch.sellerRef ?? null, patch.displayName ?? null, patch.remark ?? null, patch.avatarUrl ?? null, patch.platformUserId ?? null, patch.status ?? null, patch.lastConnectedAt ?? null]); return result.rows[0] ? this.toAccount(result.rows[0]) : undefined; }
+  async recordAccountDegraded(input: { adminId: string; accountId: string; source: string }): Promise<AccountRecord | undefined> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      const account = await client.query("select a.* from accounts.accounts a join auth.account_scopes s on s.account_id=a.id where a.id=$1 and s.admin_id=$2 and s.status='active' for update", [input.accountId, input.adminId]);
+      if (!account.rows[0] || ['disabled', 'expired'].includes(account.rows[0].status)) { await client.query('commit'); return account.rows[0] ? this.toAccount(account.rows[0]) : undefined; }
+      await client.query(`insert into accounts.health_signals(account_id,kind,source,last_seen_at) values ($1,'degraded',$2,now())
+        on conflict(account_id,kind,source) do update set last_seen_at=excluded.last_seen_at`, [input.accountId, input.source]);
+      const updated = await client.query("update accounts.accounts set status=case when risk_episode is not null then 'verification_required' else 'degraded' end,degraded_source=$2,degraded_at=now(),updated_at=now() where id=$1 returning *", [input.accountId, input.source]);
+      await client.query('commit');
+      return this.toAccount(updated.rows[0]);
+    } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
+  }
+  async clearAccountDegraded(input: { adminId: string; accountId: string; source: string; startedAt: string }): Promise<AccountRecord | undefined> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      const account = await client.query("select a.* from accounts.accounts a join auth.account_scopes s on s.account_id=a.id where a.id=$1 and s.admin_id=$2 and s.status='active' for update", [input.accountId, input.adminId]);
+      if (!account.rows[0]) { await client.query('commit'); return undefined; }
+      const removed = await client.query("delete from accounts.health_signals where account_id=$1 and kind='degraded' and (source=$2 or source='legacy') and last_seen_at<=$3::timestamptz returning source", [input.accountId, input.source, input.startedAt]);
+      if (!removed.rows[0]) { await client.query('commit'); return this.toAccount(account.rows[0]); }
+      const remaining = await client.query("select source,last_seen_at from accounts.health_signals where account_id=$1 and kind='degraded' order by last_seen_at desc limit 1", [input.accountId]);
+      const updated = await client.query(`update accounts.accounts set degraded_source=$2,degraded_at=$3,
+        status=case when risk_episode is not null then 'verification_required' when status in ('disabled','expired') then status
+          when $2::text is not null then 'degraded' when transport_status='connected' and transport_seen_at>now()-interval '15 seconds' then 'connected' else 'disconnected' end,
+        updated_at=now() where id=$1 returning *`, [input.accountId, remaining.rows[0]?.source ?? null, remaining.rows[0]?.last_seen_at ?? null]);
+      await client.query('commit');
+      return this.toAccount(updated.rows[0]);
+    } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
+  }
+  async recordAccountRisk(input: { adminId: string; accountId: string; code: string; source: string }): Promise<AccountRecord | undefined> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      const row = await client.query("select a.* from accounts.accounts a join auth.account_scopes s on s.account_id=a.id where a.id=$1 and s.admin_id=$2 and s.status='active' and a.status<>'disabled' for update", [input.accountId, input.adminId]);
+      if (!row.rows[0]) { await client.query('rollback'); return undefined; }
+      const episode = row.rows[0].risk_episode ? String(row.rows[0].risk_episode) : createId();
+      await client.query(`insert into accounts.health_signals(account_id,kind,source,code,episode,last_seen_at)
+        values ($1,'verification_required',$2,$3,$4,now())
+        on conflict(account_id,kind,source) do update set code=excluded.code,episode=excluded.episode,last_seen_at=excluded.last_seen_at`, [input.accountId, input.source, input.code, episode]);
+      const updated = await client.query("update accounts.accounts set status='verification_required', risk_code=$2, risk_source=$3, risk_first_seen_at=coalesce(risk_first_seen_at,now()), risk_last_seen_at=now(), risk_episode=$4, updated_at=now() where id=$1 returning *", [input.accountId, input.code, input.source, episode]);
+      await client.query("insert into accounts.risk_alert_outbox (account_id,episode,event_type) values ($1,$2,'verification_required') on conflict do nothing", [input.accountId, episode]);
+      await client.query('commit');
+      return this.toAccount(updated.rows[0]);
+    } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
+  }
+  async clearAccountRisk(input: { adminId: string; accountId: string; episode: string; source: string; startedAt: string }): Promise<AccountRecord | undefined> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      const account = await client.query("select a.* from accounts.accounts a join auth.account_scopes s on s.account_id=a.id where a.id=$1 and s.admin_id=$2 and s.status='active' for update", [input.accountId, input.adminId]);
+      if (!account.rows[0] || String(account.rows[0].risk_episode ?? '') !== input.episode) { await client.query('commit'); return account.rows[0] ? this.toAccount(account.rows[0]) : undefined; }
+      const removed = await client.query(`delete from accounts.health_signals where account_id=$1 and kind='verification_required' and episode=$2::uuid
+        and (source=$3 or source='legacy') and last_seen_at<=$4::timestamptz returning source`, [input.accountId, input.episode, input.source, input.startedAt]);
+      if (!removed.rows[0]) { await client.query('commit'); return this.toAccount(account.rows[0]); }
+      const remaining = await client.query("select source,code,last_seen_at from accounts.health_signals where account_id=$1 and kind='verification_required' and episode=$2::uuid order by last_seen_at desc limit 1", [input.accountId, input.episode]);
+      let updated;
+      if (remaining.rows[0]) {
+        updated = await client.query('update accounts.accounts set risk_source=$2,risk_code=$3,risk_last_seen_at=$4,updated_at=now() where id=$1 returning *', [input.accountId, remaining.rows[0].source, remaining.rows[0].code, remaining.rows[0].last_seen_at]);
+      } else {
+        updated = await client.query(`update accounts.accounts set status=case when degraded_source is not null then 'degraded'
+          when transport_status='connected' and transport_seen_at>now()-interval '15 seconds' then 'connected' else 'disconnected' end,
+          risk_code=null,risk_source=null,risk_first_seen_at=null,risk_last_seen_at=null,risk_episode=null,updated_at=now() where id=$1 returning *`, [input.accountId]);
+        await client.query("insert into accounts.risk_alert_outbox (account_id,episode,event_type) values ($1,$2,'verification_cleared') on conflict do nothing", [input.accountId, input.episode]);
+        await client.query("update orders.payment_event_jobs set next_attempt_at=now(),updated_at=now() where account_id=$1 and status in ('pending','resolve_pending') and last_error ~ 'ACCOUNT_NOT_READY|ACCOUNT_VALIDATION_REQUIRED|SESSION_EXPIRED|CREDENTIAL_MISSING|MTOP_RETRY_EXHAUSTED'", [input.accountId]);
+      }
+      await client.query('commit');
+      return this.toAccount(updated.rows[0]);
+    } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
+  }
+  async setAccountTransport(input: { adminId: string; accountId: string; status: 'connecting' | 'connected' | 'disconnected' | 'failed' }): Promise<void> {
+    const updated = await this.pool.query(`with previous as materialized (select id,transport_status from accounts.accounts where id=$2), updated as (
+      update accounts.accounts a set transport_status=$3,transport_seen_at=case when $3='connected' then now() else transport_seen_at end,
+      status=case when a.risk_episode is not null or a.status in ('disabled','expired','verification_required') then a.status
+        when $3='connected' and a.status in ('pending','disconnected','connected') then 'connected'
+        when $3<>'connected' and a.status='connected' then 'disconnected' else a.status end,
+      last_connected_at=case when $3='connected' then now() else last_connected_at end,updated_at=now()
+      from previous where a.id=previous.id and exists(select 1 from auth.account_scopes s where s.admin_id=$1 and s.account_id=a.id and s.status='active')
+      returning previous.transport_status as old_status) select old_status from updated`,
+    [input.adminId, input.accountId, input.status]);
+    if (input.status === 'connected' && updated.rows[0] && updated.rows[0].old_status !== 'connected') await this.pool.query("update orders.payment_event_jobs set next_attempt_at=now(),updated_at=now() where account_id=$1 and status in ('pending','resolve_pending') and last_error='XIANYU_IM_NOT_READY'", [input.accountId]);
+  }
+  async flushAccountRiskAlerts(limit: number): Promise<number> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      const pending = await client.query("select * from accounts.risk_alert_outbox where status='pending' order by created_at for update skip locked limit $1", [Math.max(1, Math.min(100, limit))]);
+      let delivered = 0;
+      for (const alert of pending.rows) {
+        const notifications = await client.query(`insert into accounts.risk_notifications(alert_id,admin_id,account_id,event_type)
+          select $1,s.admin_id,$2,$3 from (select distinct admin_id from auth.account_scopes where account_id=$2 and status='active' and (expires_at is null or expires_at>now())) s
+          on conflict do nothing returning admin_id`, [alert.id, alert.account_id, alert.event_type]);
+        if (!notifications.rows.length) {
+          const existing = await client.query('select 1 from accounts.risk_notifications where alert_id=$1 limit 1', [alert.id]);
+          if (!existing.rows[0]) continue;
+        }
+        await client.query(`insert into observability.audit_events(id,actor_type,account_id,action,target_ref,request_id,trace_id,payload_digest,reason)
+          values($1::uuid,'system',$2,$3,$4,$5,$5,($1::uuid)::text,$6) on conflict(id) do nothing`, [alert.id, alert.account_id, `account.risk.${alert.event_type}`, alert.episode, `risk:${alert.episode}`, alert.event_type]);
+        await client.query("update accounts.risk_alert_outbox set status='delivered',delivered_at=now() where id=$1", [alert.id]);
+        delivered += 1;
+      }
+      await client.query('commit');
+      return delivered;
+    } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
+  }
+  async listRiskNotifications(adminId: string): Promise<Array<{ id: string; accountId: string; eventType: 'verification_required' | 'verification_cleared'; createdAt: string }>> {
+    const result = await this.pool.query(`select n.alert_id,n.account_id,n.event_type,n.created_at from accounts.risk_notifications n
+      where n.admin_id=$1 and n.read_at is null and exists(select 1 from auth.account_scopes s where s.admin_id=$1 and s.account_id=n.account_id and s.status='active')
+      order by n.created_at desc limit 100`, [adminId]);
+    return result.rows.map((row) => ({ id: String(row.alert_id), accountId: String(row.account_id), eventType: row.event_type as 'verification_required' | 'verification_cleared', createdAt: dateIso(row.created_at) }));
+  }
+  async acknowledgeRiskNotification(adminId: string, id: string): Promise<boolean> {
+    const result = await this.pool.query(`update accounts.risk_notifications n set read_at=now() where n.alert_id=$2 and n.admin_id=$1 and n.read_at is null
+      and exists(select 1 from auth.account_scopes s where s.admin_id=$1 and s.account_id=n.account_id and s.status='active')`, [adminId, id]);
+    return (result.rowCount ?? 0) === 1;
+  }
   async deleteAccount(adminId: string, accountId: string): Promise<AccountRecord | undefined> { const client = await this.pool.connect(); try { await client.query('begin'); const current = await client.query('select a.* from accounts.accounts a join auth.account_scopes s on s.account_id=a.id where a.id=$1 and s.admin_id=$2 and s.status=\'active\' and a.status<>\'disabled\' and (s.expires_at is null or s.expires_at>now()) for update', [accountId, adminId]); if (!current.rows[0]) { await client.query('rollback'); return undefined; } const result = await client.query('update accounts.accounts set status=\'disabled\', updated_at=now() where id=$1 returning *', [accountId]); await client.query('update auth.account_credentials set status=\'revoked\', updated_at=now() where account_id=$1 and status=\'active\'', [accountId]); await client.query('update auth.account_scopes set status=\'revoked\', revoked_at=now() where account_id=$1 and status=\'active\'', [accountId]); await client.query('commit'); return result.rows[0] ? this.toAccount(result.rows[0]) : undefined; } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); } }
   async listProducts(adminId: string, query: ProductListQuery): Promise<ProductListResult> {
     const page = query.page ?? 1;
@@ -444,6 +562,127 @@ export class PostgresStore implements Store {
     const result = await this.pool.query(`select o.*, coalesce(nullif(btrim(o.buyer_nickname), ''), nullif(btrim(buyer_identity.buyer_display_name), '')) as display_buyer_nickname, coalesce(nullif(btrim(o.buyer_avatar_url), ''), nullif(btrim(buyer_identity.buyer_avatar_url), '')) as display_buyer_avatar_url, case when o.item_title is not null and btrim(o.item_title)<>'' and btrim(o.item_title)<>btrim(o.item_id) then o.item_title when product.title is not null and btrim(product.title)<>'' and btrim(product.title)<>btrim(o.item_id) then product.title when item_identity.item_title is not null and btrim(item_identity.item_title)<>'' and btrim(item_identity.item_title)<>btrim(o.item_id) and (item_identity.item_ref is null or btrim(item_identity.item_title)<>btrim(item_identity.item_ref)) then item_identity.item_title when buyer_item_identity.item_title is not null and btrim(buyer_item_identity.item_title)<>'' and btrim(buyer_item_identity.item_title)<>btrim(o.item_id) and (buyer_item_identity.item_ref is null or btrim(buyer_item_identity.item_title)<>btrim(buyer_item_identity.item_ref)) then buyer_item_identity.item_title else null end as display_item_title, coalesce(nullif(btrim(item_identity.item_image_url), ''), nullif(btrim(buyer_item_identity.item_image_url), ''), nullif(product.attributes_json #>> '{xianyu,imageUrls,0}', ''), nullif(product.attributes_json #>> '{imageUrls,0}', '')) as display_item_image_url from orders.orders o left join lateral (select p.title, p.attributes_json from products.products p where p.account_id=o.account_id and (p.id::text=o.product_id or p.external_product_ref=o.item_id) order by (p.id::text=o.product_id) desc limit 1) product on true left join lateral (select c.buyer_display_name, c.buyer_avatar_url from messages.conversations c where c.account_id=o.account_id and ((o.conversation_id is not null and c.id::text=o.conversation_id) or c.buyer_ref=o.buyer_id) order by (c.id::text=o.conversation_id) desc, c.updated_at desc nulls last limit 1) buyer_identity on true left join lateral (select c.item_ref, c.item_title, c.item_image_url from messages.conversations c where c.account_id=o.account_id and ((o.conversation_id is not null and c.id::text=o.conversation_id) or c.item_ref=o.item_id) order by (c.item_title is not null and btrim(c.item_title)<>'') desc, (c.id::text=o.conversation_id) desc, (c.item_ref=o.item_id) desc, c.updated_at desc nulls last limit 1) item_identity on true left join lateral (select c.item_ref, c.item_title, c.item_image_url from messages.conversations c where c.account_id=o.account_id and c.buyer_ref=o.buyer_id order by (c.item_title is not null and btrim(c.item_title)<>'') desc, c.updated_at desc nulls last limit 1) buyer_item_identity on true where o.order_no=$1${accountClause} and exists (select 1 from auth.account_scopes scope where scope.account_id=o.account_id and scope.admin_id=$2 and scope.status='active' and (scope.expires_at is null or scope.expires_at>now())) limit 1`, params);
     return result.rows[0] ? this.toOrder(result.rows[0]) : undefined;
   }
+  async enqueuePaymentEvent(input: { adminId: string; accountId: string; eventRef: string; orderNo?: string; buyerRef: string; itemRef?: string; conversationRef: string; receivedAt: string; observedAt?: string }): Promise<PaymentEventJob> {
+    const result = await this.pool.query(`insert into orders.payment_event_jobs
+      (admin_id,account_id,event_ref,order_no,buyer_ref,item_ref,conversation_ref,status,received_at,observed_at,next_attempt_at)
+      select $1,$2,$3,$4,$5,$6,$7,$8,$9,coalesce($10::timestamptz,now()),now() where exists
+        (select 1 from auth.account_scopes where admin_id=$1 and account_id=$2 and status='active' and (expires_at is null or expires_at>now()))
+      on conflict do nothing returning *`,
+      [input.adminId, input.accountId, input.eventRef, input.orderNo ?? null, input.buyerRef, input.itemRef ?? null, input.conversationRef, input.orderNo ? 'pending' : 'resolve_pending', input.receivedAt, input.observedAt ?? null]);
+    if (result.rows[0]) return this.toPaymentEventJob(result.rows[0]);
+    const existing = await this.pool.query('select * from orders.payment_event_jobs where account_id=$1 and (event_ref=$2 or ($3::text is not null and order_no=$3)) order by (event_ref=$2) desc limit 1', [input.accountId, input.eventRef, input.orderNo ?? null]);
+    if (!existing.rows[0]) throw new Error('ACCOUNT_SCOPE_FORBIDDEN');
+    return this.toPaymentEventJob(existing.rows[0]);
+  }
+  async claimPaymentEvents(input: { workerId: string; limit: number; leaseMs: number; accountId?: string }): Promise<PaymentEventJob[]> {
+    const ownerToken = `${input.workerId}:${createId()}`;
+    const result = await this.pool.query(`with due as (
+      select id from orders.payment_event_jobs
+      where ($4::uuid is null or account_id=$4) and ((status in ('pending','resolve_pending') and next_attempt_at<=now()) or (status='running' and lease_until<=now()))
+      order by next_attempt_at,received_at for update skip locked limit $1
+    ) update orders.payment_event_jobs j set status='running',attempt_count=j.attempt_count+1,owner_token=$2,
+      lease_until=now()+($3::int * interval '1 millisecond'),updated_at=now()
+      from due where j.id=due.id returning j.*`, [input.limit, ownerToken, input.leaseMs, input.accountId ?? null]);
+    return result.rows.map((row) => this.toPaymentEventJob(row));
+  }
+  async isDeliveryCutoverActive(): Promise<boolean> {
+    const result = await this.pool.query('select active from orders.delivery_cutover_gate where id=true');
+    return result.rows[0]?.active === true;
+  }
+  async finishPaymentEvent(input: { id: string; ownerToken: string; status: Exclude<PaymentEventJob['status'], 'running'>; orderNo?: string; nextAttemptAt?: string; lastError?: string }): Promise<boolean> {
+    let result;
+    try { result = await this.pool.query(`update orders.payment_event_jobs set status=$3,order_no=case when exists
+      (select 1 from orders.payment_event_jobs other where other.account_id=orders.payment_event_jobs.account_id and other.order_no=$4 and other.id<>$1)
+      then order_no else coalesce($4,order_no) end,
+      next_attempt_at=coalesce($5,next_attempt_at),last_error=$6,owner_token=null,lease_until=null,updated_at=now()
+      where id=$1 and owner_token=$2 and status='running'`, [input.id, input.ownerToken, input.status, input.orderNo ?? null, input.nextAttemptAt ?? null, input.lastError ?? null]);
+    } catch (error) {
+      if ((error as { code?: string }).code !== '23505' || !input.orderNo) throw error;
+      result = await this.pool.query(`update orders.payment_event_jobs set status='completed',last_error='DUPLICATE_ORDER_JOB',owner_token=null,lease_until=null,updated_at=now()
+        where id=$1 and owner_token=$2 and status='running'`, [input.id, input.ownerToken]);
+    }
+    return (result.rowCount ?? 0) === 1;
+  }
+  async setPaymentEventDue(input: { id: string; ownerToken: string; dueAt: string }): Promise<string | undefined> {
+    const result = await this.pool.query("update orders.payment_event_jobs set due_at=coalesce(due_at,$3::timestamptz),updated_at=now() where id=$1 and owner_token=$2 and status='running' returning due_at", [input.id, input.ownerToken, input.dueAt]);
+    return result.rows[0] ? dateIso(result.rows[0].due_at) : undefined;
+  }
+  private toPaymentEventJob(row: Row): PaymentEventJob {
+    return { id: String(row.id), adminId: String(row.admin_id), accountId: String(row.account_id), eventRef: String(row.event_ref), orderNo: row.order_no ? String(row.order_no) : undefined, buyerRef: String(row.buyer_ref), itemRef: row.item_ref ? String(row.item_ref) : undefined, conversationRef: String(row.conversation_ref), status: row.status as PaymentEventJob['status'], attemptCount: Number(row.attempt_count), receivedAt: dateIso(row.received_at), observedAt: iso(row.observed_at), nextAttemptAt: dateIso(row.next_attempt_at), dueAt: iso(row.due_at), ownerToken: row.owner_token ? String(row.owner_token) : undefined, lastError: row.last_error ? String(row.last_error) : undefined };
+  }
+  async beginDeliverySendStep(input: { adminId: string; accountId: string; orderNo: string; executionKey: string; stepKey: string }): Promise<{ status: 'ready' | 'succeeded' | 'blocked'; externalRef?: string }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      const scope = await client.query("select 1 from auth.account_scopes where admin_id=$1 and account_id=$2 and status='active' and (expires_at is null or expires_at>now())", [input.adminId, input.accountId]);
+      if (!scope.rows[0]) throw new Error('ACCOUNT_SCOPE_FORBIDDEN');
+      await client.query("insert into orders.delivery_send_guards(account_id,order_no,execution_key,status) values ($1,$2,$3,'active') on conflict do nothing", [input.accountId, input.orderNo, input.executionKey]);
+      const guard = await client.query('select * from orders.delivery_send_guards where account_id=$1 and order_no=$2 for update', [input.accountId, input.orderNo]);
+      if (guard.rows[0].execution_key !== input.executionKey || guard.rows[0].status !== 'active') { await client.query('commit'); return { status: 'blocked' }; }
+      const inserted = await client.query("insert into orders.delivery_send_steps(account_id,order_no,step_key,execution_key,status) values ($1,$2,$3,$4,'sending') on conflict do nothing returning *", [input.accountId, input.orderNo, input.stepKey, input.executionKey]);
+      if (inserted.rows[0]) { await client.query('commit'); return { status: 'ready' }; }
+      const step = await client.query('select * from orders.delivery_send_steps where account_id=$1 and order_no=$2 and step_key=$3 for update', [input.accountId, input.orderNo, input.stepKey]);
+      if (step.rows[0]?.status === 'succeeded' && step.rows[0]?.execution_key === input.executionKey) { await client.query('commit'); return { status: 'succeeded', externalRef: step.rows[0].external_ref ? String(step.rows[0].external_ref) : undefined }; }
+      await client.query("update orders.delivery_send_guards set status='unknown',updated_at=now() where account_id=$1 and order_no=$2", [input.accountId, input.orderNo]);
+      await client.query("update orders.delivery_send_steps set status='unknown',updated_at=now() where account_id=$1 and order_no=$2 and step_key=$3 and status='sending'", [input.accountId, input.orderNo, input.stepKey]);
+      await client.query('commit');
+      return { status: 'blocked' };
+    } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
+  }
+  async bindDeliveryReservation(input: { adminId: string; accountId: string; orderNo: string; reservationId: string; executionKey: string }): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      const reservation = await client.query(`select r.id from coupons.coupon_reservations r
+        where r.id=$1 and r.admin_id=$2 and r.account_id=$3 and r.execution_key=$4 and r.status='reserved' and r.lease_until>now()
+        and exists(select 1 from auth.account_scopes s where s.admin_id=$2 and s.account_id=r.account_id and s.status='active') for update`,
+      [input.reservationId, input.adminId, input.accountId, input.executionKey]);
+      if (!reservation.rows[0]) { await client.query('rollback'); return false; }
+      await client.query("insert into orders.delivery_send_guards(account_id,order_no,execution_key,status) values ($1,$2,$3,'active') on conflict do nothing", [input.accountId, input.orderNo, input.executionKey]);
+      const guard = await client.query('select execution_key,status from orders.delivery_send_guards where account_id=$1 and order_no=$2 for update', [input.accountId, input.orderNo]);
+      if (guard.rows[0]?.execution_key !== input.executionKey || guard.rows[0]?.status !== 'active') { await client.query('rollback'); return false; }
+      await client.query('commit');
+      return true;
+    } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
+  }
+  async saveDeliveryConfirmation(input: { adminId: string; accountId: string; orderNo: string; executionKey: string; noLogisticsForm: boolean; tradeText?: string }): Promise<void> {
+    const result = await this.pool.query(`insert into orders.delivery_confirmation_snapshots(account_id,order_no,execution_key,no_logistics_form,trade_text_ciphertext)
+      select $2,$3,$4,$5,$6 where exists(select 1 from auth.account_scopes where admin_id=$1 and account_id=$2 and status='active')
+      on conflict(account_id,order_no) do nothing returning execution_key`, [input.adminId, input.accountId, input.orderNo, input.executionKey, input.noLogisticsForm, input.tradeText ? encryptCouponValue(input.tradeText) : null]);
+    if (!result.rows[0]) {
+      const existing = await this.getDeliveryConfirmation(input);
+      if (!existing || existing.noLogisticsForm !== input.noLogisticsForm || existing.tradeText !== input.tradeText) throw new Error('DELIVERY_CONFIRMATION_SNAPSHOT_CONFLICT');
+    }
+  }
+  async getDeliveryConfirmation(input: { adminId: string; accountId: string; orderNo: string; executionKey: string }): Promise<{ noLogisticsForm: boolean; tradeText?: string } | undefined> {
+    const result = await this.pool.query(`select c.* from orders.delivery_confirmation_snapshots c where c.account_id=$2 and c.order_no=$3 and c.execution_key=$4
+      and exists(select 1 from auth.account_scopes s where s.admin_id=$1 and s.account_id=c.account_id and s.status='active')`, [input.adminId, input.accountId, input.orderNo, input.executionKey]);
+    const row = result.rows[0];
+    return row ? { noLogisticsForm: Boolean(row.no_logistics_form), tradeText: row.trade_text_ciphertext ? decryptCouponValue(row.trade_text_ciphertext) : undefined } : undefined;
+  }
+  async completeDeliverySendStep(input: { accountId: string; orderNo: string; executionKey: string; stepKey: string; externalRef?: string }): Promise<boolean> {
+    const result = await this.pool.query("update orders.delivery_send_steps set status='succeeded',external_ref=$5,updated_at=now() where account_id=$1 and order_no=$2 and step_key=$3 and execution_key=$4 and status='sending'", [input.accountId, input.orderNo, input.stepKey, input.executionKey, input.externalRef ?? null]);
+    return (result.rowCount ?? 0) === 1;
+  }
+  async markDeliverySendUnknown(input: { accountId: string; orderNo: string; executionKey: string; stepKey: string }): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      await client.query("update orders.delivery_send_guards set status='unknown',updated_at=now() where account_id=$1 and order_no=$2 and execution_key=$3", [input.accountId, input.orderNo, input.executionKey]);
+      await client.query("update orders.delivery_send_steps set status='unknown',updated_at=now() where account_id=$1 and order_no=$2 and execution_key=$3 and step_key=$4 and status='sending'", [input.accountId, input.orderNo, input.executionKey, input.stepKey]);
+      await client.query('commit');
+    } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
+  }
+  async quarantineCouponReservation(input: { adminId: string; executionKey: string; reason: string }): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      const changed = await client.query("update coupons.coupon_reservations set status='quarantined',reason=$3,updated_at=now() where admin_id=$1 and execution_key=$2 and status='reserved' returning id", [input.adminId, input.executionKey, input.reason]);
+      if (changed.rows[0]) await client.query("update coupons.coupon_items i set reserved_until=null from coupons.coupon_reservation_items ri where ri.reservation_id=$1 and ri.item_id=i.id and i.status='reserved'", [changed.rows[0].id]);
+      await client.query('commit');
+      return Boolean(changed.rows[0]);
+    } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
+  }
   async getAutomationExecution(executionKey: string): Promise<AutomationExecutionLedgerRecord | undefined> {
     const result = await this.pool.query('select * from automation.execution_ledger where execution_key=$1 limit 1', [executionKey]);
     return result.rows[0] ? this.toAutomationExecution(result.rows[0]) : undefined;
@@ -470,6 +709,10 @@ export class PostgresStore implements Store {
       set status='completed', result_json=$3::jsonb, retryable=$4, lease_until=null, updated_at=now()
       where execution_key=$1 and owner_token=$2`, [input.executionKey, input.ownerToken, JSON.stringify(input.result), input.retryable]);
     if ((result.rowCount ?? 0) !== 1) throw new Error('AUTOMATION_EXECUTION_OWNER_CONFLICT');
+  }
+  async renewAutomationExecution(input: { executionKey: string; ownerToken: string; leaseUntil: string }): Promise<boolean> {
+    const result = await this.pool.query("update automation.execution_ledger set lease_until=$3,updated_at=now() where execution_key=$1 and owner_token=$2 and status='running' and lease_until>now()", [input.executionKey, input.ownerToken, input.leaseUntil]);
+    return (result.rowCount ?? 0) === 1;
   }
   async cleanupExpiredCouponReservations(): Promise<number> {
     const client = await this.pool.connect();
@@ -908,6 +1151,7 @@ export class PostgresStore implements Store {
       const existing = existingResult.rows[0];
       if (existing) {
         if (String(existing.admin_id) !== input.adminId || String(existing.account_id) !== input.accountId || String(existing.fingerprint) !== fingerprint) throw new Error('COUPON_RESERVATION_KEY_CONFLICT');
+        if (existing.status === 'quarantined') throw new Error('COUPON_RESERVATION_QUARANTINED');
         if (existing.status === 'committed' || existing.status === 'reserved') {
           const record = await this.loadCouponReservation(client, existing);
           await client.query('commit');
@@ -991,7 +1235,8 @@ export class PostgresStore implements Store {
       if (row.status === 'committed') { const record = await this.loadCouponReservation(client, row); await client.query('commit'); return record; }
       if (row.status === 'expired') { await client.query('commit'); throw new Error('COUPON_RESERVATION_EXPIRED'); }
       if (row.status !== 'reserved') throw new Error('COUPON_RESERVATION_NOT_ACTIVE');
-      if (new Date(String(row.lease_until)).getTime() <= Date.now()) { await this.expireCouponReservations(client); throw new Error('COUPON_RESERVATION_EXPIRED'); }
+      const guarded = await client.query('select 1 from orders.delivery_send_guards where execution_key=$1 limit 1', [input.executionKey]);
+      if (!guarded.rows[0] && new Date(String(row.lease_until)).getTime() <= Date.now()) { await this.expireCouponReservations(client); throw new Error('COUPON_RESERVATION_EXPIRED'); }
       const expectedItems = await client.query('select count(*)::int as count from coupons.coupon_reservation_items where reservation_id=$1', [input.reservationId]);
       const expectedItemCount = Number(expectedItems.rows[0]?.count ?? 0);
       const reusable = await client.query(`update coupons.coupon_items i set status='available',reserved_until=null,consumed_at=null
@@ -1016,8 +1261,17 @@ export class PostgresStore implements Store {
       const row = result.rows[0];
       if (String(row.execution_key) !== input.executionKey) throw new Error('COUPON_RESERVATION_KEY_CONFLICT');
       if (row.status === 'committed') throw new Error('COUPON_RESERVATION_FINALIZED');
+      if (row.status === 'quarantined') throw new Error('COUPON_RESERVATION_QUARANTINED');
       if (row.status === 'released' || row.status === 'expired') { const record = await this.loadCouponReservation(client, row); await client.query('commit'); return record; }
       if (row.status !== 'reserved') throw new Error('COUPON_RESERVATION_NOT_ACTIVE');
+      const guarded = await client.query('select 1 from orders.delivery_send_guards where execution_key=$1 limit 1', [input.executionKey]);
+      if (guarded.rows[0]) {
+        await client.query("update coupons.coupon_reservations set status='quarantined',reason=$2,updated_at=now() where id=$1", [input.reservationId, input.reason]);
+        const quarantined = await client.query('select * from coupons.coupon_reservations where id=$1', [input.reservationId]);
+        const record = await this.loadCouponReservation(client, quarantined.rows[0]);
+        await client.query('commit');
+        return record;
+      }
       if (new Date(String(row.lease_until)).getTime() <= Date.now()) { await this.expireCouponReservations(client); const expired = await client.query('select * from coupons.coupon_reservations where id=$1', [input.reservationId]); const record = await this.loadCouponReservation(client, expired.rows[0]); await client.query('commit'); return record; }
       await client.query(`update coupons.coupon_items i set status='available',reserved_until=null
         where i.status='reserved' and i.id in (select ri.item_id from coupons.coupon_reservation_items ri where ri.reservation_id=$1)`, [input.reservationId]);
@@ -1559,7 +1813,7 @@ export class PostgresStore implements Store {
     const row = result.rows[0];
     if (row.status === 'active' && row.expires_at && new Date(String(row.expires_at)).getTime() <= Date.now()) {
       await this.pool.query('update auth.account_credentials set status=\'expired\', updated_at=now() where id=$1 and status=\'active\'', [row.id]);
-      await this.pool.query('update accounts.accounts set status=\'expired\', updated_at=now() where id=$1 and status=\'connected\'', [accountId]);
+      await this.pool.query("update accounts.accounts set status='expired', updated_at=now() where id=$1 and status in ('pending','disconnected','connected') and risk_episode is null and degraded_source is null", [accountId]);
       row.status = 'expired';
     }
     return this.toCredential(row);
@@ -2020,6 +2274,7 @@ export class PostgresStore implements Store {
       update coupons.coupon_reservations
       set status='expired',reason='reservation_expired',finalized_at=now(),updated_at=now()
       where status='reserved' and lease_until<=now()
+        and not exists (select 1 from orders.delivery_send_guards g where g.execution_key=coupons.coupon_reservations.execution_key)
       returning id
     ), released as (
       update coupons.coupon_items i
@@ -2114,7 +2369,12 @@ export class PostgresStore implements Store {
   private toAdmin(row: Row): AdminRecord { return { id: String(row.id), email: String(row.email), passwordHash: String(row.password_hash), displayName: String(row.display_name ?? ''), role: String(row.role), status: row.status as AdminRecord['status'], createdAt: new Date(String(row.created_at)).toISOString(), lastLoginAt: iso(row.last_login_at) }; }
   private toSession(row: Row): SessionRecord { return { id: String(row.id), adminId: String(row.admin_id), issuedAt: new Date(String(row.issued_at)).toISOString(), lastSeenAt: new Date(String(row.last_seen_at)).toISOString(), expiresAt: new Date(String(row.expires_at)).toISOString(), csrfTokenHash: String(row.csrf_token_hash), revokedAt: iso(row.revoked_at) }; }
   private toScope(row: Row): AccountScopeRecord { return { id: String(row.id), adminId: String(row.admin_id), accountId: String(row.account_id), scope: String(row.scope), status: row.status as AccountScopeRecord['status'], expiresAt: iso(row.expires_at), revokedAt: iso(row.revoked_at) }; }
-  private toAccount(row: Row): AccountRecord { return { id: String(row.id), platform: String(row.platform), sellerRef: String(row.seller_ref), displayName: row.display_name ? String(row.display_name) : undefined, remark: row.remark ? String(row.remark) : undefined, avatarUrl: row.avatar_url ? String(row.avatar_url) : undefined, platformUserId: row.platform_user_id ? String(row.platform_user_id) : undefined, status: row.status as AccountRecord['status'], createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString(), lastConnectedAt: iso(row.last_connected_at) }; }
+  private toAccount(row: Row): AccountRecord {
+    const transportSeenAt = iso(row.transport_seen_at);
+    const transportFresh = row.transport_status === 'connected' && transportSeenAt !== undefined && Date.parse(transportSeenAt) > Date.now() - 15_000;
+    const status = row.risk_episode ? 'verification_required' : ['disabled', 'expired'].includes(String(row.status)) ? row.status as AccountRecord['status'] : row.degraded_source ? 'degraded' : row.status === 'connected' && !transportFresh ? 'disconnected' : row.status as AccountRecord['status'];
+    return { id: String(row.id), platform: String(row.platform), sellerRef: String(row.seller_ref), displayName: row.display_name ? String(row.display_name) : undefined, remark: row.remark ? String(row.remark) : undefined, avatarUrl: row.avatar_url ? String(row.avatar_url) : undefined, platformUserId: row.platform_user_id ? String(row.platform_user_id) : undefined, status, createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString(), lastConnectedAt: iso(row.last_connected_at), riskCode: row.risk_code ? String(row.risk_code) : undefined, riskSource: row.risk_source ? String(row.risk_source) : undefined, riskFirstSeenAt: iso(row.risk_first_seen_at), riskLastSeenAt: iso(row.risk_last_seen_at), riskEpisode: row.risk_episode ? String(row.risk_episode) : undefined, degradedSource: row.degraded_source ? String(row.degraded_source) : undefined, degradedAt: iso(row.degraded_at), transportStatus: row.transport_status as AccountRecord['transportStatus'], transportSeenAt };
+  }
   private toProduct(row: Row): ProductRecord {
     const attributes = row.attributes_json && typeof row.attributes_json === 'object' && !Array.isArray(row.attributes_json) ? row.attributes_json as Record<string, unknown> : {};
     return { id: String(row.id), accountId: String(row.account_id), externalProductRef: row.external_product_ref ? String(row.external_product_ref) : undefined, title: String(row.title), description: row.description ? String(row.description) : undefined, categoryCode: row.category_code ? String(row.category_code) : undefined, attributes: { ...attributes }, defaultReplyTemplate: row.default_reply_template ? String(row.default_reply_template) : undefined, knowledgeBase: row.knowledge_base ? String(row.knowledge_base) : undefined, configVersion: Number(row.config_version ?? 1), priceMinor: row.price_minor === null || row.price_minor === undefined ? undefined : Number(row.price_minor), status: row.status as ProductRecord['status'], source: (row.source ?? 'local') as ProductRecord['source'], lastSyncedAt: iso(row.last_synced_at), xianyuUpdatedAt: iso(row.xianyu_updated_at), xianyuListRank: row.xianyu_list_rank === null || row.xianyu_list_rank === undefined ? undefined : Number(row.xianyu_list_rank), sourcePayloadDigest: row.source_payload_digest ? String(row.source_payload_digest) : undefined, createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString(), skuCount: Number(row.sku_count ?? 0), assetCount: Number(row.asset_count ?? 0), couponBatches: this.toProductCouponBatches(row.coupon_batches) };

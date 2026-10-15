@@ -5,6 +5,7 @@ import { InboundInboxWorker } from './inbound-inbox-worker.js';
 import { InboundQuarantineCleanupWorker } from './inbound-quarantine-cleanup-worker.js';
 import { ProductAutomationOrderRefreshWorker } from './product-automation-order-worker.js';
 import { ProductAutomationReminderWorker } from './product-automation-reminder-worker.js';
+import { AccountRiskAlertWorker } from './account-risk-alert-worker.js';
 
 const config = loadConfig();
 const runtime = createApp(config);
@@ -44,22 +45,27 @@ const productAutomationReminderWorker = new ProductAutomationReminderWorker(runt
 });
 const productAutomationOrderRefreshWorker = new ProductAutomationOrderRefreshWorker(runtime.store, (input) => runtime.orders.refresh(input), {
   enabled: process.env.PRODUCT_AUTOMATION_ORDER_REFRESH_WORKER_ENABLED?.trim().toLowerCase() !== 'false',
-  pollMs: positiveNumber(process.env.PRODUCT_AUTOMATION_ORDER_REFRESH_WORKER_POLL_MS, 5_000),
+  pollMs: Math.max(300_000, positiveNumber(process.env.PRODUCT_AUTOMATION_ORDER_REFRESH_WORKER_POLL_MS, 300_000)),
   pageSize: positiveNumber(process.env.PRODUCT_AUTOMATION_ORDER_REFRESH_PAGE_SIZE, 100),
   maxPages: positiveNumber(process.env.PRODUCT_AUTOMATION_ORDER_REFRESH_MAX_PAGES, 20),
   onError: (error) => console.error('product automation order refresh worker poll failed', error),
 });
+const accountRiskAlertWorker = new AccountRiskAlertWorker(runtime.store, (error) => console.error('account risk alert worker poll failed', error));
 console.log(`xianyu-agent-worker started; redis=${config.redisUrl ?? 'not_configured'} workerId=${workerId} repairMode=${runtime.autoReplyRepair.currentMode} quarantineCleanupWorker=${quarantineCleanupEnabled ? 'enabled' : 'disabled'} quarantineCleanupPollMs=${quarantineCleanupPollMs} quarantineCleanupRetentionDays=${quarantineCleanupRetentionDays} quarantineCleanupBatchSize=${quarantineCleanupBatchSize} outcomeReviewWorker=${outcomeReviewWorker ? 'enabled' : 'disabled'} productAutomationOrderRefreshWorker=${productAutomationOrderRefreshWorker ? 'enabled' : 'disabled'} productAutomationReminderWorker=${productAutomationReminderWorker ? 'enabled' : 'disabled'}`);
 worker.start();
 quarantineCleanupWorker.start();
 outcomeReviewWorker?.start();
 productAutomationOrderRefreshWorker.start();
+runtime.paymentEventWorker.start();
+accountRiskAlertWorker.start();
 productAutomationReminderWorker.start();
 const shutdown = (signal: string) => {
   void (async () => {
     await outcomeReviewWorker?.stop();
     await quarantineCleanupWorker.stop();
     await productAutomationOrderRefreshWorker.stop();
+    await runtime.paymentEventWorker.stop();
+    await accountRiskAlertWorker.stop();
     await productAutomationReminderWorker.stop();
     await worker.stop();
     await runtime.modelProviderRuntime.close();

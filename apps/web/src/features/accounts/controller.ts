@@ -26,9 +26,9 @@ export function useAccountsController(options: { api?: AccountsApi; initialFilte
   const requestId = useRef(0);
   const filtersKey = useMemo(() => JSON.stringify(filters), [filters]);
 
-  const reload = useCallback(async () => {
+  const load = useCallback(async (silent: boolean) => {
     const currentRequest = ++requestId.current;
-    setState((previous) => ({ ...previous, phase: 'loading', error: null }));
+    if (!silent) setState((previous) => ({ ...previous, phase: 'loading', error: null }));
     try {
       const data = await accountsApi.list(filters);
       if (currentRequest !== requestId.current) return;
@@ -39,9 +39,16 @@ export function useAccountsController(options: { api?: AccountsApi; initialFilte
     }
   }, [accountsApi, filters]);
 
+  const reload = useCallback(() => load(false), [load]);
+
   useEffect(() => {
     void reload();
   }, [filtersKey, reload]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => { if (!document.hidden) void load(true); }, 3_000);
+    return () => window.clearInterval(timer);
+  }, [load]);
 
   const setSearch = useCallback((search: string) => {
     setFilters((previous) => ({ ...previous, search, page: 1 }));

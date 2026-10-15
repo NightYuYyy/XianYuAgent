@@ -28,6 +28,10 @@ const ADJUST_PRICE_API = 'mtop.taobao.idle.trade.user.adjust.price';
 const ORDER_DETAIL_API = 'mtop.idle.web.trade.order.detail';
 const DEFAULT_SOLD_ORDER_PAGE_SIZE = 30;
 
+class AccountHealthPersistenceError extends Error {
+  constructor(cause: unknown) { super('ACCOUNT_HEALTH_PERSIST_FAILED', { cause }); }
+}
+
 export interface MtopCredential { cookieHeader?: string; deviceId?: string; metadata?: Record<string, string>; }
 
 export interface MtopResult {
@@ -98,6 +102,7 @@ export interface XianyuMtopClientOptions {
   loadCredential: (adminId: string, accountId: string) => Promise<MtopCredential | undefined>;
   saveCookie: (adminId: string, accountId: string, cookieHeader: string, metadata?: Record<string, string>) => Promise<void>;
   onFailure?: (input: { adminId: string; accountId: string; api: string; errorCode?: string; message?: string; accountInvalid: boolean }) => Promise<void> | void;
+  onSuccess?: (input: { adminId: string; accountId: string; api: string; startedAt: string }) => Promise<void> | void;
 }
 
 export class XianyuMtopClient {
@@ -105,22 +110,20 @@ export class XianyuMtopClient {
   private readonly loadCredential: XianyuMtopClientOptions['loadCredential'];
   private readonly saveCookie: XianyuMtopClientOptions['saveCookie'];
   private readonly onFailure?: XianyuMtopClientOptions['onFailure'];
+  private readonly onSuccess?: XianyuMtopClientOptions['onSuccess'];
 
   constructor(options: XianyuMtopClientOptions) {
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.loadCredential = options.loadCredential;
     this.saveCookie = options.saveCookie;
     this.onFailure = options.onFailure;
+    this.onSuccess = options.onSuccess;
   }
 
-  private reportFailure(input: { adminId: string; accountId: string; api: string; errorCode?: string; message?: string; accountInvalid: boolean }): void {
-    try {
-      const { adminId, accountId, api, errorCode, message, accountInvalid } = input;
-      const result = this.onFailure?.({ adminId, accountId, api, errorCode, message, accountInvalid });
-      if (result && typeof (result as PromiseLike<void>).then === 'function') void Promise.resolve(result).catch(() => undefined);
-    } catch {
-      // Failure reporting must never mask the original external error.
-    }
+  private async reportFailure(input: { adminId: string; accountId: string; api: string; errorCode?: string; message?: string; accountInvalid: boolean }): Promise<void> {
+    const { adminId, accountId, api, errorCode, message, accountInvalid } = input;
+    try { await this.onFailure?.({ adminId, accountId, api, errorCode, message, accountInvalid }); }
+    catch (error) { throw new AccountHealthPersistenceError(error); }
   }
 
   async verifyLogin(adminId: string, accountId: string): Promise<MtopResult> {
@@ -142,7 +145,7 @@ export class XianyuMtopClient {
     const verificationUrl = extractVerificationUrl(result.response);
     if (!result.success || !accessToken) {
       const failure = { success: false, accountInvalid: result.accountInvalid, errorCode: result.errorCode ?? 'IM_TOKEN_MISSING', message: result.message ?? 'unable to obtain im token', verificationUrl, response: result.response, cookieHeader: result.cookieHeader };
-      if (result.success) this.reportFailure({ adminId, accountId, api: 'mtop.taobao.idlemessage.pc.login.token', ...failure });
+      if (result.success) await this.reportFailure({ adminId, accountId, api: 'mtop.taobao.idlemessage.pc.login.token', ...failure });
       return failure;
     }
     return { success: true, accountInvalid: false, accessToken, response: result.response, cookieHeader: result.cookieHeader };
@@ -164,10 +167,15 @@ export class XianyuMtopClient {
   }
 
   async uploadChatImage(adminId: string, accountId: string, filename: string, contentType: string, data: Buffer): Promise<XianyuChatImageUploadResult> {
+    const api = 'stream-upload.goofish.com/api/upload.api';
+    const startedAt = new Date().toISOString();
     const firstAttempt = await this.uploadChatImageOnce(adminId, accountId, filename, contentType, data);
-    if (firstAttempt.success) return firstAttempt;
+    if (firstAttempt.success) {
+      await this.reportUploadSuccess(adminId, accountId, api, startedAt);
+      return firstAttempt;
+    }
     if (firstAttempt.errorCode !== 'SESSION_EXPIRED') {
-      this.reportFailure({ adminId, accountId, api: 'stream-upload.goofish.com/api/upload.api', ...firstAttempt });
+      await this.reportFailure({ adminId, accountId, api, ...firstAttempt });
       return firstAttempt;
     }
 
@@ -177,9 +185,16 @@ export class XianyuMtopClient {
     const credential = await this.loadCredential(adminId, accountId);
     const refreshed = await this.fetchImToken(adminId, accountId, credential?.deviceId ?? `xianyu-${accountId}`);
     if (!refreshed.success) return firstAttempt;
+    const retryStartedAt = new Date().toISOString();
     const finalAttempt = await this.uploadChatImageOnce(adminId, accountId, filename, contentType, data);
-    if (!finalAttempt.success) this.reportFailure({ adminId, accountId, api: 'stream-upload.goofish.com/api/upload.api', ...finalAttempt });
+    if (finalAttempt.success) await this.reportUploadSuccess(adminId, accountId, api, retryStartedAt);
+    else await this.reportFailure({ adminId, accountId, api, ...finalAttempt });
     return finalAttempt;
+  }
+
+  private async reportUploadSuccess(adminId: string, accountId: string, api: string, startedAt: string): Promise<void> {
+    try { await this.onSuccess?.({ adminId, accountId, api, startedAt }); }
+    catch (error) { console.error(JSON.stringify({ component: 'xianyu-account-health', event: 'success_report_failed', accountId, api, error: error instanceof Error ? error.message : String(error) })); }
   }
 
   private async uploadChatImageOnce(adminId: string, accountId: string, filename: string, contentType: string, data: Buffer): Promise<XianyuChatImageUploadResult> {
@@ -345,6 +360,18 @@ export class XianyuMtopClient {
     return { pages, items, hasMore };
   }
 
+  async fetchOrderCandidates(adminId: string, accountId: string, orderNo?: string, pageNumber = 1): Promise<XianyuOrdersPageResult> {
+    const pageSize = orderNo ? 10 : 100;
+    const response = await this.fetchSoldOrders(adminId, accountId, {
+      pageNumber,
+      rowsPerPage: pageSize,
+      orderIds: orderNo ?? '',
+      queryCode: orderNo ? 'ALL' : 'NOT_SHIP',
+      orderSearchParam: '{}',
+    });
+    return { ...response, ...mapXianyuOrderPage(response.response, pageNumber, pageSize) };
+  }
+
   /**
    * Confirm virtual shipment for an order.
    *
@@ -393,7 +420,7 @@ export class XianyuMtopClient {
     if (result.success && businessSuccess !== true) {
       const remoteDetail = summarizeMutationFailure(result.response, businessSuccess);
       const message = `闲鱼订单改价接口未确认 data.success=true${remoteDetail ? `: ${remoteDetail}` : ''}`;
-      this.reportFailure({ adminId, accountId, api: ADJUST_PRICE_API, errorCode: 'MTOP_BUSINESS_ERROR', message, accountInvalid: false });
+      await this.reportFailure({ adminId, accountId, api: ADJUST_PRICE_API, errorCode: 'MTOP_BUSINESS_ERROR', message, accountInvalid: false });
       return {
         status: 'failed',
         externalRef: normalizedOrderNo,
@@ -433,13 +460,14 @@ export class XianyuMtopClient {
         errorCode: 'ORDER_DETAIL_EMPTY',
         message: 'order detail response did not contain an orderInfoVO snapshot',
       } satisfies XianyuOrderDetailResult;
-      this.reportFailure({ adminId, accountId, api: ORDER_DETAIL_API, errorCode: failure.errorCode, message: failure.message, accountInvalid: false });
+      await this.reportFailure({ adminId, accountId, api: ORDER_DETAIL_API, errorCode: failure.errorCode, message: failure.message, accountInvalid: false });
       return failure;
     }
     return { ...result, detail };
   }
 
   async call(adminId: string, accountId: string, api: string, version: string, data: Record<string, unknown>, extraParams: Record<string, string> = {}, requestOptions: MtopRequestOptions = {}): Promise<MtopResult> {
+    const startedAt = new Date().toISOString();
     const credential = await this.loadCredential(adminId, accountId);
     const initialCookieHeader = credential?.cookieHeader?.trim() ?? '';
     let cookieHeader = initialCookieHeader;
@@ -448,7 +476,7 @@ export class XianyuMtopClient {
     if (!cookieHeader && cookieSnapshot) cookieHeader = cookieHeaderFromSnapshot(cookieSnapshot);
     if (!cookieHeader) {
       const result = { success: false, accountInvalid: true, errorCode: 'CREDENTIAL_MISSING', message: 'account credential is missing', cookieHeader };
-      this.reportFailure({ adminId, accountId, api, ...result });
+      await this.reportFailure({ adminId, accountId, api, ...result });
       return result;
     }
     // A manually refreshed raw Cookie is authoritative. Once it diverges from
@@ -477,7 +505,7 @@ export class XianyuMtopClient {
       const token = (useSnapshot ? snapshotToken : cookieValue(cookieHeader, '_m_h5_tk')).split('_', 1)[0] ?? '';
       if (!token) {
         const result = { success: false, accountInvalid: true, errorCode: 'MTOP_TOKEN_MISSING', message: 'credential does not contain _m_h5_tk', cookieHeader };
-        this.reportFailure({ adminId, accountId, api, ...result });
+        await this.reportFailure({ adminId, accountId, api, ...result });
         return result;
       }
       const timestamp = String(Date.now());
@@ -529,38 +557,43 @@ export class XianyuMtopClient {
         const payload = await response.json() as Record<string, unknown>;
         const ret = Array.isArray(payload.ret) ? payload.ret.map(String) : [];
         const retMessage = ret[0] ?? '';
-        if (retMessage.includes('SUCCESS::')) return { success: true, accountInvalid: false, response: payload, cookieHeader };
+        if (retMessage.includes('SUCCESS::')) {
+          try { await this.onSuccess?.({ adminId, accountId, api, startedAt }); }
+          catch (error) { console.error(JSON.stringify({ component: 'xianyu-account-health', event: 'success_report_failed', accountId, api, error: error instanceof Error ? error.message : String(error) })); }
+          return { success: true, accountInvalid: false, response: payload, cookieHeader };
+        }
         if (isTokenExpired(retMessage)) {
           lastError = retMessage;
           if (setCookies.length > 0) continue;
           const result = { success: false, accountInvalid: true, errorCode: 'MTOP_TOKEN_EXPIRED', message: retMessage || 'mtop token expired', response: payload, cookieHeader };
-          this.reportFailure({ adminId, accountId, api, ...result });
+          await this.reportFailure({ adminId, accountId, api, ...result });
           return result;
         }
         if (isSessionExpired(ret)) {
           const result = { success: false, accountInvalid: true, errorCode: 'SESSION_EXPIRED', message: retMessage, response: payload, cookieHeader };
-          this.reportFailure({ adminId, accountId, api, ...result });
+          await this.reportFailure({ adminId, accountId, api, ...result });
           return result;
         }
         if (isValidationFailure(retMessage)) {
           const result = { success: false, accountInvalid: true, errorCode: 'ACCOUNT_VALIDATION_REQUIRED', message: retMessage, response: payload, cookieHeader };
-          this.reportFailure({ adminId, accountId, api, ...result });
+          await this.reportFailure({ adminId, accountId, api, ...result });
           return result;
         }
         if (isPermissionFailure(retMessage)) {
           const result = { success: false, accountInvalid: false, errorCode: 'MTOP_PERMISSION_DENIED', message: retMessage, response: payload, cookieHeader };
-          this.reportFailure({ adminId, accountId, api, ...result });
+          await this.reportFailure({ adminId, accountId, api, ...result });
           return result;
         }
         const result = { success: false, accountInvalid: false, errorCode: 'MTOP_BUSINESS_ERROR', message: retMessage || 'mtop request failed', response: payload, cookieHeader };
-        this.reportFailure({ adminId, accountId, api, ...result });
+        await this.reportFailure({ adminId, accountId, api, ...result });
         return result;
       } catch (error) {
+        if (error instanceof AccountHealthPersistenceError) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
     }
     const result = { success: false, accountInvalid: false, errorCode: 'MTOP_RETRY_EXHAUSTED', message: lastError, cookieHeader };
-    this.reportFailure({ adminId, accountId, api, ...result });
+    await this.reportFailure({ adminId, accountId, api, ...result });
     return result;
   }
 }

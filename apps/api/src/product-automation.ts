@@ -214,7 +214,7 @@ export interface AutomationOrderSnapshot extends OrderRecord {
 }
 
 export interface AutomationExecutionPort {
-  reserveCoupon(input: { adminId?: string; accountId: string; productId?: string; itemId?: string; itemTitle?: string; skuSpec?: string; batchIds: string[]; quantity: number; executionKey: string; purpose: 'delivery' | 'gift' }): Promise<{ reservationId: string; quantity: number; noLogisticsForm?: boolean; tradeText?: string }>;
+  reserveCoupon(input: { adminId?: string; accountId: string; productId?: string; itemId?: string; itemTitle?: string; skuSpec?: string; batchIds: string[]; quantity: number; executionKey: string; purpose: 'delivery' | 'gift'; orderNo?: string }): Promise<{ reservationId: string; quantity: number; noLogisticsForm?: boolean; tradeText?: string }>;
   sendCoupon(input: { adminId?: string; accountId: string; productId?: string; itemId?: string; itemTitle?: string; orderNo: string; reservationId: string; executionKey: string; purpose: 'delivery' | 'gift' }): Promise<AutomationExternalResult>;
   commitCoupon(input: { adminId?: string; reservationId: string; executionKey: string }): Promise<void>;
   releaseCoupon(input: { adminId?: string; reservationId: string; executionKey: string; reason: string }): Promise<void>;
@@ -232,6 +232,7 @@ export interface AutomationExecutionLedger {
   get(key: string): ExecutionLedgerEntry | undefined | Promise<ExecutionLedgerEntry | undefined>;
   claim(input: { key: string; fingerprint: string; ownerToken: string; leaseUntil: string; allowManualReviewRecovery?: boolean }): { claimed: boolean; entry?: ExecutionLedgerEntry; running?: boolean } | Promise<{ claimed: boolean; entry?: ExecutionLedgerEntry; running?: boolean }>;
   complete(input: { key: string; ownerToken: string; result: AutomationExecutionResult; retryable: boolean }): void | Promise<void>;
+  renew(input: { key: string; ownerToken: string; leaseUntil: string }): boolean | Promise<boolean>;
 }
 
 export class InMemoryAutomationExecutionLedger implements AutomationExecutionLedger {
@@ -266,6 +267,12 @@ export class InMemoryAutomationExecutionLedger implements AutomationExecutionLed
     current.ownerToken = undefined;
     current.leaseUntil = undefined;
   }
+  renew(input: { key: string; ownerToken: string; leaseUntil: string }): boolean {
+    const current = this.entries.get(input.key);
+    if (!current || current.status !== 'running' || current.ownerToken !== input.ownerToken || !current.leaseUntil || Date.parse(current.leaseUntil) <= Date.now()) return false;
+    current.leaseUntil = input.leaseUntil;
+    return true;
+  }
 }
 
 export class PersistentAutomationExecutionLedger implements AutomationExecutionLedger {
@@ -285,6 +292,9 @@ export class PersistentAutomationExecutionLedger implements AutomationExecutionL
   async complete(input: { key: string; ownerToken: string; result: AutomationExecutionResult; retryable: boolean }): Promise<void> {
     await this.store.completeAutomationExecution({ executionKey: input.key, ownerToken: input.ownerToken, result: input.result, retryable: input.retryable });
   }
+  async renew(input: { key: string; ownerToken: string; leaseUntil: string }): Promise<boolean> {
+    return this.store.renewAutomationExecution({ executionKey: input.key, ownerToken: input.ownerToken, leaseUntil: input.leaseUntil });
+  }
   leaseUntil(): string { return new Date(Date.now() + this.leaseMs).toISOString(); }
 }
 
@@ -296,7 +306,7 @@ export class AutomationWorkflowService {
     const rule = input.config.paidAutoDelivery;
     const key = `paid_auto_delivery:${input.order.accountId}:${input.order.orderNo}`;
     const existing = await this.ledger.get(key);
-    const recoverShipmentOnly = Boolean(existing?.result.status === 'manual_review' && existing.result.externalRef && rule.autoConfirm && input.order.deliveryStatus !== 'delivered');
+    const recoverShipmentOnly = Boolean(existing?.result.status === 'manual_review' && existing.result.reason?.startsWith('shipment_confirmation_') && existing.result.externalRef && rule.autoConfirm && input.order.deliveryStatus !== 'delivered');
     return this.once(key, { orderNo: input.order.orderNo, rule }, async () => {
       if (recoverShipmentOnly) {
         const confirmed = await this.port.confirmShipment({ adminId: input.adminId, accountId: input.order.accountId, productId: input.order.productId, itemId: input.order.itemId, itemTitle: input.order.itemTitle, orderNo: input.order.orderNo, executionKey: key });
@@ -316,8 +326,9 @@ export class AutomationWorkflowService {
       const quantity = Math.max(1, Math.trunc(input.order.quantity ?? 1));
       let reservation: Awaited<ReturnType<AutomationExecutionPort['reserveCoupon']>>;
       try {
-        reservation = await this.port.reserveCoupon({ adminId: input.adminId, accountId: input.order.accountId, productId: input.order.productId, itemId: input.order.itemId, itemTitle: input.order.itemTitle, skuSpec: input.order.skuSpec, batchIds: rule.couponBatchIds, quantity, executionKey: key, purpose: 'delivery' });
+        reservation = await this.port.reserveCoupon({ adminId: input.adminId, accountId: input.order.accountId, productId: input.order.productId, itemId: input.order.itemId, itemTitle: input.order.itemTitle, skuSpec: input.order.skuSpec, batchIds: rule.couponBatchIds, quantity, executionKey: key, purpose: 'delivery', orderNo: input.order.orderNo });
       } catch (error) {
+        if (error instanceof Error && error.message === 'XIANYU_IM_NOT_READY') return unknown(key, 'XIANYU_IM_NOT_READY');
         return failed(key, failureReason(error, 'coupon_reservation_failed'));
       }
       if (reservation.quantity < quantity) {
@@ -343,13 +354,10 @@ export class AutomationWorkflowService {
         await this.port.commitCoupon({ adminId: input.adminId, reservationId: reservation.reservationId, executionKey: key });
       } catch (error) {
         commitError = error;
-        try { await this.port.releaseCoupon({ adminId: input.adminId, reservationId: reservation.reservationId, executionKey: key, reason: 'coupon_commit_cleanup' }); } catch { /* cleanup is best effort; remote shipment remains authoritative */ }
+        await this.port.markManualReview({ adminId: input.adminId, accountId: input.order.accountId, productId: input.order.productId, itemId: input.order.itemId, itemTitle: input.order.itemTitle, orderNo: input.order.orderNo, executionKey: key, reason: 'coupon_commit_unknown' });
       }
+      if (commitError) return { status: 'manual_review', executionKey: key, reason: failureReason(commitError, 'coupon_commit_unknown'), externalRef: sent.externalRef };
       if (!rule.autoConfirm) {
-        if (commitError) {
-          await this.port.markManualReview({ adminId: input.adminId, accountId: input.order.accountId, productId: input.order.productId, itemId: input.order.itemId, itemTitle: input.order.itemTitle, orderNo: input.order.orderNo, executionKey: key, reason: `coupon_commit_cleanup:${failureReason(commitError, 'coupon_commit_unknown')}` });
-          return { status: 'manual_review', executionKey: key, reason: failureReason(commitError, 'coupon_commit_unknown'), externalRef: sent.externalRef };
-        }
         return { status: 'succeeded', executionKey: key, externalRef: sent.externalRef };
       }
       const confirmed = await this.port.confirmShipment({ adminId: input.adminId, accountId: input.order.accountId, productId: input.order.productId, itemId: input.order.itemId, itemTitle: input.order.itemTitle, orderNo: input.order.orderNo, executionKey: key, noLogisticsForm: reservation.noLogisticsForm, tradeText: reservation.tradeText });
@@ -469,7 +477,7 @@ export class AutomationWorkflowService {
     if (existing) {
       if (existing.fingerprint !== fingerprint && !existing.retryable && !recoverManualReview) throw new ServiceError(409, 'IDEMPOTENCY_CONFLICT', 'automation execution key reused with different input');
       if (!existing.retryable && !recoverManualReview) return existing.result;
-      if ((policy.maxAttempts ?? 5) <= existing.attemptCount) return { status: 'manual_review', executionKey: key, reason: 'retry_exhausted' };
+      if (existing.result.reason !== 'XIANYU_IM_NOT_READY' && (policy.maxAttempts ?? 5) <= existing.attemptCount) return { status: 'manual_review', executionKey: key, reason: 'retry_exhausted' };
       const backoffMs = Math.max(0, policy.retryBackoffSeconds ?? 0) * 1000;
       if (backoffMs > 0 && Date.parse(existing.updatedAt) + backoffMs > Date.now()) return existing.result;
     }
@@ -487,14 +495,27 @@ export class AutomationWorkflowService {
         }
         if (!claim.claimed) return unknown(key, 'execution_lease_timeout');
       }
+      let renewInFlight: Promise<void> | undefined;
+      let leaseLost = false;
+      const renewTimer = setInterval(() => {
+        if (renewInFlight) return;
+        renewInFlight = Promise.resolve(this.ledger.renew({ key, ownerToken, leaseUntil: new Date(Date.now() + 120_000).toISOString() }))
+          .then((renewed) => { if (!renewed) leaseLost = true; })
+          .catch(() => { leaseLost = true; })
+          .finally(() => { renewInFlight = undefined; });
+      }, 30_000);
       try {
         const result = await handler(isRetry);
+        if (renewInFlight) await renewInFlight;
+        if (leaseLost) throw new Error('AUTOMATION_EXECUTION_LEASE_LOST');
         await this.ledger.complete({ key, ownerToken, result, retryable: result.status === 'failed' || result.status === 'unknown' });
         return result;
       } catch (error) {
         const result = failed(key, error instanceof Error ? error.message.slice(0, 160) : 'automation_execution_failed');
         try { await this.ledger.complete({ key, ownerToken, result, retryable: true }); } catch { /* preserve original failure */ }
         throw error;
+      } finally {
+        clearInterval(renewTimer);
       }
     })();
     this.inFlight.set(key, { fingerprint, promise });

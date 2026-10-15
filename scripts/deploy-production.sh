@@ -15,6 +15,9 @@ NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmmirror.com}"
 
 frontend_mutation_started=0
 frontend_backup=""
+legacy_quiesce_started=0
+migration_started=0
+backend_validated=0
 
 fail() {
   printf 'deploy-production: %s\n' "$*" >&2
@@ -105,10 +108,40 @@ rollback_frontend() {
   frontend_mutation_started=0
 }
 
+backend_services_running() {
+  local running
+  running="$(docker compose -f "$COMPOSE_FILE" ps --status running --services api worker)" || return 1
+  grep -Fxq api <<<"$running" && grep -Fxq worker <<<"$running"
+}
+
+legacy_recovery_healthy() {
+  local attempt health ready
+  for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1)); do
+    health="$(curl -ksS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$UPSTREAM_PORT/healthz" || true)"
+    ready="$(curl -ksS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$UPSTREAM_PORT/readyz" || true)"
+    if backend_services_running && [[ "$health" == "200" && "$ready" == "200" ]]; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
 on_exit() {
   local status=$?
   trap - EXIT
   if (( status != 0 )); then
+    if (( legacy_quiesce_started == 1 && migration_started == 0 )); then
+      printf 'deploy-production: restoring legacy API/worker before migration\n' >&2
+      if docker compose -f "$COMPOSE_FILE" start api worker && legacy_recovery_healthy; then
+        printf 'deploy-production: legacy API/worker recovered\n' >&2
+      else
+        printf 'deploy-production: legacy API/worker recovery failed; manual intervention required\n' >&2
+      fi
+    elif (( migration_started == 1 && backend_validated == 0 )); then
+      printf 'deploy-production: backend validation failed after migration; stopping new API/worker for manual recovery\n' >&2
+      docker compose -f "$COMPOSE_FILE" stop api worker || true
+    fi
     rollback_frontend || true
   fi
   exit "$status"
@@ -148,19 +181,84 @@ docker compose -f "$COMPOSE_FILE" up "${infra_up_args[@]}" \
   postgres redis object-storage
 wait_for_postgres
 docker compose -f "$COMPOSE_FILE" build api worker
+docker compose -f "$COMPOSE_FILE" run --rm --no-deps api test -f scripts/verify-delivery-cutover.mjs \
+  || fail 'API 镜像缺少发货切换核验脚本，旧服务保持运行'
+delivery_preflight() {
+  local preflight unmapped_count approval_file approved_sha approved_digest release_sha
+  if preflight="$(docker compose -f "$COMPOSE_FILE" run --rm --no-deps api node scripts/verify-delivery-cutover.mjs --preflight)"; then
+    printf '%s\n' "$preflight"
+  else
+    printf '%s\n' "$preflight" >&2
+    fail '历史发货预检失败'
+  fi
+  [[ "$preflight" =~ candidates=([0-9]+)[[:space:]]unmapped=([0-9]+)[[:space:]]digest=([0-9a-f]{64}) ]] \
+    || fail '历史发货预检输出格式异常'
+  candidate_count="${BASH_REMATCH[1]}"
+  unmapped_count="${BASH_REMATCH[2]}"
+  candidate_digest="${BASH_REMATCH[3]}"
+  (( unmapped_count == 0 )) || fail '存在未映射的历史发货执行键'
+  if (( candidate_count > 0 )); then
+    approval_file="${DELIVERY_CUTOVER_APPROVAL_FILE:-$APP_DIR/.delivery-cutover-approval}"
+    [[ -f "$approval_file" ]] || fail "历史发货候选订单需人工签收: $approval_file"
+    read -r approved_sha approved_digest < "$approval_file" || fail '历史发货签收文件格式异常'
+    release_sha="$(git rev-parse HEAD)"
+    [[ "$approved_sha" == "$release_sha" && "$approved_digest" == "$candidate_digest" ]] \
+      || fail '历史发货签收提交或清单摘要与本次发布不一致'
+  fi
+}
+cutover_state="$(docker compose -f "$COMPOSE_FILE" run --rm --no-deps api node scripts/verify-delivery-cutover.mjs --state)"
+case "$cutover_state" in
+  'delivery cutover state: missing')
+    first_cutover=1
+    delivery_preflight
+    approved_candidate_count="$candidate_count"
+    approved_candidate_digest="$candidate_digest"
+    ;;
+  'delivery cutover state: active')
+    first_cutover=0
+    docker compose -f "$COMPOSE_FILE" exec -T api test -f scripts/verify-delivery-cutover.mjs \
+      && docker compose -f "$COMPOSE_FILE" exec -T worker test -f scripts/verify-delivery-cutover.mjs \
+      || fail '发货 gate 已激活，但当前 API/worker 缺少新版切换标记'
+    ;;
+  'delivery cutover state: inactive')
+    fail '发货 gate 已创建但未激活，需人工核查上次切换状态'
+    ;;
+  *) fail "发货切换状态异常: $cutover_state" ;;
+esac
+backend_services_running || fail '旧 API/worker 未同时运行，需检查生产状态后再切换'
+# The old binaries do not use the new order send guard. Quiesce both writers
+# before applying cutover migrations or starting the new payment worker.
+legacy_quiesce_started=1
+docker compose -f "$COMPOSE_FILE" stop -t 120 api worker
+running_writers="$(docker compose -f "$COMPOSE_FILE" ps --status running --services api worker)"
+[[ -z "$running_writers" ]] || fail "旧 API/worker 仍在运行: $running_writers"
+if (( first_cutover == 1 )); then
+  delivery_preflight
+  [[ "$candidate_count" == "$approved_candidate_count" && "$candidate_digest" == "$approved_candidate_digest" ]] \
+    || fail '停机后历史发货候选清单已变化，需重新核对签收'
+fi
+migration_started=1
 docker compose -f "$COMPOSE_FILE" run --rm --no-deps api node scripts/migrate.mjs
+if (( first_cutover == 1 )); then
+  docker compose -f "$COMPOSE_FILE" run --rm --no-deps api node scripts/verify-delivery-cutover.mjs --activate
+else
+  post_migration_state="$(docker compose -f "$COMPOSE_FILE" run --rm --no-deps api node scripts/verify-delivery-cutover.mjs --state)"
+  [[ "$post_migration_state" == 'delivery cutover state: active' ]] || fail '迁移后发货 gate 状态异常'
+fi
 docker compose -f "$COMPOSE_FILE" up -d --force-recreate api worker
 
 wait_for_status "http://127.0.0.1:$UPSTREAM_PORT/healthz" "200"
 wait_for_status "http://127.0.0.1:$UPSTREAM_PORT/readyz" "200"
 wait_for_status "$PUBLIC_BASE_URL/healthz" "200"
 wait_for_status "$PUBLIC_BASE_URL/readyz" "200"
+backend_services_running || fail '新版 API/worker 未同时运行，停止切换'
 
 session_status="$(curl -ksS -o /dev/null -w '%{http_code}' "$PUBLIC_BASE_URL/api/v1/auth/session" || true)"
 case ",$session_status," in
   *,200,*|*,401,*|*,403,*) ;;
   *) fail "会话接口返回异常状态: $session_status" ;;
 esac
+backend_validated=1
 
 docker compose -f "$COMPOSE_FILE" ps
 
@@ -177,6 +275,10 @@ printf '%s\n' "$release_sha" | sudo tee "$WEB_ROOT/.release-sha" >/dev/null
 sudo test -s "$WEB_ROOT/index.html" || fail 'Nginx 静态目录缺少 index.html'
 wait_for_status "$PUBLIC_BASE_URL/" "200"
 wait_for_text "$PUBLIC_BASE_URL/" 'id="root"'
+if ! backend_services_running; then
+  backend_validated=0
+  fail '发布结束时 API/worker 未同时运行'
+fi
 frontend_mutation_started=0
 
 printf 'production deploy passed: sha=%s upstream=127.0.0.1:%s session=%s frontend=%s backup=%s\n' \

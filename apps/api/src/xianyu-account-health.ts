@@ -9,7 +9,7 @@ export interface XianyuFailureClassification {
 
 export function classifyXianyuFailure(input: { errorCode?: string; message?: string; accountInvalid?: boolean }): XianyuFailureClassification {
   const text = `${input.errorCode ?? ''} ${input.message ?? ''}`;
-  const requiresVerification = /ACCOUNT_VALIDATION_REQUIRED|FAIL_SYS_USER_VALIDATE|X5SEC|CAPTCHA|SLIDER/i.test(text);
+  const requiresVerification = /ACCOUNT_VALIDATION_REQUIRED|FAIL_SYS_USER_VALIDATE|RGV587|FAIL_SYS_ILLEGAL_ACCESS|FAIL_BIZ_WUA_IS_MACHINE|WUA_IS_MACHINE|PUNISH|X5SEC|CAPTCHA|SLIDER|VALIDAT(?:E|ION)/i.test(text);
   if (requiresVerification) return { kind: 'verification_required' };
 
   const requiresReauth = Boolean(input.accountInvalid)

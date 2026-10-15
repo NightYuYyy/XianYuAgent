@@ -90,7 +90,7 @@ try {
   assert.equal(savedCredential.body.data.cookieHeader, undefined);
 
   const accountAfterCredential = await request(`/api/v1/accounts/${accountId}`, { headers: { cookie } });
-  assert.equal(accountAfterCredential.body.data.status, 'connected');
+  assert.equal(accountAfterCredential.body.data.status, 'pending');
 
   const readCredential = await request(`/api/v1/accounts/${accountId}/credential`, { headers: { cookie } });
   assert.equal(readCredential.response.status, 200);

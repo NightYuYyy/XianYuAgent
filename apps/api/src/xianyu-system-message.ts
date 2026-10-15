@@ -27,7 +27,7 @@ export function parseXianyuSystemMessageKind(value: string | undefined): XianyuS
 
   const statusText = unwrapStatusText(normalized);
   if (/^(?:我已拍下|买家已拍下|已拍下)[，,、:：\s]*(?:待付款|等待付款|待支付)$/u.test(statusText)) return 'unpaid_order';
-  if (/^(?:我已付款|我已支付|买家已付款|买家已支付|已付款|已支付)[，,、:：\s]*(?:等待你?发货|等待您?发货|待发货)$/u.test(statusText)) return 'paid_waiting_shipment';
+  if (/^(?:我已付款|我已支付|买家已付款|买家已支付|已付款|已支付)[，,、:：\s]*(?:等待(?:你|您|卖家)?发货|待发货)$/u.test(statusText)) return 'paid_waiting_shipment';
   if (/^已确认收货[。！!]?$/u.test(statusText)) return 'received';
   if (/^(?:已评价|评价完成)[。！!]?$/u.test(statusText)) return 'reviewed';
   if (/^交易成功[。！!]?$/u.test(statusText)) return 'trade_success';

@@ -21,7 +21,8 @@ try {
   const product = await runtime.store.createProduct({ adminId, accountId: account.id, externalProductRef: 'item-delivery', title: '免物流商品' });
   const orderNo = 'XY-DELIVERY-001';
   await runtime.store.createOrder({ adminId, order: { accountId: account.id, orderNo, buyerId: 'buyer-delivery', buyerName: '买家', itemId: 'item-delivery', itemTitle: '免物流商品', amountMinor: 990, paymentStatus: 'paid', orderStatus: 'open', deliveryStatus: 'pending', afterSalesStatus: 'none', deliveryType: 'no_logistics', productId: product.id } });
-  runtime.xianyu.readOrderDetail = async () => ({ success: true, accountInvalid: false, cookieHeader: '', detail: { orderNo, paymentStatus: 'paid', deliveryStatus: 'pending', itemId: 'item-delivery', itemTitle: '免物流商品' } });
+  runtime.xianyu.fetchOrderCandidates = async (_adminId, _accountId, requestedOrderNo) => ({ success: true, accountInvalid: false, cookieHeader: '', items: [{ orderNo: requestedOrderNo, buyerId: requestedOrderNo === orderNo ? 'buyer-delivery' : 'buyer-delivery-2', itemId: 'item-delivery', paymentStatus: 'paid', orderStatus: 'open', deliveryStatus: 'pending', afterSalesStatus: 'none' }] });
+  runtime.xianyu.readOrderDetail = async (_adminId, _accountId, requestedOrderNo) => ({ success: true, accountInvalid: false, cookieHeader: '', detail: { orderNo: requestedOrderNo, paymentStatus: 'paid', deliveryStatus: 'pending', itemId: 'item-delivery', itemTitle: '免物流商品' } });
   runtime.xianyu.confirmShipment = async () => ({ status: 'succeeded', externalRef: orderNo, cookieHeader: '' });
 
   const preview = await request(`/api/v1/orders/${encodeURIComponent(orderNo)}/delivery-preview`, { method: 'POST', headers: { cookie, 'X-CSRF-Token': csrf }, body: JSON.stringify({ accountId: account.id, deliveryType: 'no_logistics' }) });

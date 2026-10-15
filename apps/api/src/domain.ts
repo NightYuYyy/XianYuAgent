@@ -2,7 +2,7 @@ import type { OutcomeReviewPolicy } from './auto-reply-outcome-review.js';
 import type { PreSendReviewPolicyInput } from './auto-reply-pre-send-review.js';
 
 export type AdminStatus = 'active' | 'disabled';
-export type AccountStatus = 'pending' | 'connected' | 'degraded' | 'disconnected' | 'expired' | 'disabled';
+export type AccountStatus = 'pending' | 'connected' | 'degraded' | 'disconnected' | 'expired' | 'verification_required' | 'disabled';
 export type ScopeStatus = 'active' | 'revoked' | 'expired';
 export type LoginSessionStatus = 'created' | 'waiting' | 'scanned' | 'succeeded' | 'expired' | 'failed' | 'cancelled' | 'verification_required';
 export type CredentialStatus = 'active' | 'expired' | 'revoked';
@@ -14,7 +14,7 @@ export type CouponBatchStatus = 'draft' | 'active' | 'paused' | 'closed' | 'void
 export type CouponItemStatus = 'available' | 'reserved' | 'consumed';
 export type CouponBindingStatus = 'active' | 'inactive';
 export type CouponReservationPurpose = 'delivery' | 'gift';
-export type CouponReservationStatus = 'reserved' | 'committed' | 'released' | 'expired';
+export type CouponReservationStatus = 'reserved' | 'committed' | 'released' | 'expired' | 'quarantined';
 export type ConversationHandlingMode = 'ai' | 'human';
 export type MessageDirection = 'inbound' | 'outbound';
 export type MessageSenderRole = 'buyer' | 'agent' | 'system';
@@ -342,6 +342,25 @@ export interface OrderRecord {
   lastReminderAt?: string;
 }
 
+export interface PaymentEventJob {
+  id: string;
+  adminId: string;
+  accountId: string;
+  eventRef: string;
+  orderNo?: string;
+  buyerRef: string;
+  itemRef?: string;
+  conversationRef: string;
+  status: 'resolve_pending' | 'pending' | 'running' | 'completed' | 'manual_review';
+  attemptCount: number;
+  receivedAt: string;
+  observedAt?: string;
+  nextAttemptAt: string;
+  dueAt?: string;
+  ownerToken?: string;
+  lastError?: string;
+}
+
 export interface DeliveryRecord {
   id: string;
   orderId: string;
@@ -581,6 +600,15 @@ export interface AccountRecord {
   createdAt: string;
   updatedAt: string;
   lastConnectedAt?: string;
+  riskCode?: string;
+  riskSource?: string;
+  riskFirstSeenAt?: string;
+  riskLastSeenAt?: string;
+  riskEpisode?: string;
+  degradedSource?: string;
+  degradedAt?: string;
+  transportStatus?: 'connecting' | 'connected' | 'disconnected' | 'failed';
+  transportSeenAt?: string;
 }
 
 export interface AccountListQuery {
@@ -1397,6 +1425,14 @@ export interface Store {
   restoreAccountForLogin(adminId: string, accountId: string): Promise<AccountRecord | undefined>;
   createAccount(input: { platform: string; sellerRef: string; displayName?: string; adminId: string }): Promise<AccountRecord>;
   updateAccount(adminId: string, accountId: string, patch: { sellerRef?: string; displayName?: string; remark?: string; avatarUrl?: string; platformUserId?: string; status?: AccountStatus; lastConnectedAt?: string }): Promise<AccountRecord | undefined>;
+  recordAccountRisk(input: { adminId: string; accountId: string; code: string; source: string }): Promise<AccountRecord | undefined>;
+  clearAccountRisk(input: { adminId: string; accountId: string; episode: string; source: string; startedAt: string }): Promise<AccountRecord | undefined>;
+  recordAccountDegraded(input: { adminId: string; accountId: string; source: string }): Promise<AccountRecord | undefined>;
+  clearAccountDegraded(input: { adminId: string; accountId: string; source: string; startedAt: string }): Promise<AccountRecord | undefined>;
+  setAccountTransport(input: { adminId: string; accountId: string; status: 'connecting' | 'connected' | 'disconnected' | 'failed' }): Promise<void>;
+  flushAccountRiskAlerts(limit: number): Promise<number>;
+  listRiskNotifications(adminId: string): Promise<Array<{ id: string; accountId: string; eventType: 'verification_required' | 'verification_cleared'; createdAt: string }>>;
+  acknowledgeRiskNotification(adminId: string, id: string): Promise<boolean>;
   deleteAccount(adminId: string, accountId: string): Promise<AccountRecord | undefined>;
   createLoginSession(input: { adminId: string; accountId?: string; provisionalAccountRef?: string; loginMethod: string; expiresAt: string; qrTokenRef?: string }): Promise<LoginSessionRecord>;
   getLoginSession(adminId: string, accountId: string, sessionId: string): Promise<LoginSessionRecord | undefined>;
@@ -1466,8 +1502,18 @@ export interface Store {
   listOrders(adminId: string, query: OrderListQuery): Promise<OrderListResult>;
   listAutoReplyOrders(adminId: string, query: AutoReplyOrderListQuery): Promise<AutoReplyOrderListResult>;
   getOrder(adminId: string, orderNo: string, accountId?: string): Promise<OrderRecord | undefined>;
+  enqueuePaymentEvent(input: { adminId: string; accountId: string; eventRef: string; orderNo?: string; buyerRef: string; itemRef?: string; conversationRef: string; receivedAt: string; observedAt?: string }): Promise<PaymentEventJob>;
+  claimPaymentEvents(input: { workerId: string; limit: number; leaseMs: number; accountId?: string }): Promise<PaymentEventJob[]>;
+  isDeliveryCutoverActive(): Promise<boolean>;
+  finishPaymentEvent(input: { id: string; ownerToken: string; status: Exclude<PaymentEventJob['status'], 'running'>; orderNo?: string; nextAttemptAt?: string; lastError?: string }): Promise<boolean>;
+  setPaymentEventDue(input: { id: string; ownerToken: string; dueAt: string }): Promise<string | undefined>;
+  beginDeliverySendStep(input: { adminId: string; accountId: string; orderNo: string; executionKey: string; stepKey: string }): Promise<{ status: 'ready' | 'succeeded' | 'blocked'; externalRef?: string }>;
+  completeDeliverySendStep(input: { accountId: string; orderNo: string; executionKey: string; stepKey: string; externalRef?: string }): Promise<boolean>;
+  markDeliverySendUnknown(input: { accountId: string; orderNo: string; executionKey: string; stepKey: string }): Promise<void>;
+  quarantineCouponReservation(input: { adminId: string; executionKey: string; reason: string }): Promise<boolean>;
   getAutomationExecution(executionKey: string): Promise<AutomationExecutionLedgerRecord | undefined>;
   claimAutomationExecution(input: { executionKey: string; fingerprint: string; ownerToken: string; leaseUntil: string; allowManualReviewRecovery?: boolean }): Promise<{ claimed: boolean; record: AutomationExecutionLedgerRecord }>;
+  renewAutomationExecution(input: { executionKey: string; ownerToken: string; leaseUntil: string }): Promise<boolean>;
   completeAutomationExecution(input: { executionKey: string; ownerToken: string; result: unknown; retryable: boolean }): Promise<void>;
   cleanupExpiredCouponReservations(): Promise<number>;
   recordReviewFact(input: { accountId: string; orderNo: string; eventId: string; reviewedAt?: string }): Promise<{ created: boolean }>;
@@ -1516,6 +1562,9 @@ export interface Store {
   getCouponContent(adminId: string, itemId: string): Promise<{ batch: CouponBatchRecord; item: CouponItemRecord } | undefined>;
   reserveCoupon(input: { adminId: string; accountId: string; batchIds: string[]; quantity: number; executionKey: string; purpose: CouponReservationPurpose; leaseSeconds?: number }): Promise<CouponReservationRecord>;
   getCouponReservation(input: { adminId: string; reservationId: string; executionKey?: string }): Promise<CouponReservationRecord | undefined>;
+  bindDeliveryReservation(input: { adminId: string; accountId: string; orderNo: string; reservationId: string; executionKey: string }): Promise<boolean>;
+  saveDeliveryConfirmation(input: { adminId: string; accountId: string; orderNo: string; executionKey: string; noLogisticsForm: boolean; tradeText?: string }): Promise<void>;
+  getDeliveryConfirmation(input: { adminId: string; accountId: string; orderNo: string; executionKey: string }): Promise<{ noLogisticsForm: boolean; tradeText?: string } | undefined>;
   commitCouponReservation(input: { adminId: string; reservationId: string; executionKey: string }): Promise<CouponReservationRecord>;
   releaseCouponReservation(input: { adminId: string; reservationId: string; executionKey: string; reason: string }): Promise<CouponReservationRecord>;
   listConversations(adminId: string, query: ConversationListQuery): Promise<ConversationListResult>;

@@ -4,6 +4,15 @@ import { MemoryStore } from '../src/store-memory.js';
 import { XianyuProductAutomationExecutionAdapter } from '../src/product-automation-xianyu.js';
 import type { XianyuMtopClient } from '../src/xianyu-mtop.js';
 import type { XianyuImService } from '../src/xianyu-im-service.js';
+import type { OrderRecord, XianyuOrderItem } from '../src/domain.js';
+
+function withListedOrder(order: OrderRecord, mtop: XianyuMtopClient, overrides: Partial<XianyuOrderItem> = {}): XianyuMtopClient {
+  return { ...mtop, fetchOrderCandidates: async () => ({ success: true, accountInvalid: false, cookieHeader: '', items: [{ ...order, ...overrides }], pageNumber: 1, pageSize: 10, hasMore: false }) } as XianyuMtopClient;
+}
+
+function paidDetail(order: OrderRecord) {
+  return { success: true, accountInvalid: false, detail: { orderNo: order.orderNo, orderStatus: '2', deliveryStatus: '2', buyerId: order.buyerId, itemId: order.itemId }, cookieHeader: '' };
+}
 
 async function setup() {
   const store = new MemoryStore();
@@ -25,8 +34,8 @@ test('live adapter reserves and sends the persisted coupon content through IM', 
   const { store, admin, account, order, batch } = await setup();
   const sent: string[] = [];
   const fakeIm = { sendText: async (_adminId: string, _accountId: string, _conversationId: string, text: string) => { sent.push(text); return { externalMessageRef: 'im-live-1' }; } } as unknown as XianyuImService;
-  const fakeMtop = {} as XianyuMtopClient;
-  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => fakeMtop, () => fakeIm);
+  const fakeMtop = { readOrderDetail: async () => paidDetail(order) } as unknown as XianyuMtopClient;
+  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => withListedOrder(order, fakeMtop), () => fakeIm);
   const reservation = await adapter.reserveCoupon({ adminId: admin.id, accountId: account.id, batchIds: [batch.id], quantity: 1, executionKey: 'live-send-1', purpose: 'delivery' });
   const result = await adapter.sendCoupon({ adminId: admin.id, accountId: account.id, productId: order.productId, itemId: order.itemId, itemTitle: order.itemTitle, orderNo: order.orderNo, reservationId: reservation.reservationId, executionKey: 'live-send-1', purpose: 'delivery' });
   assert.equal(result.status, 'succeeded');
@@ -38,26 +47,44 @@ test('live adapter reserves and sends the persisted coupon content through IM', 
 test('uncertain IM send keeps the reservation held for manual review', async () => {
   const { store, admin, account, order, batch } = await setup();
   const fakeIm = { sendText: async () => { throw Object.assign(new Error('ECONNRESET'), { code: 'ECONNRESET' }); } } as unknown as XianyuImService;
-  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => ({} as XianyuMtopClient), () => fakeIm);
+  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => withListedOrder(order, { readOrderDetail: async () => paidDetail(order) } as unknown as XianyuMtopClient), () => fakeIm);
   const reservation = await adapter.reserveCoupon({ adminId: admin.id, accountId: account.id, batchIds: [batch.id], quantity: 1, executionKey: 'live-unknown-1', purpose: 'delivery' });
   const result = await adapter.sendCoupon({ adminId: admin.id, accountId: account.id, productId: order.productId, itemId: order.itemId, itemTitle: order.itemTitle, orderNo: order.orderNo, reservationId: reservation.reservationId, executionKey: 'live-unknown-1', purpose: 'delivery' });
   assert.equal(result.status, 'unknown');
-  assert.equal((await store.getCouponReservation({ adminId: admin.id, reservationId: reservation.reservationId }))?.status, 'reserved');
+  assert.equal((await store.getCouponReservation({ adminId: admin.id, reservationId: reservation.reservationId }))?.status, 'quarantined');
 });
 
-test('live adapter still calls remote shipment mutation when order detail is unavailable', async () => {
+test('live adapter blocks remote shipment mutation when order detail is unavailable', async () => {
   const { store, admin, account, order } = await setup();
   let confirmed = false;
   const fakeMtop = {
     readOrderDetail: async () => ({ success: false, accountInvalid: false, errorCode: 'MTOP_RETRY_EXHAUSTED', message: 'timeout', cookieHeader: '' }),
     confirmShipment: async () => { confirmed = true; return { status: 'succeeded', externalRef: order.orderNo }; },
   } as unknown as XianyuMtopClient;
-  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => fakeMtop, () => undefined);
+  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => withListedOrder(order, fakeMtop), () => undefined);
   const result = await adapter.confirmShipment({ adminId: admin.id, accountId: account.id, productId: order.productId, itemId: order.itemId, itemTitle: order.itemTitle, orderNo: order.orderNo, executionKey: 'live-confirm-1' });
-  assert.equal(result.status, 'succeeded');
-  assert.equal(result.externalRef, order.orderNo);
-  assert.equal(confirmed, true);
-  assert.equal((await store.getOrder(admin.id, order.orderNo, account.id))?.deliveryStatus, 'delivered');
+  assert.equal(result.status, 'unknown');
+  assert.equal(confirmed, false);
+  assert.equal((await store.getOrder(admin.id, order.orderNo, account.id))?.deliveryStatus, 'pending');
+});
+
+test('shipment-only recovery restores the immutable no-logistics text', async () => {
+  const { store, admin, account, order } = await setup();
+  const executionKey = `paid_auto_delivery:${account.id}:${order.orderNo}`;
+  const tradeTexts: string[] = [];
+  const fakeMtop = {
+    readOrderDetail: async () => paidDetail(order),
+    confirmShipment: async (_adminId: string, _accountId: string, _orderNo: string, tradeText: string) => { tradeTexts.push(tradeText); return { status: 'succeeded', externalRef: order.orderNo }; },
+  } as unknown as XianyuMtopClient;
+  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => withListedOrder(order, fakeMtop), () => undefined);
+  const input = { adminId: admin.id, accountId: account.id, productId: order.productId, itemId: order.itemId, itemTitle: order.itemTitle, orderNo: order.orderNo, executionKey };
+  const missing = await adapter.confirmShipment(input);
+  assert.equal(missing.status, 'unknown');
+  assert.deepEqual(tradeTexts, []);
+  await store.saveDeliveryConfirmation({ adminId: admin.id, accountId: account.id, orderNo: order.orderNo, executionKey, noLogisticsForm: true, tradeText: 'fixed original form' });
+  const recovered = await adapter.confirmShipment(input);
+  assert.equal(recovered.status, 'succeeded');
+  assert.deepEqual(tradeTexts, ['fixed original form']);
 });
 
 test('live adapter infers unpaid payment from orderStatus when detail omits paymentStatus', async () => {
@@ -113,7 +140,7 @@ test('live adapter maps numeric status 1 to unpaid and pending in readOrder', as
   const fakeMtop = {
     readOrderDetail: async () => ({ success: true, accountInvalid: false, detail: { orderNo: order.orderNo, orderStatus: '1', deliveryStatus: '1' }, cookieHeader: '' }),
   } as unknown as XianyuMtopClient;
-  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => fakeMtop, () => undefined);
+  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => withListedOrder(order, fakeMtop, { paymentStatus: 'unpaid' }), () => undefined);
   const result = await adapter.readOrder({ adminId: admin.id, accountId: account.id, productId: order.productId, itemId: order.itemId, itemTitle: order.itemTitle, orderNo: order.orderNo });
   assert.equal(result?.paymentStatus, 'unpaid');
   assert.equal(result?.deliveryStatus, 'pending');
@@ -123,10 +150,10 @@ test('treats numeric order status 4 as already delivered', async () => {
   const { store, admin, account, order } = await setup();
   let confirmed = false;
   const fakeMtop = {
-    readOrderDetail: async () => ({ success: true, accountInvalid: false, detail: { orderNo: order.orderNo, deliveryStatus: '4' }, cookieHeader: '' }),
+    readOrderDetail: async () => ({ success: true, accountInvalid: false, detail: { orderNo: order.orderNo, orderStatus: '4', deliveryStatus: '4' }, cookieHeader: '' }),
     confirmShipment: async () => { confirmed = true; return { status: 'succeeded', externalRef: order.orderNo }; },
   } as unknown as XianyuMtopClient;
-  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => fakeMtop, () => undefined);
+  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => withListedOrder(order, fakeMtop, { deliveryStatus: 'delivered' }), () => undefined);
   const result = await adapter.confirmShipment({ adminId: admin.id, accountId: account.id, productId: order.productId, itemId: order.itemId, itemTitle: order.itemTitle, orderNo: order.orderNo, executionKey: 'live-confirm-numeric-4' });
   assert.equal(result.status, 'succeeded');
   assert.equal(result.externalRef, order.orderNo);
@@ -138,10 +165,10 @@ test('treats numeric order status 2 as pending and confirms shipment', async () 
   const { store, admin, account, order } = await setup();
   let confirmed = false;
   const fakeMtop = {
-    readOrderDetail: async () => ({ success: true, accountInvalid: false, detail: { orderNo: order.orderNo, deliveryStatus: '2' }, cookieHeader: '' }),
+    readOrderDetail: async () => paidDetail(order),
     confirmShipment: async () => { confirmed = true; return { status: 'succeeded', externalRef: order.orderNo }; },
   } as unknown as XianyuMtopClient;
-  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => fakeMtop, () => undefined);
+  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => withListedOrder(order, fakeMtop), () => undefined);
   const result = await adapter.confirmShipment({ adminId: admin.id, accountId: account.id, productId: order.productId, itemId: order.itemId, itemTitle: order.itemTitle, orderNo: order.orderNo, executionKey: 'live-confirm-numeric-2' });
   assert.equal(result.status, 'succeeded');
   assert.equal(result.externalRef, order.orderNo);
@@ -153,10 +180,10 @@ test('treats numeric order status 3 as already shipped', async () => {
   const { store, admin, account, order } = await setup();
   let confirmed = false;
   const fakeMtop = {
-    readOrderDetail: async () => ({ success: true, accountInvalid: false, detail: { orderNo: order.orderNo, deliveryStatus: '3' }, cookieHeader: '' }),
+    readOrderDetail: async () => ({ success: true, accountInvalid: false, detail: { orderNo: order.orderNo, orderStatus: '3', deliveryStatus: '3' }, cookieHeader: '' }),
     confirmShipment: async () => { confirmed = true; return { status: 'succeeded', externalRef: order.orderNo }; },
   } as unknown as XianyuMtopClient;
-  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => fakeMtop, () => undefined);
+  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => withListedOrder(order, fakeMtop, { deliveryStatus: 'delivered' }), () => undefined);
   const result = await adapter.confirmShipment({ adminId: admin.id, accountId: account.id, productId: order.productId, itemId: order.itemId, itemTitle: order.itemTitle, orderNo: order.orderNo, executionKey: 'live-confirm-numeric-3' });
   assert.equal(result.status, 'succeeded');
   assert.equal(result.externalRef, order.orderNo);
@@ -168,10 +195,10 @@ test('treats ORDER_ALREADY_DELIVERY from the shipment mutation as idempotent suc
   const { store, admin, account, order } = await setup();
   let confirmed = false;
   const fakeMtop = {
-    readOrderDetail: async () => ({ success: true, accountInvalid: false, detail: { orderNo: order.orderNo, deliveryStatus: '2' }, cookieHeader: '' }),
+    readOrderDetail: async () => paidDetail(order),
     confirmShipment: async () => { confirmed = true; return { status: 'failed', errorCode: 'ORDER_ALREADY_DELIVERY', message: '订单已发货', externalRef: order.orderNo }; },
   } as unknown as XianyuMtopClient;
-  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => fakeMtop, () => undefined);
+  const adapter = new XianyuProductAutomationExecutionAdapter(store, () => withListedOrder(order, fakeMtop), () => undefined);
   const result = await adapter.confirmShipment({ adminId: admin.id, accountId: account.id, productId: order.productId, itemId: order.itemId, itemTitle: order.itemTitle, orderNo: order.orderNo, executionKey: 'live-confirm-already-delivered' });
   assert.equal(result.status, 'succeeded');
   assert.equal(result.externalRef, order.orderNo);
@@ -185,10 +212,10 @@ test('returns unknown when remote shipment succeeds but local delivery status pe
   const failingStore = store as MemoryStore & { markOrderDelivered: MemoryStore['markOrderDelivered'] };
   failingStore.markOrderDelivered = async () => { throw new Error('database unavailable'); };
   const fakeMtop = {
-    readOrderDetail: async () => ({ success: true, accountInvalid: false, detail: { orderNo: order.orderNo, deliveryStatus: '2' }, cookieHeader: '' }),
+    readOrderDetail: async () => paidDetail(order),
     confirmShipment: async () => { confirmed = true; return { status: 'succeeded', externalRef: order.orderNo }; },
   } as unknown as XianyuMtopClient;
-  const adapter = new XianyuProductAutomationExecutionAdapter(failingStore, () => fakeMtop, () => undefined);
+  const adapter = new XianyuProductAutomationExecutionAdapter(failingStore, () => withListedOrder(order, fakeMtop), () => undefined);
   const result = await adapter.confirmShipment({ adminId: admin.id, accountId: account.id, productId: order.productId, itemId: order.itemId, itemTitle: order.itemTitle, orderNo: order.orderNo, executionKey: 'live-confirm-local-persist-failure' });
   assert.equal(result.status, 'unknown');
   assert.equal(result.errorCode, 'LOCAL_ORDER_STATUS_PERSIST_FAILED');

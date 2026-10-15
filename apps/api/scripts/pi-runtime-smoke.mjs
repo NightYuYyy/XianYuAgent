@@ -79,7 +79,7 @@ async function waitFor(predicate, timeoutMs = 1_000) {
 
 try {
   const envConfig = loadPiRuntimeConfig({ API_KEY: 'test-key', BASE_URL: `${baseUrl}/`, MODEL: 'test-model', MODEL_TIMEOUT_MS: '123' });
-  assert.deepEqual(envConfig, { apiKey: 'test-key', baseUrl: `${baseUrl}/`, model: 'test-model', timeoutMs: 123, wireApi: 'responses' });
+  assert.deepEqual(envConfig, { apiKey: 'test-key', baseUrl: `${baseUrl}/`, model: 'test-model', provider: 'openai', timeoutMs: 123, wireApi: 'responses' });
   assert.equal(loadPiRuntimeConfig({ API_KEY: 'test-key', WIRE_API: 'chat' })?.wireApi, 'chat');
   assert.equal(loadPiRuntimeConfig({ API_KEY: 'test-key', WIRE_API: 'responses' })?.wireApi, 'responses');
   assert.equal(loadPiRuntimeConfig({ API_KEY: 'test-key', MODEL_WIRE_API: 'responses' })?.wireApi, 'responses');

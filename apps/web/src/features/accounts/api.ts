@@ -18,6 +18,8 @@ export interface AccountsApiTransport {
 
 export interface AccountsApi {
   list(filters?: AccountListFilters): Promise<AccountsPageVM>;
+  listRiskNotifications(): Promise<Array<{ id: string; accountId: string; eventType: 'verification_required' | 'verification_cleared'; createdAt: string }>>;
+  acknowledgeRiskNotification(id: string): Promise<void>;
   createAccount(input: { platform: 'xianyu'; sellerRef: string; displayName?: string }): Promise<AccountVM>;
   deleteAccount?(accountId: string): Promise<void>;
   getDetail(accountId: string): Promise<AccountVM>;
@@ -45,6 +47,11 @@ interface CanonicalAccountResponse {
   credentialState?: AccountCredentialState;
   version?: number;
   updatedAt?: string;
+  riskCode?: string;
+  riskSource?: string;
+  riskFirstSeenAt?: string;
+  transportStatus?: 'connecting' | 'connected' | 'disconnected' | 'failed';
+  transportSeenAt?: string;
 }
 
 interface CanonicalAccountsPayload { items?: CanonicalAccountResponse[]; total?: number; page?: number; pageSize?: number; totalPages?: number; }
@@ -62,6 +69,7 @@ function unwrapEnvelope<T>(payload: T | ApiEnvelope<T>): T {
 
 function toAccountVM(account: CanonicalAccountResponse): AccountVM {
   const normalizedStatus: AccountStatus = account.status === 'active' ? 'connected' : account.status === 'error' ? 'degraded' : account.status ?? (account.enabled === false ? 'disabled' : 'pending');
+  const transportFresh = account.transportStatus === 'connected' && account.transportSeenAt !== undefined && Date.parse(account.transportSeenAt) > Date.now() - 15_000;
   return {
     id: account.id,
     platform: 'xianyu',
@@ -71,12 +79,15 @@ function toAccountVM(account: CanonicalAccountResponse): AccountVM {
     avatarUrl: account.avatarUrl,
     platformUserId: account.platformUserId,
     status: normalizedStatus,
-    connection: { status: account.connection?.status ?? (normalizedStatus === 'connected' ? 'online' : normalizedStatus === 'expired' ? 'expired' : normalizedStatus === 'disconnected' ? 'offline' : normalizedStatus === 'pending' ? 'connecting' : 'unknown'), lastConnectedAt: account.connection?.lastConnectedAt, latencyMs: account.connection?.latencyMs, failureCode: account.connection?.failureCode, failureMessage: account.connection?.failureMessage },
+    connection: { status: account.connection?.status ?? (normalizedStatus === 'verification_required' || normalizedStatus === 'degraded' ? 'unknown' : normalizedStatus === 'expired' ? 'expired' : transportFresh ? 'online' : account.transportStatus === 'connecting' ? 'connecting' : normalizedStatus === 'pending' ? 'connecting' : 'offline'), lastConnectedAt: account.connection?.lastConnectedAt, latencyMs: account.connection?.latencyMs, failureCode: account.connection?.failureCode, failureMessage: account.connection?.failureMessage },
     enabled: account.enabled ?? true,
     aiEnabled: account.aiEnabled ?? false,
     credentialState: account.credentialState ?? (normalizedStatus === 'connected' ? 'configured' : 'unknown'),
     version: account.version ?? 1,
     updatedAt: account.updatedAt ?? new Date(0).toISOString(),
+    riskCode: account.riskCode,
+    riskSource: account.riskSource,
+    riskFirstSeenAt: account.riskFirstSeenAt,
   };
 }
 
@@ -117,6 +128,8 @@ function queryString(filters: AccountListFilters = {}): string {
 export function createAccountsApi(transport: AccountsApiTransport): AccountsApi {
   return {
     async list(filters) { return toCanonicalPage(unwrapEnvelope(await transport.get<CanonicalAccountsPayload | ApiEnvelope<CanonicalAccountsPayload>>(`/api/v1/accounts${queryString(filters)}`))); },
+    async listRiskNotifications() { const result = unwrapEnvelope(await transport.get<{ items: Array<{ id: string; accountId: string; eventType: 'verification_required' | 'verification_cleared'; createdAt: string }> } | ApiEnvelope<{ items: Array<{ id: string; accountId: string; eventType: 'verification_required' | 'verification_cleared'; createdAt: string }> }>>('/api/v1/accounts/risk-notifications')); return result.items; },
+    async acknowledgeRiskNotification(id) { const post = requirePost(transport); await post(`/api/v1/accounts/risk-notifications/${encodeURIComponent(id)}/read`, {}, { headers: { 'Idempotency-Key': `risk-read-${id}` } }); },
     async createAccount(input) { const post = requirePost(transport); return toAccountVM(unwrapEnvelope(await post<CanonicalAccountResponse | ApiEnvelope<CanonicalAccountResponse>>('/api/v1/accounts', input, { headers: { 'Idempotency-Key': `account-create-${input.sellerRef}-${Date.now()}` } }))); },
     async deleteAccount(accountId) { const del = requireDelete(transport); await del<unknown>(`/api/v1/accounts/${encodeURIComponent(accountId)}`, { headers: { 'Idempotency-Key': `account-delete-${accountId}-${Date.now()}` } }); },
     async getDetail(accountId) { return toAccountVM(unwrapEnvelope(await transport.get<CanonicalAccountResponse | ApiEnvelope<CanonicalAccountResponse>>(`/api/v1/accounts/${encodeURIComponent(accountId)}`))); },
@@ -151,6 +164,8 @@ export function createMockAccountsApi(seed: AccountSummary[] = [
   };
   return {
     async list(filters = {}) { const search = filters.search?.trim().toLowerCase(); const filtered = accounts.filter((account) => (!search || [account.id, account.displayName, account.remark ?? ''].some((value) => value.toLowerCase().includes(search))) && (!filters.status || filters.status === 'all' || account.status === filters.status) && (!filters.connectionStatus || filters.connectionStatus === 'all' || account.connection.status === filters.connectionStatus)); const page = filters.page ?? 1; const pageSize = filters.pageSize ?? 20; const start = (page - 1) * pageSize; return { items: filtered.slice(start, start + pageSize), total: filtered.length, page, pageSize, totalPages: Math.max(1, Math.ceil(filtered.length / pageSize)) }; },
+    async listRiskNotifications() { return []; },
+    async acknowledgeRiskNotification() {},
     async createAccount(input) { if (accounts.some((account) => account.sellerRef === input.sellerRef)) throw new Error('ACCOUNT_ALREADY_EXISTS'); const account: AccountVM = { id: `account-${Date.now()}`, platform: 'xianyu', sellerRef: input.sellerRef, displayName: input.displayName?.trim() || input.sellerRef, status: 'pending', connection: { status: 'unknown' }, enabled: true, aiEnabled: false, credentialState: 'missing', version: 1, updatedAt: new Date().toISOString() }; accounts.unshift(account); return account; },
     async deleteAccount(accountId) { const index = accounts.findIndex((account) => account.id === accountId); if (index < 0) throw new Error('ACCOUNT_NOT_FOUND'); accounts.splice(index, 1); },
     async getDetail(accountId) { const account = accounts.find((item) => item.id === accountId); if (!account) throw new Error('account not found'); return account; },
@@ -167,6 +182,8 @@ export function createMockAccountsApi(seed: AccountSummary[] = [
 export function createLegacyAccountsApi(legacyApi: { list(query?: { page?: number; pageSize?: number; search?: string }): Promise<PageResult<AccountSummary>> }): AccountsApi {
   return {
     async list(filters) { const result = await legacyApi.list(filters); return { ...result, items: result.items.map(fromLegacySummary) }; },
+    async listRiskNotifications() { return []; },
+    async acknowledgeRiskNotification() {},
     async createAccount() { throw new Error('ACCOUNT_CREATE_UNAVAILABLE'); },
     async deleteAccount() { throw new Error('ACCOUNT_DELETE_UNAVAILABLE'); },
     async getDetail(accountId) { const result = await legacyApi.list({ search: accountId }); const account = result.items.find((item) => item.id === accountId); if (!account) throw new Error('account not found'); return fromLegacySummary(account); },

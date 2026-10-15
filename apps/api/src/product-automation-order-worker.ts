@@ -48,7 +48,6 @@ export class ProductAutomationOrderRefreshWorker {
 
   start(): void {
     if (!this.enabled || this.timer) return;
-    void this.pollOnce().catch((error) => this.onError(error));
     this.timer = setInterval(() => { void this.pollOnce().catch((error) => this.onError(error)); }, this.pollMs);
   }
 

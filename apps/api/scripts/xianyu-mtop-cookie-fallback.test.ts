@@ -2,6 +2,40 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { XianyuMtopClient } from '../src/xianyu-mtop.js';
 
+test('risk persistence failure is surfaced instead of returning a stale healthy account result', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ ret: ['FAIL_SYS_USER_VALIDATE::verification required'], data: {} }), { status: 200, headers: { 'content-type': 'application/json' } });
+  try {
+    const client = new XianyuMtopClient({
+      loadCredential: async () => ({ cookieHeader: '_m_h5_tk=token_value_1; unb=seller-1' }),
+      saveCookie: async () => undefined,
+      onFailure: async () => { throw new Error('DATABASE_UNAVAILABLE'); },
+    });
+    await assert.rejects(() => client.fetchImToken('admin-1', 'account-1', 'device-1'), /ACCOUNT_HEALTH_PERSIST_FAILED/);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('successful image upload reports recovery on the same upload source', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  let fail = true;
+  globalThis.fetch = async () => new Response(fail ? 'temporary failure' : JSON.stringify({ object: { url: 'https://img.example/recovered.png' } }), { status: fail ? 503 : 200 });
+  try {
+    const client = new XianyuMtopClient({
+      loadCredential: async () => ({ cookieHeader: 'unb=seller-1' }),
+      saveCookie: async () => undefined,
+      onFailure: async ({ api }) => { calls.push(`failure:${api}`); },
+      onSuccess: async ({ api }) => { calls.push(`success:${api}`); },
+    });
+    const first = await client.uploadChatImage('admin-1', 'account-1', 'image.png', 'image/png', Buffer.from([1]));
+    fail = false;
+    const recovered = await client.uploadChatImage('admin-1', 'account-1', 'image.png', 'image/png', Buffer.from([1]));
+    assert.equal(first.success, false);
+    assert.equal(recovered.success, true);
+    assert.deepEqual(calls, ['failure:stream-upload.goofish.com/api/upload.api', 'success:stream-upload.goofish.com/api/upload.api']);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('replays raw saved cookie when persisted snapshot has expired _m_h5_tk metadata', async () => {
   const originalFetch = globalThis.fetch;
   const staleSnapshot = JSON.stringify([{ name: '_m_h5_tk', value: 'token_value_1', domain: '.goofish.com', path: '/', secure: true, expires: Math.floor(Date.now() / 1000) - 60 }]);

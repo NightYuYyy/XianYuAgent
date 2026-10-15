@@ -337,7 +337,7 @@ test('payment automation is ordered, idempotent, quantity-aware and never confir
   assert.ok(confirmationUnknownPort.calls.includes('manual:shipment_confirmation_unknown'));
 });
 
-test('delivery confirmation is not blocked by reservation cleanup and recovery never resends', async () => {
+test('uncertain coupon commit stops confirmation and replay never resends', async () => {
   const port = new FakePort();
   port.commitError = new Error('COUPON_RESERVATION_INCONSISTENT');
   port.confirm = result('failed', 'SHIPMENT_RETRYABLE');
@@ -348,14 +348,14 @@ test('delivery confirmation is not blocked by reservation cleanup and recovery n
   const first = await workflow.handlePaymentPaid({ config, order: baseOrder(), eventId: 'paid-cleanup-failure' });
   assert.equal(first.status, 'manual_review');
   assert.equal('sentQuantity' in first, false);
-  assert.deepEqual(port.calls.slice(0, 5), ['reserve:delivery', 'send:delivery', 'commit', 'release:coupon_commit_cleanup', 'confirm']);
+  assert.deepEqual(port.calls, ['reserve:delivery', 'send:delivery', 'commit', 'manual:coupon_commit_unknown']);
 
   port.confirm = result('succeeded', 'shipment-recovered');
   const replay = await workflow.handlePaymentPaid({ config, order: baseOrder(), eventId: 'paid-cleanup-recovery' });
-  assert.equal(replay.status, 'succeeded');
+  assert.equal(replay.status, 'manual_review');
   assert.equal(port.calls.filter((call) => call === 'reserve:delivery').length, 1);
   assert.equal(port.calls.filter((call) => call === 'send:delivery').length, 1);
-  assert.equal(port.calls.filter((call) => call === 'confirm').length, 2);
+  assert.equal(port.calls.filter((call) => call === 'confirm').length, 0);
 });
 
 test('concurrent duplicate event shares one in-flight execution', async () => {
@@ -460,6 +460,29 @@ test('retry policy honors backoff window and max attempts', async () => {
   assert.equal(exhausted.status, 'manual_review');
   assert.equal(exhausted.reason, 'retry_exhausted');
   assert.equal(cappedPort.calls.filter((call) => call === 'send:delivery').length, 1);
+});
+
+test('IM preflight outage does not exhaust delivery execution attempts or send before recovery', async () => {
+  const port = new FakePort();
+  let ready = false;
+  port.reserveCoupon = async (input) => {
+    port.calls.push('reserve:delivery');
+    if (!ready) throw new Error('XIANYU_IM_NOT_READY');
+    return { reservationId: `reservation-${input.executionKey}`, quantity: input.quantity };
+  };
+  const config = defaultProductAutomationConfig();
+  config.paidAutoDelivery = { ...config.paidAutoDelivery, enabled: true, couponBatchIds: ['batch-1'], maxAttempts: 1, retryBackoffSeconds: 0 };
+  const workflow = new AutomationWorkflowService(port);
+  const input = { config, order: baseOrder({ orderNo: 'ORDER-IM-OUTAGE' }), eventId: 'paid-im-outage' };
+  for (let attempt = 0; attempt < 13; attempt += 1) {
+    const result = await workflow.handlePaymentPaid(input);
+    assert.equal(result.status, 'unknown');
+    assert.equal(result.reason, 'XIANYU_IM_NOT_READY');
+  }
+  assert.equal(port.calls.filter((call) => call === 'send:delivery').length, 0);
+  ready = true;
+  assert.equal((await workflow.handlePaymentPaid(input)).status, 'succeeded');
+  assert.equal(port.calls.filter((call) => call === 'send:delivery').length, 1);
 });
 
 test('unpaid reprice does not fabricate success and does not reprice twice', async () => {

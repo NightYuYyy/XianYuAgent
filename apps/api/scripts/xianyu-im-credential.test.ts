@@ -163,6 +163,7 @@ describe('xianyu IM credential refresh', () => {
       getAccount: async () => ({ id: 'account-1', platform: 'xianyu', sellerRef: 'seller-1', status: 'connected' as const }),
       getCredential: async () => ({ cookieHeader: 'unb=seller-1; _m_h5_tk=token-1', deviceId: 'device-1', status: 'active' as const }),
       updateAccount: async () => undefined,
+      recordAccountRisk: async () => undefined,
     };
     const service = new XianyuImService(store as never, {
       fetchImToken: async () => ({ success: false, accountInvalid: true, errorCode: 'ACCOUNT_VALIDATION_REQUIRED', message: 'FAIL_SYS_USER_VALIDATE', verificationUrl: 'https://punish.goofish.com/verify?token=redacted', cookieHeader: 'unb=seller-1; _m_h5_tk=token-1' }),
@@ -182,6 +183,7 @@ describe('xianyu IM credential refresh', () => {
       getAccount: async () => ({ id: 'account-1', platform: 'xianyu', sellerRef: 'seller-1', status: 'connected' as const }),
       getCredential: async () => undefined,
       updateAccount: async () => undefined,
+      recordAccountRisk: async () => undefined,
     };
     const service = new XianyuImService(store as never, {} as never, {} as never);
     (service as unknown as { clients: Map<string, unknown> }).clients.set('admin-1:account-1', {
@@ -267,8 +269,8 @@ describe('xianyu IM credential refresh', () => {
     assert.equal(account.status, 'expired');
   });
 
-  it('keeps a freshly logged-in account connected when IM bootstrap hits slider validation', async () => {
-    let account = { id: 'account-1', platform: 'xianyu', status: 'connected' as const };
+  it('marks a freshly logged-in account for verification when IM bootstrap hits slider validation', async () => {
+    let account: { id: string; platform: string; status: 'connected' | 'verification_required' } = { id: 'account-1', platform: 'xianyu', status: 'connected' };
     let updatedCredentialStatus: string | undefined;
     const store = {
       getAccount: async () => account,
@@ -278,13 +280,14 @@ describe('xianyu IM credential refresh', () => {
         return account;
       },
       markCredentialVerified: async (input: { status: string }) => { updatedCredentialStatus = input.status; return { status: input.status }; },
+      recordAccountRisk: async () => { account = { ...account, status: 'verification_required' }; return account; },
     };
     const service = new XianyuImService(store as never, {
       fetchImToken: async () => ({ success: false, accountInvalid: true, errorCode: 'ACCOUNT_VALIDATION_REQUIRED', message: 'FAIL_SYS_USER_VALIDATE', cookieHeader: '' }),
     } as never, {} as never);
 
     await assert.rejects(() => service.startListener('admin-1', 'account-1'), (error: unknown) => error instanceof ServiceError && error.code === 'ACCOUNT_VALIDATION_REQUIRED');
-    assert.equal(account.status, 'connected');
+    assert.equal(account.status, 'verification_required');
     assert.equal(updatedCredentialStatus, undefined);
   });
 
@@ -292,6 +295,8 @@ describe('xianyu IM credential refresh', () => {
     const order: string[] = [];
     const store = {
       getConversation: async () => ({ id: 'conversation-1', accountId: 'account-1', externalConversationRef: 'conversation-external', buyerRef: 'buyer-1' }),
+      getAccount: async () => ({ id: 'account-1', status: 'connected' }),
+      clearAccountDegraded: async () => undefined,
     };
     const mtop = {
       uploadChatImage: async () => {
@@ -325,6 +330,8 @@ describe('xianyu IM credential refresh', () => {
       getAccount: async () => ({ id: 'account-1', platform: 'xianyu', sellerRef: 'seller-1', status: 'connected' as const }),
       getCredential: async () => ({ cookieHeader: 'unb=seller-1; _m_h5_tk=token-1', accessToken: 'access-1', deviceId: 'device-1' }),
       updateAccount: async () => undefined,
+      recordAccountRisk: async () => undefined,
+      clearAccountDegraded: async () => undefined,
     };
     const service = new XianyuImService(store as never, {} as never, {} as never);
     const staleClient = {

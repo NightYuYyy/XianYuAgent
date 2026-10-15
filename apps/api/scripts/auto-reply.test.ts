@@ -397,7 +397,7 @@ test('concurrent listener startup shares one account-scoped client connection', 
 test('history synchronization imports messages without entering auto-reply', async () => {
   const imported: string[] = [];
   const autoReplyCalls: string[] = [];
-  const service = new XianyuImService({} as never, {} as never, {
+  const service = new XianyuImService({ getAccount: async () => undefined } as never, {} as never, {
     importExternalMessage: async (input: { externalMessageRef: string }) => {
       imported.push(input.externalMessageRef);
       return { created: true, message: { id: 'message-1' } } as never;
@@ -423,7 +423,7 @@ test('history synchronization imports messages without entering auto-reply', asy
 
 test('history synchronization also prefers a stable PNM id over a transport id', async () => {
   const imported: string[] = [];
-  const service = new XianyuImService({} as never, {} as never, {
+  const service = new XianyuImService({ getAccount: async () => undefined } as never, {} as never, {
     importExternalMessage: async (input: { externalMessageRef: string }) => {
       imported.push(input.externalMessageRef);
       return { created: true, message: { id: 'message-1' } } as never;

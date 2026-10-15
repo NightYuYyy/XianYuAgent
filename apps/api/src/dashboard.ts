@@ -154,7 +154,7 @@ function parseBoundary(value: string, endOfDate: boolean): number {
 
 function buildHealth(accounts: AccountRecord[], coupons: CouponBatchRecord[]): DashboardSnapshot['health'] {
   const connected = accounts.filter((account) => account.status === 'connected').length;
-  const degraded = accounts.filter((account) => account.status === 'degraded' || account.status === 'expired' || account.status === 'disconnected').length;
+  const degraded = accounts.filter((account) => account.status === 'degraded' || account.status === 'expired' || account.status === 'verification_required' || account.status === 'disconnected').length;
   const configured = coupons.some((batch) => batch.status === 'active');
   return [
     { label: '监听心跳', value: connected > 0 ? '正常' : degraded > 0 ? '需授权' : '待连接', tone: connected > 0 ? 'ok' : degraded > 0 ? 'warn' : 'gray' },
@@ -218,8 +218,9 @@ function buildRecentActivity(orders: OrderRecord[], conversations: ConversationR
 
 function buildRiskTodos(accounts: AccountRecord[], orders: OrderRecord[], conversations: ConversationRecord[]): DashboardSnapshot['riskTodos'] {
   const todos: DashboardSnapshot['riskTodos'] = [];
-  for (const account of accounts.filter((item) => ['expired', 'disconnected', 'degraded'].includes(item.status))) {
-    todos.push({ id: `account-${account.id}`, title: `${account.displayName || account.sellerRef} 需要重新授权`, detail: '登录态不可用，消息监听与自动处理可能已暂停。', severity: account.status === 'expired' ? 'high' : 'medium', href: '/accounts' });
+  for (const account of accounts.filter((item) => ['expired', 'disconnected', 'degraded', 'verification_required'].includes(item.status))) {
+    const risk = account.status === 'verification_required';
+    todos.push({ id: `account-${account.id}`, title: `${account.displayName || account.sellerRef} ${risk ? '需要安全验证' : '需要重新授权'}`, detail: risk ? `闲鱼触发风控（${account.riskCode ?? '验证要求'}），请检查账号。` : '登录态不可用，消息监听与自动处理可能已暂停。', severity: risk || account.status === 'expired' ? 'high' : 'medium', href: '/accounts' });
   }
   for (const order of orders.filter((item) => item.paymentStatus === 'paid' && ['pending', 'partially_delivered', 'failed'].includes(item.deliveryStatus))) {
     const failed = order.deliveryStatus === 'failed';
@@ -233,7 +234,7 @@ function buildRiskTodos(accounts: AccountRecord[], orders: OrderRecord[], conver
 
 function countPendingManual(orders: OrderRecord[], accounts: AccountRecord[], conversations: ConversationRecord[]): number {
   return orders.filter((order) => order.paymentStatus === 'paid' && order.deliveryStatus !== 'delivered' && order.deliveryStatus !== 'cancelled').length
-    + accounts.filter((account) => ['expired', 'disconnected', 'degraded'].includes(account.status)).length
+    + accounts.filter((account) => ['expired', 'disconnected', 'degraded', 'verification_required'].includes(account.status)).length
     + conversations.filter((conversation) => conversation.unreadCount > 0).length;
 }
 
