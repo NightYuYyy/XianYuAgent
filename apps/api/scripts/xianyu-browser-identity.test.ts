@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { resolveDefaultChromeVersion, xianyuBrowserIdentity, xianyuChromeVersion, xianyuImUserAgent, xianyuNavigatorPlatform, xianyuSecChUa, xianyuSecChUaPlatform } from '../src/xianyu-browser-identity.js';
 
@@ -29,4 +32,17 @@ test('browser identity preserves Windows values for local Chrome', () => {
 
 test('browser identity prefers an explicit version override over runtime probing', () => {
   assert.equal(resolveDefaultChromeVersion({ XIANYU_BROWSER_CHROME_VERSION: '156.0.8123.7' }), '156.0.8123.7');
+});
+
+test('Windows version detection reads the Chrome install directory without launching the executable', async () => {
+  const installDir = await mkdtemp(join(tmpdir(), 'xianyu-chrome-version-'));
+  try {
+    const executable = join(installDir, 'chrome.exe');
+    await writeFile(executable, 'fixture');
+    await mkdir(join(installDir, '154.0.8010.54'));
+    await mkdir(join(installDir, '155.0.8059.79'));
+    assert.equal(resolveDefaultChromeVersion({ XIANYU_VERIFICATION_BROWSER_EXECUTABLE: executable }, 'win32'), '155.0.8059.79');
+  } finally {
+    await rm(installDir, { recursive: true, force: true });
+  }
 });

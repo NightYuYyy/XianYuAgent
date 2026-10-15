@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 export type XianyuBrowserPlatform = 'Windows' | 'Linux' | 'macOS' | 'Android' | 'Unknown';
 
@@ -26,14 +27,14 @@ export const XIANYU_USER_AGENT = process.env.XIANYU_BROWSER_USER_AGENT?.trim() |
  * A hard-coded production version drifts as google-chrome-stable updates,
  * which makes BX see a browser fingerprint that disagrees with the HTTP layer.
  */
-export function resolveDefaultChromeVersion(env: NodeJS.ProcessEnv = process.env): string {
+export function resolveDefaultChromeVersion(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
   const explicit = normalizeChromeVersion(env.XIANYU_BROWSER_CHROME_VERSION);
   if (explicit) return explicit;
 
   const executableCandidates = [
     env.XIANYU_VERIFICATION_BROWSER_EXECUTABLE,
-    ...(process.platform === 'linux' ? ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable'] : []),
-    ...(process.platform === 'win32' ? [
+    ...(platform === 'linux' ? ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable'] : []),
+    ...(platform === 'win32' ? [
       env.LOCALAPPDATA ? `${env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe` : undefined,
       env.PROGRAMFILES ? `${env.PROGRAMFILES}\\Google\\Chrome\\Application\\chrome.exe` : undefined,
       env['PROGRAMFILES(X86)'] ? `${env['PROGRAMFILES(X86)']}\\Google\\Chrome\\Application\\chrome.exe` : undefined,
@@ -42,6 +43,12 @@ export function resolveDefaultChromeVersion(env: NodeJS.ProcessEnv = process.env
 
   for (const executable of executableCandidates) {
     if (!existsSync(executable)) continue;
+    if (platform === 'win32') {
+      // Chrome can forward --version to an existing Windows instance as a new blank window.
+      const detected = chromeVersionFromInstallDirectory(executable);
+      if (detected) return detected;
+      continue;
+    }
     try {
       const output = execFileSync(executable, ['--version'], {
         encoding: 'utf8',
@@ -56,7 +63,26 @@ export function resolveDefaultChromeVersion(env: NodeJS.ProcessEnv = process.env
     }
   }
 
-  return process.platform === 'linux' ? '155.0.0.0' : '154.0.0.0';
+  return platform === 'linux' ? '155.0.0.0' : '154.0.0.0';
+}
+
+function chromeVersionFromInstallDirectory(executable: string): string | undefined {
+  try {
+    const versions = readdirSync(dirname(executable), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^\d+\.\d+\.\d+\.\d+$/u.test(entry.name))
+      .map((entry) => entry.name);
+    versions.sort((left, right) => {
+      const leftParts = left.split('.').map(Number);
+      const rightParts = right.split('.').map(Number);
+      for (let index = 0; index < 4; index += 1) {
+        if (leftParts[index] !== rightParts[index]) return rightParts[index]! - leftParts[index]!;
+      }
+      return 0;
+    });
+    return versions[0];
+  } catch {
+    return undefined;
+  }
 }
 
 export function xianyuBrowserIdentity(userAgent = XIANYU_USER_AGENT): XianyuBrowserIdentity {
