@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createMockAccountsApi, type AccountsApi } from './api';
 import type { AccountListFilters, AccountsLoadError, AccountsState } from './types';
+import { accountErrorMessage } from './feedback';
 
 const defaultAccountsApi = createMockAccountsApi();
 
@@ -8,7 +9,7 @@ function toLoadError(error: unknown): AccountsLoadError {
   const status = typeof error === 'object' && error && 'status' in error ? Number((error as { status?: unknown }).status) : undefined;
   if (status === 403) return { code: 'FORBIDDEN', message: '当前管理员没有读取账号列表的权限。', retryable: false };
   if (error instanceof TypeError) return { code: 'NETWORK_ERROR', message: '账号服务暂时不可用，请检查连接后重试。', retryable: true };
-  return { code: 'UNKNOWN', message: error instanceof Error ? error.message : '账号列表加载失败，请重试。', retryable: true };
+  return { code: 'UNKNOWN', message: accountErrorMessage(error, '账号列表加载失败，请重试。'), retryable: true };
 }
 
 export interface AccountsController {

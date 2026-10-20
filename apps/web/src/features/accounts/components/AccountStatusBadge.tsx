@@ -1,10 +1,11 @@
 import { Badge } from './Badge';
 import type { AccountConnectionStatus, AccountCredentialState, AccountStatus } from '../types';
+import { accountRiskLabel } from '../feedback';
 
-export function AccountStatusBadge({ status }: { status: AccountStatus }) {
+export function AccountStatusBadge({ status, riskCode }: { status: AccountStatus; riskCode?: string }) {
   const labels: Record<AccountStatus, string> = { pending: '待连接', connected: '已连接', degraded: '降级', disconnected: '已断开', expired: '已过期', verification_required: '需验证', disabled: '已停用' };
   const tones: Record<AccountStatus, 'ok' | 'gray' | 'warn' | 'danger'> = { pending: 'warn', connected: 'ok', degraded: 'warn', disconnected: 'gray', expired: 'danger', verification_required: 'danger', disabled: 'gray' };
-  return <Badge tone={tones[status]}>{labels[status]}</Badge>;
+  return <Badge tone={tones[status]}>{status === 'verification_required' ? accountRiskLabel(riskCode) : labels[status]}</Badge>;
 }
 
 export function AccountConnectionBadge({ status }: { status: AccountConnectionStatus }) {

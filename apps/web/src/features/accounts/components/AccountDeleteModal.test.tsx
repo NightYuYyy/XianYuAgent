@@ -48,15 +48,14 @@ describe('AccountDeleteModal', () => {
     expect(html).toContain('data-testid="account-delete-confirm" disabled="">删除中…</button>');
   });
 
-  it('surfaces a delete failure without leaving the product modal', () => {
+  it('keeps the confirmation warning as a note without an inline operation error', () => {
     const html = renderToStaticMarkup(createElement(AccountDeleteModal, {
       account,
-      error: '账号删除失败，请稍后重试',
       onClose: vi.fn(),
       onConfirm: vi.fn(),
     }));
 
-    expect(html).toContain('role="alert"');
-    expect(html).toContain('账号删除失败，请稍后重试');
+    expect(html).toContain('role="note"');
+    expect(html).not.toContain('role="alert"');
   });
 });

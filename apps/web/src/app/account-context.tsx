@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AccountsApi } from '../features/accounts/api';
 import type { AccountVM } from '../features/accounts/types';
+import { accountErrorMessage } from '../features/accounts/feedback';
 
 const STORAGE_KEY = 'xianyu.activeAccountId';
 
@@ -83,7 +84,7 @@ export function AccountContextProvider({ api, children }: { api: AccountsApi; ch
       setCurrent(nextAccountId);
     } catch (error) {
       if (currentRequest !== requestId.current) return;
-      setAccountsError(error instanceof Error ? error.message : '账号加载失败，请稍后重试。');
+      setAccountsError(accountErrorMessage(error, '账号状态刷新失败，请检查服务连接后重试。'));
     } finally {
       if (currentRequest === requestId.current) setAccountsLoading(false);
     }

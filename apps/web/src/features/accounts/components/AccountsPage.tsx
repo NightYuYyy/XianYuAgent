@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAccountContext } from '../../../app/account-context';
 import { createAccountsApi, createMockAccountsApi, type AccountsApi } from '../api';
 import { resolveRuntimeApi } from '../../../api/runtime';
@@ -11,6 +11,8 @@ import { AccountLoginModal } from './AccountLoginModal';
 import { AccountDeleteModal } from './AccountDeleteModal';
 import type { AccountLoginMethod } from './LoginMethodSelector';
 import { findReauthorizeAccount, readReauthorizeAccountId } from '../reauthorize-intent';
+import { accountErrorMessage } from '../feedback';
+import { useToast } from '../../../shared/ui/ToastProvider';
 import './accounts.css';
 
 export interface AccountsPageProps { api?: AccountsApi; }
@@ -18,15 +20,15 @@ export interface AccountsPageProps { api?: AccountsApi; }
 export function AccountsPage({ api: providedApi }: AccountsPageProps) {
   const api = useMemo(() => resolveRuntimeApi(providedApi, createMockAccountsApi, 'ACCOUNTS_API_NOT_PROVIDED'), [providedApi]);
   const controller = useAccountsController({ api });
+  const { showToast, dismissToast } = useToast();
+  const previousLoadError = useRef<string | null>(null);
   const { accounts: contextAccounts, accountsLoading, currentAccountId, currentAccount, setCurrentAccountId, removeAccount, refreshAccounts } = useAccountContext();
   const [loginAccountId, setLoginAccountId] = useState<string | null>(null);
   const [loginMethod, setLoginMethod] = useState<AccountLoginMethod>('qr');
   const [loginOpen, setLoginOpen] = useState(false);
   const [handledReauthorizeAccountId, setHandledReauthorizeAccountId] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
   const [deleteAccountTarget, setDeleteAccountTarget] = useState<AccountVM | null>(null);
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
   const accounts = controller.state.data?.items ?? [];
   const total = controller.state.data?.total ?? 0;
   const page = controller.state.data?.page ?? controller.filters.page ?? 1;
@@ -34,6 +36,15 @@ export function AccountsPage({ api: providedApi }: AccountsPageProps) {
   const metrics = summarize(accounts);
   const loginAccount = loginAccountId ? accounts.find((account) => account.id === loginAccountId) ?? contextAccounts.find((account) => account.id === loginAccountId) : undefined;
   const requestedReauthorizeAccountId = useMemo(() => readReauthorizeAccountId(typeof window === 'undefined' ? '' : window.location.search), []);
+
+  useEffect(() => {
+    const error = controller.state.error;
+    if (error && error.message !== previousLoadError.current) {
+      showToast({ id: 'account-list', tone: 'error', message: error.message, actions: error.retryable ? [{ label: '重新加载', onClick: () => { void controller.reload(); } }] : [] });
+    }
+    if (controller.state.phase === 'success' || controller.state.phase === 'empty') dismissToast('account-list');
+    previousLoadError.current = error?.message ?? null;
+  }, [controller.state.error, controller.state.phase, controller.reload, showToast, dismissToast]);
 
   useEffect(() => {
     if (!requestedReauthorizeAccountId || handledReauthorizeAccountId === requestedReauthorizeAccountId || accountsLoading) return;
@@ -61,22 +72,19 @@ export function AccountsPage({ api: providedApi }: AccountsPageProps) {
   }
 
   async function switchAccount(account: AccountVM) {
-    setActionError(null);
     try {
       await setCurrentAccountId(account.id);
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : '账号切换失败');
+      showToast({ id: 'account-switch', tone: 'error', message: accountErrorMessage(error, '账号切换失败，请稍后重试。') });
     }
   }
 
   function requestDeleteAccount(account: AccountVM) {
-    setDeleteError(null);
     setDeleteAccountTarget(account);
   }
 
   function closeDeleteAccount() {
     if (deleteSubmitting) return;
-    setDeleteError(null);
     setDeleteAccountTarget(null);
   }
 
@@ -84,13 +92,13 @@ export function AccountsPage({ api: providedApi }: AccountsPageProps) {
     if (!deleteAccountTarget || deleteSubmitting) return;
     const account = deleteAccountTarget;
     setDeleteSubmitting(true);
-    setDeleteError(null);
+    dismissToast('account-delete');
     try {
       await removeAccount(account.id);
       setDeleteAccountTarget(null);
       await controller.reload();
     } catch (error) {
-      setDeleteError(error instanceof Error ? error.message : '账号删除失败');
+      showToast({ id: 'account-delete', tone: 'error', message: accountErrorMessage(error, '账号删除失败，请稍后重试。') });
     } finally {
       setDeleteSubmitting(false);
     }
@@ -105,12 +113,11 @@ export function AccountsPage({ api: providedApi }: AccountsPageProps) {
       </div>
       <article className="card panel accounts-domain-panel">
         <AccountToolbar filters={controller.filters} phase={controller.state.phase} onSearchChange={controller.setSearch} onStatusChange={(status) => controller.setFilters((previous) => ({ ...previous, status, page: 1 }))} onConnectionStatusChange={(connectionStatus) => controller.setFilters((previous) => ({ ...previous, connectionStatus, page: 1 }))} onRefresh={controller.reload} onAddAccount={() => openLogin()} />
-        {actionError && <div className="accounts-inline-error" role="alert">{actionError}</div>}
         {controller.state.phase === 'success' && <AccountTable accounts={accounts} activeAccountId={currentAccountId} page={page} total={total} totalPages={totalPages} onPageChange={(nextPage) => controller.setFilters((previous) => ({ ...previous, page: Math.max(1, Math.min(nextPage, totalPages)) }))} onReauthorize={openLogin} onSwitch={switchAccount} onDelete={requestDeleteAccount} />}
         <AccountStateView phase={controller.state.phase} error={controller.state.error} onRetry={controller.reload} />
       </article>
       {loginOpen && <AccountLoginModal api={api} account={loginAccount} initialMethod={loginMethod} onClose={closeLogin} onStatusChanged={() => { void controller.reload(); void refreshAccounts(); }} onCompleted={() => { void controller.reload(); void refreshAccounts(); closeLogin(); }} />}
-      {deleteAccountTarget && <AccountDeleteModal account={deleteAccountTarget} submitting={deleteSubmitting} error={deleteError} onClose={closeDeleteAccount} onConfirm={() => { void confirmDeleteAccount(); }} />}
+      {deleteAccountTarget && <AccountDeleteModal account={deleteAccountTarget} submitting={deleteSubmitting} onClose={closeDeleteAccount} onConfirm={() => { void confirmDeleteAccount(); }} />}
     </section>
   );
 }

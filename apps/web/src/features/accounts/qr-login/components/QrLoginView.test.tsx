@@ -4,6 +4,13 @@ import { QrLoginView } from './QrLoginView';
 import type { QrLoginModel } from '../model';
 
 describe('QrLoginView', () => {
+  it('keeps Chinese login status without exposing vendor errors', () => {
+    const model: QrLoginModel = { phase: 'failed', error: null, session: { qrSessionId: 'qr-failed', status: 'failed', errorCode: 'RAW_VENDOR_QR_FAILURE', expiresAt: new Date(0).toISOString(), pollAfterMs: 1000 } };
+    const html = renderToStaticMarkup(<QrLoginView model={model} />);
+    expect(html).toContain('登录失败');
+    expect(html).not.toContain('RAW_VENDOR_QR_FAILURE');
+  });
+
   it('does not render the redundant profile-waiting block', () => {
     const model: QrLoginModel = { phase: 'idle', session: null, error: null };
     const html = renderToStaticMarkup(<QrLoginView model={model} />);

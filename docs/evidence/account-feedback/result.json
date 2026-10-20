@@ -1,0 +1,22 @@
+{
+  "result": "passed",
+  "backend": "real createApp + isolated MemoryStore",
+  "viewport": [
+    "1440x900",
+    "390x844"
+  ],
+  "checks": [
+    "Chinese known/unknown risk codes",
+    "no flow banners",
+    "fixed bottom-right toast",
+    "polling deduplication",
+    "dismiss vs acknowledge",
+    "acknowledgement failure/retry",
+    "cross-page navigation",
+    "cookie/password/QR failure translation",
+    "list failure/retry",
+    "global refresh failure/retry and queued feedback",
+    "delete failure/retry"
+  ],
+  "pageErrors": []
+}

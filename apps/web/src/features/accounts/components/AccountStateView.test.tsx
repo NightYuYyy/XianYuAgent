@@ -23,7 +23,8 @@ describe('AccountStateView', () => {
 
     expect(emptyHtml).toContain('accounts-domain-state-empty');
     expect(errorHtml).toContain('accounts-domain-state-error');
-    expect(errorHtml).toContain('role="alert"');
+    expect(errorHtml).not.toContain('role="alert"');
+    expect(errorHtml).not.toContain('网络不可用');
     expect(errorHtml).toContain('重新加载');
   });
 });

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AccountsApi } from '../api';
 import type { AccountVM } from '../types';
 import { AccountLoginModal } from './AccountLoginModal';
+import { ToastProvider } from '../../../shared/ui/ToastProvider';
 
 const account: AccountVM = {
   id: 'account-1',
@@ -21,13 +22,13 @@ const account: AccountVM = {
 
 describe('AccountLoginModal', () => {
   it('can open reauthorization directly on manual Cookie entry', () => {
-    const html = renderToStaticMarkup(createElement(AccountLoginModal, {
+    const html = renderToStaticMarkup(createElement(ToastProvider, { children: createElement(AccountLoginModal, {
       api: {} as AccountsApi,
       account,
       initialMethod: 'cookie',
       onClose: vi.fn(),
       onCompleted: vi.fn(),
-    }));
+    }) }));
 
     expect(html).toContain('data-login-method="cookie" class="account-login-method active"');
     expect(html).toContain('验证 Cookie 并更新账号');

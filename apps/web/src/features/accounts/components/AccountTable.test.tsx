@@ -24,6 +24,17 @@ const accountWithAvatar: AccountVM = {
 };
 
 describe('AccountTable', () => {
+  it.each(['ACCOUNT_VALIDATION_REQUIRED', 'RGV587', 'UNRECOGNIZED_VENDOR_CODE'])('renders Chinese risk status without leaking %s or the backend source', (riskCode) => {
+    const html = renderToStaticMarkup(createElement(AccountTable, {
+      accounts: [{ ...account, status: 'verification_required', riskCode, riskSource: 'seller.orders.internal', riskFirstSeenAt: '2026-10-20T04:55:19.000Z' }],
+      page: 1, total: 1, totalPages: 1,
+      onPageChange: vi.fn(), onReauthorize: vi.fn(), onSwitch: vi.fn(), onDelete: vi.fn(),
+    }));
+    expect(html).toContain(riskCode === 'RGV587' ? '需滑块验证' : '需要安全验证');
+    expect(html).not.toContain(riskCode);
+    expect(html).not.toContain('seller.orders.internal');
+  });
+
   it('restores the operation column and row actions', () => {
     const html = renderToStaticMarkup(createElement(AccountTable, {
       accounts: [account],

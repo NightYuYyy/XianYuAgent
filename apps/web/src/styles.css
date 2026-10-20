@@ -5,6 +5,3 @@
 .modal-head-actions{display:flex;align-items:center;gap:8px}
 /* FishAgent brand sizing: keep the sidebar mark legible at a glance. */
 .brand-mark{width:32px;height:32px}
-.account-risk-banner{display:flex;align-items:center;gap:12px;min-height:40px;padding:8px 18px;background:#fff1ed;border-bottom:1px solid #efb5a4;color:#963b2f;font-size:12px}
-.account-risk-banner strong{font-weight:700;flex:none}.account-risk-banner span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.account-risk-banner button{margin-left:auto;flex:none;border:0;background:transparent;color:#7c2d22;font:inherit;font-weight:700;cursor:pointer;text-decoration:underline}
-@media(max-width:700px){.account-risk-banner{flex-wrap:wrap;gap:4px 10px;padding:8px 12px}.account-risk-banner strong{width:100%}.account-risk-banner button{margin-left:0}}

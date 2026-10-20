@@ -8,10 +8,9 @@ const connectionLabels: Record<AccountVM['connection']['status'], string> = {
   unknown: '连接状态未知',
 };
 
-export function AccountDeleteModal({ account, submitting = false, error, onClose, onConfirm }: {
+export function AccountDeleteModal({ account, submitting = false, onClose, onConfirm }: {
   account: AccountVM;
   submitting?: boolean;
-  error?: string | null;
   onClose: () => void;
   onConfirm: () => void;
 }) {
@@ -34,7 +33,6 @@ export function AccountDeleteModal({ account, submitting = false, error, onClose
           </span>
           <div><strong>{account.displayName}</strong><span>账号 ID：{maskIdentifier(accountReference)} · {connectionLabels[account.connection.status]}</span></div>
         </div>
-        {error && <div className="account-delete-error" role="alert">{error}</div>}
       </div>
       <div className="modal-actions">
         <button className="btn ghost" type="button" data-testid="account-delete-cancel" onClick={onClose} disabled={submitting}>取消</button>

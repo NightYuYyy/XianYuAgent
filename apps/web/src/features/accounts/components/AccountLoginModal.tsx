@@ -6,11 +6,24 @@ import { QrLoginView } from '../qr-login/components/QrLoginView';
 import { LoginMethodSelector, type AccountLoginMethod } from './LoginMethodSelector';
 import { CookieLoginForm } from './CookieLoginForm';
 import { PasswordLoginForm } from './PasswordLoginForm';
+import { useToast } from '../../../shared/ui/ToastProvider';
+import { accountErrorMessage } from '../feedback';
 
 export function AccountLoginModal({ api, account, initialMethod = 'qr', onClose, onCompleted, onStatusChanged }: { api: AccountsApi; account?: AccountVM; initialMethod?: AccountLoginMethod; onClose: () => void; onCompleted: () => void; onStatusChanged?: () => void }) {
   const [method, setMethod] = useState<AccountLoginMethod>(initialMethod);
   const qrController = useQrLoginController({ api, accountId: account?.id, enabled: method === 'qr' });
   const autoStartedRef = useRef(false);
+  const { showToast } = useToast();
+  const lastQrError = useRef<string | null>(null);
+
+  useEffect(() => {
+    const model = qrController.model;
+    const code = method === 'qr' ? model.error?.code ?? model.session?.errorCode : undefined;
+    if (code && lastQrError.current !== code && model.phase !== 'verification_required') {
+      showToast({ id: 'account-qr-login', tone: 'error', message: accountErrorMessage(new Error(code), '二维码登录失败，请关闭弹窗后重新扫码授权。') });
+    }
+    lastQrError.current = code ?? null;
+  }, [method, qrController.model, showToast]);
 
   useEffect(() => {
     if (method !== 'qr') {

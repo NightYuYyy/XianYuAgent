@@ -2,6 +2,8 @@
 
 本仓库采用根目录 npm workspaces 统一管理前端与后端。
 
+开发前检查 [项目经验与回归约束](docs/PROJECT_LESSONS.md)，尤其是全局 Toast、中文错误映射和禁止展示后端诊断码的规则。
+
 目录边界：
 
 - `apps/web/`：正式 React + Vite 前端应用。

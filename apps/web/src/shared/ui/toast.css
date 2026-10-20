@@ -4,4 +4,8 @@
 .app-toast-info { border-color: #C8DCEE; background: var(--soft-blue-bg); color: var(--link); }
 .app-toast-dismiss { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: currentColor; font-size: 16px; line-height: 1; cursor: pointer; }
 .app-toast-dismiss:hover { background: rgba(17,24,39,.08); }
+.app-toast-content { min-width: 0; overflow-wrap: anywhere; }
+.app-toast-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 6px; }
+.app-toast-actions button { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
+.app-toast-actions button:disabled { opacity: .55; cursor: wait; }
 @media (max-width: 900px) { .app-toast { right: 16px; bottom: 16px; left: 16px; max-width: none; justify-content: space-between; } }

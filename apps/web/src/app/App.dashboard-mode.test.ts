@@ -3,10 +3,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AccountContextProvider } from './account-context';
 import { AccountMenu, AuthenticatedShell, resolveDashboardMode } from './App';
+import { ToastProvider } from '../shared/ui/ToastProvider';
 
 function renderShell(props: Parameters<typeof AuthenticatedShell>[0]) {
   const child = createElement(AuthenticatedShell, props);
-  return renderToStaticMarkup(createElement(AccountContextProvider, { api: { list: vi.fn() } as never, children: child }));
+  return renderToStaticMarkup(createElement(ToastProvider, { children: createElement(AccountContextProvider, { api: { list: vi.fn() } as never, children: child }) }));
 }
 
 describe('dashboard API mode resolution', () => {
