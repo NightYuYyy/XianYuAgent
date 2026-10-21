@@ -11,6 +11,7 @@ export interface QrLoginSessionVM {
   qrImageRef?: string;
   verificationUrl?: string;
   verificationAutoLaunch?: boolean;
+  faceQrImageDataUrl?: string;
   expiresAt: string;
   pollAfterMs: number;
   connection?: AccountConnectionVM;

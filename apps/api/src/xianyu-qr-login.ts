@@ -10,7 +10,7 @@ import {
   XIANYU_TOP_SITE,
   type XianyuCookieSnapshot,
 } from './xianyu-cookie-jar.js';
-import type { XianyuVerificationBrowser } from './xianyu-verification-browser.js';
+import { isIdentityVerificationUrl, type XianyuVerificationBrowser } from './xianyu-verification-browser.js';
 import { XIANYU_USER_AGENT, xianyuNavigatorPlatform } from './xianyu-browser-identity.js';
 
 const APP_KEY = '34839810';
@@ -36,6 +36,8 @@ export interface XianyuQrPublicSession {
   errorCode?: string;
   verificationUrl?: string;
   verificationAutoLaunch?: boolean;
+  /** Face-verification QR (Havana IV) for the buyer to scan with the Xianyu app. */
+  faceQrImageDataUrl?: string;
 }
 
 export type XianyuQrStatusEvent = XianyuQrPublicSession & { adminId: string };
@@ -79,6 +81,7 @@ interface InternalSession {
   verificationUrl?: string;
   completionNotified: boolean;
   proxyUrl?: string;
+  faceQrImageDataUrl?: string;
 }
 
 export class XianyuQrLoginAdapter {
@@ -185,6 +188,13 @@ export class XianyuQrLoginAdapter {
             // QR_EXPIRED while the login is still completing.
             session.expiresAt = Math.max(session.expiresAt, Date.now() + VERIFICATION_EXTENSION_MS);
             await this.emitStatus(session);
+            if (isIdentityVerificationUrl(result.iframeRedirectUrl)) {
+              // Replay the identity-verification pages over HTTP so the face QR can be
+              // shown to the user; the server-side browser cannot be scanned.
+              const outcome = await this.runFaceVerification(session, result.iframeRedirectUrl);
+              if (outcome !== 'unsupported') return;
+              if (!this.isCurrent(session)) return;
+            }
             if (this.verificationBrowser?.enabled) {
               try {
                 const completed = await this.verificationBrowser.waitForCompletion({
@@ -240,6 +250,102 @@ export class XianyuQrLoginAdapter {
       session.status = 'expired';
       session.errorCode = 'QR_TIMEOUT';
       await this.emitStatus(session);
+    }
+  }
+
+  /**
+   * 人脸/短信二次验证（Havana IV）的纯 HTTP 复现，参照 xianyu-auto-reply 的实现：
+   * 1. 跟随风控跳转落到 normal_validate.htm，取 htoken 与 verify_modes 链接
+   * 2. 请求 verify_modes.htm，落到 identity_verify.htm，抠出人脸验证二维码内容
+   * 3. 把二维码渲染给前端，用户用闲鱼 App 扫码刷脸
+   * 4. 轮询 photoVerify/check.do 直到 code=3，再跟随 ivCheckLogin.htm 收 unb 等登录 Cookie
+   *
+   * 返回 'unsupported' 时调用方回退到服务端浏览器方案。
+   */
+  private async runFaceVerification(session: InternalSession, iframeUrl: string): Promise<'completed' | 'failed' | 'unsupported'> {
+    const log = (event: string, extra: Record<string, unknown> = {}) => console.info(JSON.stringify({ component: 'xianyu-face-verification', event, sessionId: session.sessionId, accountId: session.accountId, ...extra }));
+    let htoken: string | undefined;
+    try {
+      const landing = await this.fetchWithCookieRedirect(session, iframeUrl, documentHeaders());
+      const landingUrl = landing.url || iframeUrl;
+      const landingHtml = await landing.text();
+      htoken = /htoken=([A-Za-z0-9_-]+)/u.exec(landingHtml)?.[1];
+      let verifyModesUrl = /window\.location\.href\s*=\s*"(https:\/\/[^"]*?\/iv\/mini\/verify_modes\.htm\?[^"]*)"/u.exec(landingHtml)?.[1];
+      if (!htoken || !verifyModesUrl) {
+        log('landing_unrecognised', { landingUrl, htmlLength: landingHtml.length });
+        return 'unsupported';
+      }
+      // The page appends window._iv_umidfg (always 1) to this link at runtime.
+      if (verifyModesUrl.endsWith('_umidfg=')) verifyModesUrl += '1';
+      const identity = await this.fetchWithCookieRedirect(session, verifyModesUrl, { ...documentHeaders(), referer: landingUrl });
+      const identityHtml = await identity.text();
+      const faceQrContent = /new\s+Qrcode\(\{\s*text:\s*"([^"]+)"/u.exec(identityHtml)?.[1];
+      if (!faceQrContent) {
+        log('face_qr_missing', { identityUrl: identity.url, htmlLength: identityHtml.length });
+        return 'unsupported';
+      }
+      if (!this.isCurrent(session)) return 'failed';
+      session.faceQrImageDataUrl = await QRCode.toDataURL(faceQrContent, { margin: 2, width: 320 });
+      session.errorCode = 'FACE_VERIFICATION_REQUIRED';
+      await this.emitStatus(session);
+      log('face_qr_ready');
+    } catch (error) {
+      if (!this.isCurrent(session)) return 'failed';
+      log('prepare_failed', { reason: error instanceof Error ? error.message : String(error) });
+      return 'unsupported';
+    }
+
+    const checkUrl = `${PASSPORT_HOST}/iv/photoVerify/check.do?htoken=${encodeURIComponent(htoken)}`;
+    const checkHeaders: Record<string, string> = {
+      ...passportHeaders(),
+      accept: 'application/json, text/javascript, */*; q=0.01',
+      'x-requested-with': 'XMLHttpRequest',
+      referer: `${PASSPORT_HOST}/iv/mini/identity_verify.htm?htoken=${htoken}`,
+    };
+    let ivCheckUrl: string | undefined;
+    while (Date.now() < session.expiresAt) {
+      if (!this.isCurrent(session)) return 'failed';
+      try {
+        const response = await this.requestFor(session, checkUrl, { method: 'GET', headers: { ...checkHeaders, cookie: cookieHeader(session.jar, checkUrl) } });
+        absorbSetCookies(session.jar, checkUrl, response.headers);
+        const payload = await response.json().catch(() => ({})) as { content?: { code?: unknown; url?: unknown } };
+        const code = String(payload.content?.code ?? '');
+        if (code === '3') {
+          ivCheckUrl = normalizeUrl(String(payload.content?.url ?? ''));
+          break;
+        }
+        if (code !== '0' && code !== '') log('check_unexpected', { code });
+      } catch (error) {
+        log('check_failed', { reason: error instanceof Error ? error.message : String(error) });
+      }
+      await sleep(2_000);
+    }
+    if (!this.isCurrent(session)) return 'failed';
+    if (!ivCheckUrl) {
+      session.status = 'expired';
+      session.errorCode = 'FACE_VERIFICATION_TIMEOUT';
+      session.faceQrImageDataUrl = undefined;
+      await this.emitStatus(session);
+      log('timeout');
+      return 'failed';
+    }
+    try {
+      const finished = await this.fetchWithCookieRedirect(session, ivCheckUrl, { ...documentHeaders(), referer: checkHeaders.referer });
+      await finished.arrayBuffer();
+      if (!this.isCurrent(session)) return 'failed';
+      session.faceQrImageDataUrl = undefined;
+      await this.completeConfirmedLogin(session);
+      await this.emitStatus(session);
+      log('completed', { status: session.status });
+      return 'completed';
+    } catch (error) {
+      if (!this.isCurrent(session)) return 'failed';
+      session.status = 'failed';
+      session.errorCode = classifyError(error);
+      session.faceQrImageDataUrl = undefined;
+      await this.emitStatus(session);
+      log('finish_failed', { errorCode: session.errorCode });
+      return 'failed';
     }
   }
 
@@ -346,7 +452,7 @@ export class XianyuQrLoginAdapter {
   }
 
   private toPublic(session: InternalSession): XianyuQrPublicSession {
-    return { sessionId: session.sessionId, accountId: session.accountId, status: session.status, qrImageDataUrl: session.qrImageDataUrl, expiresAt: new Date(session.expiresAt).toISOString(), pollAfterMs: this.pollIntervalMs, errorCode: session.errorCode, verificationUrl: session.verificationUrl, ...(this.verificationBrowser?.enabled ? { verificationAutoLaunch: true } : {}) };
+    return { sessionId: session.sessionId, accountId: session.accountId, status: session.status, qrImageDataUrl: session.qrImageDataUrl, expiresAt: new Date(session.expiresAt).toISOString(), pollAfterMs: this.pollIntervalMs, errorCode: session.errorCode, verificationUrl: session.verificationUrl, faceQrImageDataUrl: session.faceQrImageDataUrl, ...(this.verificationBrowser?.enabled ? { verificationAutoLaunch: true } : {}) };
   }
 
   private async emitStatus(session: InternalSession): Promise<void> {

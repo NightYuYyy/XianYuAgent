@@ -25,10 +25,10 @@ export function QrLoginView({ model }: QrLoginViewProps) {
       {!session && model.phase === 'failed' && <div className="qr-login-code qr-login-code-loading"><div className="qr-login-loading-content"><strong>二维码暂不可用</strong><span>请关闭弹窗后重新打开以重试。</span></div></div>}
       {session && <>
         <div className="qr-login-code">
-          {session.qrImageDataUrl ? <><img src={session.qrImageDataUrl} alt="闲鱼二维码登录"/><span className="qr-login-help">打开闲鱼 App → 扫一扫</span><span className="qr-login-note">请勿截屏或转发二维码</span></> : <div className="qr-login-placeholder"><strong>二维码暂不可用</strong><span>请关闭弹窗后重新打开。</span></div>}
+          {session.faceQrImageDataUrl ? <><img src={session.faceQrImageDataUrl} alt="闲鱼人脸验证二维码" data-testid="qr-login-face-qr"/><span className="qr-login-help">闲鱼要求人脸验证：打开闲鱼 App → 扫一扫 → 按提示刷脸</span><span className="qr-login-note">刷脸通过后这里会自动完成登录</span></> : session.qrImageDataUrl ? <><img src={session.qrImageDataUrl} alt="闲鱼二维码登录"/><span className="qr-login-help">打开闲鱼 App → 扫一扫</span><span className="qr-login-note">请勿截屏或转发二维码</span></> : <div className="qr-login-placeholder"><strong>二维码暂不可用</strong><span>请关闭弹窗后重新打开。</span></div>}
         </div>
-        {session.verificationUrl && <a className="qr-login-link" href={session.verificationUrl} target="_blank" rel="noreferrer">在新窗口打开验证链接</a>}
-        {session.status === 'verification_required' && <div className="qr-login-error" role="alert"><strong>{isIdentityVerification(session.verificationUrl) ? '需要在手机上完成二次验证' : '需要完成人工验证'}</strong><span>{verificationHint(session)}</span></div>}
+        {session.verificationUrl && !session.faceQrImageDataUrl && !(session.verificationAutoLaunch && isIdentityVerification(session.verificationUrl)) && <a className="qr-login-link" href={session.verificationUrl} target="_blank" rel="noreferrer">在新窗口打开验证链接</a>}
+        {session.status === 'verification_required' && <div className="qr-login-error" role="alert"><strong>{session.faceQrImageDataUrl ? '请扫码完成人脸验证' : isIdentityVerification(session.verificationUrl) ? '需要在手机上完成二次验证' : '需要完成人工验证'}</strong><span>{verificationHint(session)}</span></div>}
         {session.status === 'succeeded' && <div className="qr-login-success" role="status"><strong>账号已重新连接</strong><span>凭证已由服务端保存并完成登录态校验。</span></div>}
       </>}
     </div>
@@ -40,7 +40,8 @@ function isIdentityVerification(verificationUrl?: string): boolean {
   return /\/iv\/|havana_iv_token|mini_login_check/i.test(verificationUrl ?? '');
 }
 
-function verificationHint(session: { verificationUrl?: string; verificationAutoLaunch?: boolean }): string {
+function verificationHint(session: { verificationUrl?: string; verificationAutoLaunch?: boolean; faceQrImageDataUrl?: string }): string {
+  if (session.faceQrImageDataUrl) return '请用闲鱼 App 扫描上方二维码并完成人脸验证。验证链接是一次性的，请不要再用浏览器打开它。';
   if (isIdentityVerification(session.verificationUrl)) {
     return session.verificationAutoLaunch
       ? '闲鱼要求人脸或短信验证。请在手机闲鱼 App 上完成验证，期间请勿关闭此弹窗；服务端会等待验证结果并自动完成登录。'
