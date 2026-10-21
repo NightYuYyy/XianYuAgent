@@ -83,7 +83,7 @@ export class OrderRefundHandler {
     } catch (error) {
       this.logger.warn(JSON.stringify({ component: 'order-refund', event: 'delivery_lookup_failed', orderNo: order.orderNo, reason: error instanceof Error ? error.message : String(error) }));
     }
-    const delivered = deliveries.filter((record) => record.status === 'delivered' || record.deliveredAt);
+    const delivered = deliveries.filter((record) => record.status === 'succeeded' || Boolean(record.deliveredAt));
     const amount = `¥${(order.amountMinor / 100).toFixed(2)}`;
     notify({
       kind: 'order_refund_requested',

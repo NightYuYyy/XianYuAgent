@@ -37,7 +37,7 @@ test('refund handler notifies once, posts delivered records to the revoke webhoo
   const sent: NotificationEvent[] = [];
   configureNotifier(new Notifier({ channels: [{ name: 'spy', async send(event) { sent.push(event); } }], dedupeMs: 0, logger: quiet }));
   const deliveries: DeliveryRecord[] = [
-    { id: 'd-1', orderId: 'o-1', orderNo: '5127818256069009620', accountId: 'acc-1', deliveryType: 'coupon_only', status: 'delivered', idempotencyScope: 's', idempotencyKey: 'k1', attempt: 1, couponItemId: 'c-1', deliveredAt: '2026-10-21T01:00:00.000Z', externalRef: 'msg-1' } as DeliveryRecord,
+    { id: 'd-1', orderId: 'o-1', orderNo: '5127818256069009620', accountId: 'acc-1', deliveryType: 'coupon_only', status: 'succeeded', idempotencyScope: 's', idempotencyKey: 'k1', attempt: 1, couponItemId: 'c-1', deliveredAt: '2026-10-21T01:00:00.000Z', externalRef: 'msg-1' } as DeliveryRecord,
     { id: 'd-2', orderId: 'o-1', orderNo: '5127818256069009620', accountId: 'acc-1', deliveryType: 'coupon_only', status: 'failed', idempotencyScope: 's', idempotencyKey: 'k2', attempt: 1 } as DeliveryRecord,
   ];
   const store = { listDeliveryRecords: async () => deliveries } as unknown as Store;
