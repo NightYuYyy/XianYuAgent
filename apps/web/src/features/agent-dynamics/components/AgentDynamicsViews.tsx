@@ -73,7 +73,7 @@ export function RuntimePanel({ summary, onOpenRun }: { summary: AgentDynamicsSum
 
 export function HealthPanel({ health, stats }: { health: AgentDynamicsHealthVM[]; stats: AgentDynamicsHealthStatVM[] }) {
   const healthy = health.every((item) => item.tone === 'success');
-  return <Panel title="链路健康" description="基础设施状态和当前吞吐。" action={<StatusTag tone={healthy ? 'success' : 'warn'}>{health.filter((item) => item.tone === 'success').length}/{health.length} 正常</StatusTag>}>
+  return <Panel title="链路健康" description="闲鱼消息连接、数据库和自动回复引擎的实时状态。" action={<StatusTag tone={healthy ? 'success' : 'warn'}>{health.filter((item) => item.tone === 'success').length}/{health.length} 正常</StatusTag>}>
     <div className="agent-dynamics-health-list">{health.map((item) => <div className="agent-dynamics-health-row" key={item.key}><span className={`agent-dynamics-health-mark ${classTone(item.tone)}`} /><div className="agent-dynamics-health-main"><div className="agent-dynamics-health-name">{item.name}</div><div className="agent-dynamics-health-meta">{item.meta}</div></div><span className="agent-dynamics-health-value">{item.value}</span></div>)}</div>
     <div className="agent-dynamics-health-summary">{stats.map((stat) => <div className="agent-dynamics-health-stat" key={stat.label}><div className="agent-dynamics-health-stat-label">{stat.label}</div><div className="agent-dynamics-health-stat-value">{stat.value}</div><div className="agent-dynamics-health-stat-note">{stat.note}</div></div>)}</div>
   </Panel>;
@@ -85,10 +85,13 @@ export function StatusPanel({ statusDistribution }: { statusDistribution: AgentD
   </Panel>;
 }
 
-export function ExceptionPanel({ exceptions, onOpenFirst }: { exceptions: AgentDynamicsExceptionVM[]; onOpenFirst: () => void }) {
-  return <Panel title="异常与待处理" description="只展示当前需要管理员动作的问题。" action={<StatusTag tone="danger">{exceptions.reduce((total, item) => total + item.count, 0)} 条待处理</StatusTag>}>
+export function ExceptionPanel({ exceptions, autoSkipped = [], onOpenFirst }: { exceptions: AgentDynamicsExceptionVM[]; autoSkipped?: AgentDynamicsExceptionVM[]; onOpenFirst: () => void }) {
+  const pending = exceptions.reduce((total, item) => total + item.count, 0);
+  return <Panel title="需要处理的问题" description="只统计执行失败和转交人工的会话；AI 自己判断后跳过的记录不算问题，单独列在下面。" action={<StatusTag tone={pending > 0 ? 'danger' : 'success'}>{pending > 0 ? `${pending} 条待处理` : '没有待处理'}</StatusTag>}>
+    {exceptions.length === 0 && <div className="agent-dynamics-exception-empty">当前没有需要你处理的问题。</div>}
     <div className="agent-dynamics-exception-list">{exceptions.map((item) => <div className="agent-dynamics-exception" key={item.key}><span className={`agent-dynamics-exception-mark ${classTone(item.tone)}`} /><div className="agent-dynamics-exception-main"><div className="agent-dynamics-exception-title">{item.title}</div><div className="agent-dynamics-exception-meta">{item.meta}</div></div><div className="agent-dynamics-exception-count">{item.count}</div></div>)}</div>
-    <div className="agent-dynamics-exception-link"><button type="button" className="agent-dynamics-link-btn" onClick={onOpenFirst}>查看全部异常 →</button></div>
+    {autoSkipped.length > 0 && <div className="agent-dynamics-exception-skipped"><div className="agent-dynamics-exception-skipped-title">AI 自动跳过（不需要处理）</div>{autoSkipped.map((item) => <div className="agent-dynamics-exception-skipped-row" key={item.key} title={item.meta}><span>{item.title}</span><b>{item.count}</b></div>)}</div>}
+    <div className="agent-dynamics-exception-link"><button type="button" className="agent-dynamics-link-btn" onClick={onOpenFirst}>查看全部记录 →</button></div>
   </Panel>;
 }
 

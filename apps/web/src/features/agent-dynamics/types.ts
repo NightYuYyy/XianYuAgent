@@ -85,6 +85,8 @@ export interface AgentDynamicsSummaryVM {
   healthSummary: AgentDynamicsHealthStatVM[];
   statusDistribution: AgentDynamicsStatusDistributionVM[];
   exceptions: AgentDynamicsExceptionVM[];
+  /** Runs the engine skipped on purpose (operator replied first, merged messages, filtered). Nothing to act on. */
+  autoSkipped?: AgentDynamicsExceptionVM[];
   asOf: string;
   refreshIntervalMs: number;
 }

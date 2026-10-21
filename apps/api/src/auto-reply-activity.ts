@@ -1,4 +1,4 @@
-import type { AutoReplyRunListQuery, AutoReplyRunStage, AutoReplyRunStatus, Store } from './domain.js';
+import type { AutoReplyActivitySummary, AutoReplyRunListQuery, AutoReplyRunStage, AutoReplyRunStatus, Store } from './domain.js';
 import { ServiceError } from './services.js';
 import { projectAutoReplyRun } from './auto-reply-activity-projection.js';
 import { AutoReplyRepairRepository, type PersistedRepairReviewRecord } from './auto-reply-repair-repository.js';
@@ -18,7 +18,35 @@ export class AutoReplyActivityService {
   async summary(input: { adminId: string; accountId?: string; from?: string; to?: string }) {
     const range = this.normalizeRange(input.from, input.to);
     await this.assertScope(input.adminId, input.accountId);
-    return this.store.getAutoReplyActivitySummary(input.adminId, { accountId: input.accountId, ...range });
+    const summary = await this.store.getAutoReplyActivitySummary(input.adminId, { accountId: input.accountId, ...range });
+    if (summary.health.length === 0) summary.health = await this.liveHealth(input.adminId, input.accountId, summary);
+    return summary;
+  }
+
+  /**
+   * Nothing writes observability.health_snapshots yet, so derive the link
+   * health the operator actually cares about from live state: the Xianyu IM
+   * transport of the selected account, database reachability and whether the
+   * auto-reply engine produced failures in the selected window.
+   */
+  private async liveHealth(adminId: string, accountId: string | undefined, summary: AutoReplyActivitySummary): Promise<AutoReplyActivitySummary['health']> {
+    const now = Date.now();
+    const observedAt = new Date(now).toISOString();
+    const items: AutoReplyActivitySummary['health'] = [];
+    if (accountId) {
+      const account = await this.store.getAccount(adminId, accountId).catch(() => undefined);
+      if (account) {
+        const seenAt = account.transportSeenAt ? Date.parse(account.transportSeenAt) : Number.NaN;
+        const fresh = account.transportStatus === 'connected' && Number.isFinite(seenAt) && now - seenAt < 15_000;
+        const blocked = ['verification_required', 'expired', 'disabled'].includes(account.status);
+        const status = blocked ? 'degraded' : fresh ? 'connected' : account.transportStatus === 'connecting' ? 'connecting' : 'offline';
+        items.push({ component: 'im_gateway', status, observedAt: account.transportSeenAt ?? observedAt, details: { transportStatus: account.transportStatus ?? 'unknown', accountStatus: account.status, ...(account.riskCode ? { riskCode: account.riskCode } : {}) } });
+      }
+    }
+    const db = await this.store.health().catch(() => ({ kind: 'unknown', reachable: false }));
+    items.push({ component: 'database', status: db.reachable ? 'healthy' : 'down', observedAt, details: { kind: db.kind } });
+    items.push({ component: 'auto_reply_engine', status: summary.failedCount > 0 ? 'degraded' : 'healthy', observedAt: summary.asOf, details: { processingCount: summary.processingCount, failedCount: summary.failedCount, persistedCount: summary.persistedCount, handoffCount: summary.handoffCount } });
+    return items;
   }
 
   async list(input: { adminId: string; query: AutoReplyRunListQuery }) {

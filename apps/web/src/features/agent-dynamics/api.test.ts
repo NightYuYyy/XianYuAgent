@@ -101,3 +101,30 @@ describe('agent dynamics API adapter', () => {
     expect(result.items[0]?.runId).toBe('run_failed');
   });
 });
+
+describe('agent dynamics summary readability', () => {
+  it('separates operator-actionable failures from engine skips and translates codes', async () => {
+    const raw = {
+      ...rawSummary,
+      inboundCount: 137,
+      exceptions: [
+        { code: 'AUTO_REPLY_CANCELLED_BY_HUMAN_REPLY', count: 105, status: 'skipped' },
+        { code: 'AUTO_REPLY_COALESCED_INTO_INITIAL_WINDOW', count: 8, status: 'skipped' },
+        { code: 'RESPONSES_API_TIMEOUT', count: 1, status: 'failed' },
+        { code: 'AGENT_HANDOFF', count: 2, status: 'handoff' },
+      ],
+      health: [
+        { component: 'im_gateway', status: 'connected', observedAt: '2026-09-21T00:00:00.000Z', details: { transportStatus: 'connected', accountStatus: 'active' } },
+        { component: 'database', status: 'healthy', observedAt: '2026-09-21T00:00:00.000Z', details: { kind: 'postgres' } },
+        { component: 'auto_reply_engine', status: 'degraded', observedAt: '2026-09-21T00:00:00.000Z', details: { processingCount: 0, failedCount: 1, persistedCount: 23, handoffCount: 2 } },
+      ],
+    };
+    const api = createAgentDynamicsApi({ get: async <T>(path: string) => (path.includes('/summary') ? { success: true, data: raw } : { success: true, data: { items: [], total: 0, page: 1, pageSize: 10, totalPages: 1 } }) as T });
+    const summary = await api.getSummary({ accountId: 'acct_1', range: '24h' });
+    expect(summary.exceptions.map((item) => item.key)).toEqual(['RESPONSES_API_TIMEOUT', 'AGENT_HANDOFF']);
+    expect(summary.exceptions[0]?.title).toBe('模型响应超时');
+    expect(summary.autoSkipped?.map((item) => [item.title, item.count])).toEqual([['你先回复了，AI 放弃本次回复', 105], ['买家连发多条，已合并成一条回复', 8]]);
+    expect(summary.health.map((item) => [item.name, item.value])).toEqual([['闲鱼消息连接', '在线'], ['数据库', '正常'], ['自动回复引擎', '需关注']]);
+    expect(summary.healthSummary[0]).toMatchObject({ label: '处理的买家消息', value: '137 条', note: '最近 24 小时' });
+  });
+});

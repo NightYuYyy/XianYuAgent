@@ -383,10 +383,80 @@ function mapRunToSummaryEvent(row: AgentDynamicsRunRowVM): AgentDynamicsEventVM 
   return { id: `${row.runId}:summary`, runId: row.runId, time: row.timeLabel, title: row.decision.key === 'failed' ? `${row.buyer.name} 的回复生成失败` : row.decision.key === 'handoff' ? `${row.buyer.name} 已转人工处理` : row.decision.key === 'processing' ? `${row.buyer.name} 正在处理${row.intent}` : `${row.buyer.name} 的消息已完成自动回复`, meta: `${row.intent} · ${row.senderOutcome.label}`, label: row.decision.key === 'failed' ? '失败' : row.decision.key === 'handoff' ? '转人工' : row.decision.key === 'processing' ? '处理中' : '完成', tone };
 }
 
+const FAILURE_CODE_LABELS: Record<string, string> = {
+  AUTO_REPLY_CANCELLED_BY_HUMAN_REPLY: '你先回复了，AI 放弃本次回复',
+  AUTO_REPLY_COALESCED_INTO_INITIAL_WINDOW: '买家连发多条，已合并成一条回复',
+  AUTO_REPLY_COALESCED_INTO_ACTIVE_GENERATION: '生成回复期间买家又发了消息，已合并',
+  AUTO_REPLY_ACKNOWLEDGEMENT_AFTER_AGENT_REPLY: '买家只是回了"好的"之类的确认，不需要再回',
+  AUTO_REPLY_DISABLED: '自动回复已关闭',
+  AUTO_REPLY_FAILED: '自动回复执行失败',
+  AUTO_REPLY_SEND_FAILED: '发送到闲鱼失败',
+  AUTO_REPLY_SEND_UNKNOWN: '发送结果未知，需确认闲鱼侧是否收到',
+  AUTO_REPLY_REPLY_TOO_LONG: '生成的回复超过长度限制',
+  UNSUPPORTED_MESSAGE: '非文字消息，AI 不处理',
+  TEST_BUYER_NOT_ALLOWLISTED: '买家不在测试白名单内',
+  BUYER_BLACKLISTED: '买家在黑名单内',
+  MESSAGE_FILTERED: '命中消息过滤规则',
+  GENERATED_CONTENT_BLOCKED: '生成内容含敏感信息，已拦截',
+  AGENT_TOTAL_TIMEOUT: '处理超时',
+  AGENT_TOOL_TIMEOUT: '工具调用超时',
+  AGENT_MAX_LOOPS: '模型推理轮数超限',
+  AGENT_TOOL_CALL_LIMIT: '工具调用次数超限',
+  AGENT_EMPTY_RESPONSE: '模型没有返回内容',
+  AGENT_INVALID_OUTPUT: '模型输出格式不合法',
+  AGENT_HANDOFF: '模型判断需要人工处理',
+  AGENT_STRUCTURED_OUTPUT_UNAVAILABLE: '当前模型不支持结构化输出',
+  MODEL_INVALID_RESPONSE: '模型返回无法解析',
+  MODEL_TIMEOUT: '模型响应超时',
+  RESPONSES_API_TIMEOUT: '模型响应超时',
+  SENDER_KNOWN_FAILURE: '发送到闲鱼失败',
+  SENDER_OUTCOME_UNKNOWN: '发送结果未知',
+  REPAIR_FAILED: '回复修正流程失败',
+};
+
+export function failureCodeLabel(code: string): string {
+  return FAILURE_CODE_LABELS[code] ?? code;
+}
+
+const RUN_STATUS_LABELS: Record<string, string> = { failed: '执行失败', handoff: '已转人工', skipped: '自动跳过', persisted: '已回复' };
+
+const HEALTH_COMPONENT_LABELS: Record<string, string> = {
+  im_gateway: '闲鱼消息连接',
+  gateway: '闲鱼消息连接',
+  database: '数据库',
+  auto_reply_engine: '自动回复引擎',
+  redis: '缓存队列',
+  worker: '后台处理进程',
+};
+
+function healthComponentLabel(component: string): string {
+  return HEALTH_COMPONENT_LABELS[component] ?? component;
+}
+
+function healthDetailLabel(component: string, details: Record<string, unknown> | undefined, observedAt: string): string {
+  const d = details ?? {};
+  if (component === 'im_gateway' || component === 'gateway') {
+    const parts = [`最近心跳 ${formatTime(observedAt)}`];
+    if (typeof d.riskCode === 'string' && d.riskCode) parts.push(`风控 ${d.riskCode}`);
+    if (d.accountStatus === 'verification_required') parts.push('账号需要验证');
+    return parts.join(' · ');
+  }
+  if (component === 'auto_reply_engine') {
+    return `处理中 ${Number(d.processingCount ?? 0)} · 已回复 ${Number(d.persistedCount ?? 0)} · 转人工 ${Number(d.handoffCount ?? 0)} · 失败 ${Number(d.failedCount ?? 0)}`;
+  }
+  return `最近检查 ${formatTime(observedAt)}`;
+}
+
+function rangeNote(from: string, to: string): string {
+  const hours = (Date.parse(to) - Date.parse(from)) / 3_600_000;
+  if (!Number.isFinite(hours) || hours <= 0) return '所选时间范围';
+  return hours >= 48 ? `最近 ${Math.round(hours / 24)} 天` : `最近 ${Math.round(hours)} 小时`;
+}
+
 function healthTone(status: string): AgentDynamicsSummaryVM['health'][number]['tone'] {
   const normalized = status.toLowerCase();
   if (['online', 'healthy', 'ok', 'ready', 'normal', 'connected'].includes(normalized)) return 'success';
-  if (['offline', 'error', 'failed', 'degraded', 'down'].includes(normalized)) return 'danger';
+  if (['offline', 'error', 'failed', 'down'].includes(normalized)) return 'danger';
   return 'warn';
 }
 
@@ -395,13 +465,15 @@ function healthLabel(status: string): string {
   if (['online', 'connected'].includes(normalized)) return '在线';
   if (['healthy', 'ok', 'ready', 'normal'].includes(normalized)) return '正常';
   if (['offline', 'down'].includes(normalized)) return '离线';
-  if (['error', 'failed', 'degraded'].includes(normalized)) return '异常';
+  if (['connecting'].includes(normalized)) return '连接中';
+  if (['degraded'].includes(normalized)) return '需关注';
+  if (['error', 'failed'].includes(normalized)) return '异常';
   return '未知';
 }
 
 function mapSummaryHealth(raw: RawActivitySummary): AgentDynamicsSummaryVM['health'] {
-  if (raw.health.length === 0) return [{ key: 'health-snapshot', name: '健康快照', meta: '服务端未提供健康快照', value: '未知', tone: 'warn' }];
-  return raw.health.map((item) => ({ key: item.component, name: item.component, meta: `最近观测 ${formatTime(item.observedAt)}`, value: healthLabel(item.status), tone: healthTone(item.status) }));
+  if (raw.health.length === 0) return [{ key: 'health-snapshot', name: '链路状态', meta: '服务端暂未上报，稍后自动刷新', value: '未知', tone: 'warn' }];
+  return raw.health.map((item) => ({ key: item.component, name: healthComponentLabel(item.component), meta: healthDetailLabel(item.component, item.details as Record<string, unknown> | undefined, item.observedAt), value: healthLabel(item.status), tone: healthTone(item.status) }));
 }
 
 function mapSummary(raw: RawActivitySummary, events: AgentDynamicsEventVM[] = []): AgentDynamicsSummaryVM {
@@ -432,21 +504,25 @@ function mapSummary(raw: RawActivitySummary, events: AgentDynamicsEventVM[] = []
     { key: 'processing', label: '处理中', tone: 'info' as const },
   ];
   const statusDistribution = statusRows.map((item) => ({ ...item, percent: total ? ((statusCounts.get(item.key) ?? 0) / total) * 100 : 0 }));
-  const exceptions = exceptionsRaw.map((item) => ({ key: item.code, title: item.code, meta: `${item.count} 条 · ${item.status}`, count: item.count, tone: item.status === 'failed' ? 'danger' as const : item.status === 'handoff' ? 'warn' as const : 'info' as const }));
+  const toException = (item: RawActivitySummary['exceptions'][number]) => ({ key: item.code, title: failureCodeLabel(item.code), meta: `${item.count} 条 · ${RUN_STATUS_LABELS[item.status] ?? item.status}${FAILURE_CODE_LABELS[item.code] ? ` · ${item.code}` : ''}`, count: item.count, tone: item.status === 'failed' ? 'danger' as const : item.status === 'handoff' ? 'warn' as const : 'info' as const });
+  // Only failures and handoffs need an operator. Skips are the engine doing its job (operator replied first, merged bursts, filters).
+  const exceptions = exceptionsRaw.filter((item) => item.status === 'failed' || item.status === 'handoff').map(toException);
+  const autoSkipped = exceptionsRaw.filter((item) => item.status !== 'failed' && item.status !== 'handoff').map(toException);
   return {
     gateway: { status: gatewayStatus, heartbeatLabel: gatewayHealth?.meta ?? '暂无心跳快照', queueLabel: Number(raw.processingCount ?? 0) > 0 ? `当前处理中 ${raw.processingCount} 条` : '消息队列空闲' },
     kpis: [
       { key: 'gateway', label: '网关连接', value: gatewayStatus === 'online' ? '在线' : '离线', foot: `${gatewayStatus === 'online' ? '● 稳定' : '● 需关注'} · ${gatewayHealth?.meta ?? '暂无健康快照'}`, tone: gatewayStatus === 'online' ? 'success' : 'danger' },
       { key: 'inbound', label: '当前范围入站消息', value: total.toLocaleString('zh-CN'), foot: `范围 ${formatTime(raw.from)} - ${formatTime(raw.to)}`, tone: 'info' },
-      { key: 'processing', label: '当前处理中', value: Number(raw.processingCount ?? 0).toLocaleString('zh-CN'), foot: `端到端 p95 ${formatDuration(Number(raw.p95DurationMs ?? 0))}`, tone: Number(raw.processingCount ?? 0) > 0 ? 'info' : 'success' },
+      { key: 'processing', label: '当前处理中', value: Number(raw.processingCount ?? 0).toLocaleString('zh-CN'), foot: `回复耗时 p95 ${formatDuration(Number(raw.p95DurationMs ?? 0))}`, tone: Number(raw.processingCount ?? 0) > 0 ? 'info' : 'success' },
       { key: 'persisted', label: '已完成闭环', value: Number(raw.persistedCount ?? 0).toLocaleString('zh-CN'), foot: `${completionPercent} · 入站消息完成闭环`, tone: 'success' },
     ],
     pipeline: stageRows,
     events,
     health,
-    healthSummary: [{ label: '当前吞吐', value: `${Number(raw.throughputPerSecond ?? 0).toFixed(1)}/s`, note: '所选时间范围' }, { label: '端到端 p95', value: formatDuration(Number(raw.p95DurationMs ?? 0)), note: '从接收至落库' }],
+    healthSummary: [{ label: '处理的买家消息', value: `${total.toLocaleString('zh-CN')} 条`, note: rangeNote(raw.from, raw.to) }, { label: '回复耗时（95% 的消息不超过）', value: formatDuration(Number(raw.p95DurationMs ?? 0)), note: '从收到买家消息到回复落库，含等待窗口' }],
     statusDistribution,
     exceptions,
+    autoSkipped,
     asOf: raw.asOf,
     refreshIntervalMs: 5000,
   };
@@ -680,7 +756,7 @@ const mockSummary: AgentDynamicsSummaryVM = {
     { key: 'sender', name: '发送适配器', meta: '当前模式 simulate', value: '就绪', tone: 'success' },
     { key: 'storage', name: '运行落库', meta: '最近写入 2 秒前', value: '正常', tone: 'success' },
   ],
-  healthSummary: [{ label: '当前吞吐', value: '8.4/s', note: '过去 5 分钟' }, { label: '端到端 p95', value: '4.6s', note: '从接收至落库' }],
+  healthSummary: [{ label: '处理的买家消息', value: '1,208 条', note: '最近 24 小时' }, { label: '回复耗时（95% 的消息不超过）', value: '4.6s', note: '从收到买家消息到回复落库，含等待窗口' }],
   statusDistribution: [
     { key: 'replied', label: '自动回复完成', percent: 85.2, tone: 'success' },
     { key: 'handoff', label: '转人工', percent: 8.7, tone: 'warn' },
@@ -692,6 +768,7 @@ const mockSummary: AgentDynamicsSummaryVM = {
     { key: 'insufficient_facts', title: '工具事实不足', meta: '8 条 · 建议转人工', count: 8, tone: 'warn' },
     { key: 'send_unknown', title: '发送状态未知', meta: '2 条 · 需确认闲鱼侧状态', count: 2, tone: 'info' },
   ],
+  autoSkipped: [{ key: 'AUTO_REPLY_CANCELLED_BY_HUMAN_REPLY', title: '你先回复了，AI 放弃本次回复', meta: '31 条 · 自动跳过', count: 31, tone: 'info' }],
   asOf: new Date().toISOString(),
   refreshIntervalMs: 5000,
 };

@@ -54,7 +54,7 @@ export function AgentDynamicsPage({ api: providedApi, onNavigate }: AgentDynamic
         {controller.summary.phase === 'loading' && !summary ? <SkeletonBlocks /> : summary ? <>
           <KpiStrip items={summary.kpis} />
           <RuntimePanel summary={summary} onOpenRun={openRun} />
-          <section className="agent-dynamics-status-grid"><StatusPanel statusDistribution={summary.statusDistribution} /><ExceptionPanel exceptions={summary.exceptions} onOpenFirst={openFirstException} /></section>
+          <section className="agent-dynamics-status-grid"><StatusPanel statusDistribution={summary.statusDistribution} /><ExceptionPanel exceptions={summary.exceptions} autoSkipped={summary.autoSkipped} onOpenFirst={openFirstException} /></section>
         </> : null}
         <RunsTable filters={controller.filters} data={controller.runs.data} onFilterChange={(patch) => controller.setFilters((previous) => ({ ...previous, ...patch }))} onOpenRun={openRun} onRetry={() => void controller.reloadRuns()} loading={controller.runs.phase === 'loading'} error={runsError} />
       </main>

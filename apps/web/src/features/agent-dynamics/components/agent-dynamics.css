@@ -281,3 +281,9 @@
   .agent-dynamics-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .agent-dynamics-search { grid-column: 1 / -1; }
 }
+.agent-dynamics-exception-empty { padding: 14px 12px; border-radius: 8px; background: var(--agent-bg); color: var(--agent-sub); font-size: 13px; line-height: 1.5; }
+.agent-dynamics-exception-skipped { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--agent-border, #e2e8f0); }
+.agent-dynamics-exception-skipped-title { margin-bottom: 6px; color: var(--agent-sub); font-size: 12px; font-weight: 600; }
+.agent-dynamics-exception-skipped-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 0; color: var(--agent-sub); font-size: 12px; line-height: 1.4; }
+.agent-dynamics-exception-skipped-row span { min-width: 0; overflow-wrap: anywhere; }
+.agent-dynamics-exception-skipped-row b { flex: 0 0 auto; color: var(--agent-text); font-weight: 600; font-variant-numeric: tabular-nums; }
