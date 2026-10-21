@@ -78,7 +78,7 @@ export default function App() {
     return transport;
   }, []);
   const authApi = useMemo(() => createAuthApi({ get: transport.get, post: transport.post }), [transport]);
-  const accountsApi = useMemo(() => createAccountsApi({ get: transport.get, post: transport.post, delete: transport.delete }), [transport]);
+  const accountsApi = useMemo(() => createAccountsApi({ get: transport.get, post: transport.post, patch: transport.patch, delete: transport.delete }), [transport]);
   const productsApi = useMemo(() => createProductsApi({ get: transport.get, post: transport.post, patch: transport.patch }), [transport]);
   const productAutomationApi = useMemo(() => !import.meta.env.PROD && import.meta.env.VITE_AUTOMATION_MODE === 'mock'
     ? createMockProductAutomationApi()

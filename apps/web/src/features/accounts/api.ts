@@ -13,6 +13,7 @@ import type { QrLoginSessionVM, QrLoginStatus } from './qr-login/model';
 export interface AccountsApiTransport {
   get<T>(path: string): Promise<T>;
   post?<T>(path: string, body?: unknown, init?: RequestInit): Promise<T>;
+  patch?<T>(path: string, body?: unknown, init?: RequestInit): Promise<T>;
   delete?<T>(path: string, init?: RequestInit): Promise<T>;
 }
 
@@ -22,6 +23,7 @@ export interface AccountsApi {
   acknowledgeRiskNotification(id: string): Promise<void>;
   createAccount(input: { platform: 'xianyu'; sellerRef: string; displayName?: string }): Promise<AccountVM>;
   deleteAccount?(accountId: string): Promise<void>;
+  updateAccount?(accountId: string, patch: { proxyUrl?: string | null; remark?: string }): Promise<AccountVM>;
   getDetail(accountId: string): Promise<AccountVM>;
   getConnection(accountId: string): Promise<AccountConnectionVM>;
   createQrSession(accountId?: string): Promise<QrLoginSessionVM>;
@@ -38,6 +40,7 @@ interface CanonicalAccountResponse {
   sellerRef?: string;
   displayName: string;
   remark?: string;
+  proxyUrl?: string;
   avatarUrl?: string;
   platformUserId?: string;
   status?: AccountStatus | 'active' | 'error';
@@ -76,6 +79,7 @@ function toAccountVM(account: CanonicalAccountResponse): AccountVM {
     sellerRef: account.sellerRef ?? account.id,
     displayName: account.displayName,
     remark: account.remark,
+    proxyUrl: account.proxyUrl || undefined,
     avatarUrl: account.avatarUrl,
     platformUserId: account.platformUserId,
     status: normalizedStatus,
@@ -130,6 +134,7 @@ export function createAccountsApi(transport: AccountsApiTransport): AccountsApi 
     async list(filters) { return toCanonicalPage(unwrapEnvelope(await transport.get<CanonicalAccountsPayload | ApiEnvelope<CanonicalAccountsPayload>>(`/api/v1/accounts${queryString(filters)}`))); },
     async listRiskNotifications() { const result = unwrapEnvelope(await transport.get<{ items: Array<{ id: string; accountId: string; eventType: 'verification_required' | 'verification_cleared'; createdAt: string }> } | ApiEnvelope<{ items: Array<{ id: string; accountId: string; eventType: 'verification_required' | 'verification_cleared'; createdAt: string }> }>>('/api/v1/accounts/risk-notifications')); return result.items; },
     async acknowledgeRiskNotification(id) { const post = requirePost(transport); await post(`/api/v1/accounts/risk-notifications/${encodeURIComponent(id)}/read`, {}, { headers: { 'Idempotency-Key': `risk-read-${id}` } }); },
+    async updateAccount(accountId, patch) { if (!transport.patch) throw new Error('ACCOUNT_MUTATION_UNAVAILABLE'); return toAccountVM(unwrapEnvelope(await transport.patch<CanonicalAccountResponse | ApiEnvelope<CanonicalAccountResponse>>(`/api/v1/accounts/${encodeURIComponent(accountId)}`, patch, { headers: { 'Idempotency-Key': `account-update-${accountId}-${Date.now()}` } }))); },
     async createAccount(input) { const post = requirePost(transport); return toAccountVM(unwrapEnvelope(await post<CanonicalAccountResponse | ApiEnvelope<CanonicalAccountResponse>>('/api/v1/accounts', input, { headers: { 'Idempotency-Key': `account-create-${input.sellerRef}-${Date.now()}` } }))); },
     async deleteAccount(accountId) { const del = requireDelete(transport); await del<unknown>(`/api/v1/accounts/${encodeURIComponent(accountId)}`, { headers: { 'Idempotency-Key': `account-delete-${accountId}-${Date.now()}` } }); },
     async getDetail(accountId) { return toAccountVM(unwrapEnvelope(await transport.get<CanonicalAccountResponse | ApiEnvelope<CanonicalAccountResponse>>(`/api/v1/accounts/${encodeURIComponent(accountId)}`))); },

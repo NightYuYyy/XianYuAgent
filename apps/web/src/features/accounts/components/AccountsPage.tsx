@@ -9,6 +9,7 @@ import { AccountStateView } from './AccountStateView';
 import { AccountToolbar } from './AccountToolbar';
 import { AccountLoginModal } from './AccountLoginModal';
 import { AccountDeleteModal } from './AccountDeleteModal';
+import { AccountProxyModal } from './AccountProxyModal';
 import type { AccountLoginMethod } from './LoginMethodSelector';
 import { findReauthorizeAccount, readReauthorizeAccountId } from '../reauthorize-intent';
 import { accountErrorMessage } from '../feedback';
@@ -29,6 +30,8 @@ export function AccountsPage({ api: providedApi }: AccountsPageProps) {
   const [handledReauthorizeAccountId, setHandledReauthorizeAccountId] = useState<string | null>(null);
   const [deleteAccountTarget, setDeleteAccountTarget] = useState<AccountVM | null>(null);
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+  const [proxyAccountTarget, setProxyAccountTarget] = useState<AccountVM | null>(null);
+  const [proxySubmitting, setProxySubmitting] = useState(false);
   const accounts = controller.state.data?.items ?? [];
   const total = controller.state.data?.total ?? 0;
   const page = controller.state.data?.page ?? controller.filters.page ?? 1;
@@ -83,6 +86,22 @@ export function AccountsPage({ api: providedApi }: AccountsPageProps) {
     setDeleteAccountTarget(account);
   }
 
+  async function saveProxy(proxyUrl: string | null) {
+    if (!proxyAccountTarget || !api.updateAccount) return;
+    setProxySubmitting(true);
+    try {
+      await api.updateAccount(proxyAccountTarget.id, { proxyUrl });
+      showToast({ id: 'account-proxy', tone: 'success', message: proxyUrl ? '代理已保存，后续请求将经该代理出站。' : '已清除代理，账号将使用默认连接。' });
+      setProxyAccountTarget(null);
+      void controller.reload();
+      void refreshAccounts();
+    } catch (error) {
+      showToast({ id: 'account-proxy', tone: 'error', message: accountErrorMessage(error, '代理保存失败，请检查地址格式后重试。') });
+    } finally {
+      setProxySubmitting(false);
+    }
+  }
+
   function closeDeleteAccount() {
     if (deleteSubmitting) return;
     setDeleteAccountTarget(null);
@@ -113,11 +132,12 @@ export function AccountsPage({ api: providedApi }: AccountsPageProps) {
       </div>
       <article className="card panel accounts-domain-panel">
         <AccountToolbar filters={controller.filters} phase={controller.state.phase} onSearchChange={controller.setSearch} onStatusChange={(status) => controller.setFilters((previous) => ({ ...previous, status, page: 1 }))} onConnectionStatusChange={(connectionStatus) => controller.setFilters((previous) => ({ ...previous, connectionStatus, page: 1 }))} onRefresh={controller.reload} onAddAccount={() => openLogin()} />
-        {controller.state.phase === 'success' && <AccountTable accounts={accounts} activeAccountId={currentAccountId} page={page} total={total} totalPages={totalPages} onPageChange={(nextPage) => controller.setFilters((previous) => ({ ...previous, page: Math.max(1, Math.min(nextPage, totalPages)) }))} onReauthorize={openLogin} onSwitch={switchAccount} onDelete={requestDeleteAccount} />}
+        {controller.state.phase === 'success' && <AccountTable accounts={accounts} activeAccountId={currentAccountId} page={page} total={total} totalPages={totalPages} onPageChange={(nextPage) => controller.setFilters((previous) => ({ ...previous, page: Math.max(1, Math.min(nextPage, totalPages)) }))} onEditProxy={api.updateAccount ? (account) => setProxyAccountTarget(account) : undefined} onReauthorize={openLogin} onSwitch={switchAccount} onDelete={requestDeleteAccount} />}
         <AccountStateView phase={controller.state.phase} error={controller.state.error} onRetry={controller.reload} />
       </article>
       {loginOpen && <AccountLoginModal api={api} account={loginAccount} initialMethod={loginMethod} onClose={closeLogin} onStatusChanged={() => { void controller.reload(); void refreshAccounts(); }} onCompleted={() => { void controller.reload(); void refreshAccounts(); closeLogin(); }} />}
       {deleteAccountTarget && <AccountDeleteModal account={deleteAccountTarget} submitting={deleteSubmitting} onClose={closeDeleteAccount} onConfirm={() => { void confirmDeleteAccount(); }} />}
+      {proxyAccountTarget && <AccountProxyModal account={proxyAccountTarget} submitting={proxySubmitting} onClose={() => { if (!proxySubmitting) setProxyAccountTarget(null); }} onSave={(proxyUrl) => { void saveProxy(proxyUrl); }} />}
     </section>
   );
 }

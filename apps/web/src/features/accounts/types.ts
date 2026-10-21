@@ -18,6 +18,8 @@ export interface AccountVM {
   sellerRef: string;
   displayName: string;
   remark?: string;
+  /** Outbound HTTP(S) proxy for this account; empty = default / direct. */
+  proxyUrl?: string;
   avatarUrl?: string;
   platformUserId?: string;
   status: AccountStatus;
