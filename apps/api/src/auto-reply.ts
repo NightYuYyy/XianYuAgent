@@ -287,6 +287,7 @@ export class AutoReplyService {
     let activeGenerationTask: ActiveGenerationTask | undefined;
     let deadline: AutoReplyDeadline | undefined;
     let agentTakeoverActive = false;
+    let suppressHandoffNotification = false;
     try {
       run = await this.store.createAutoReplyRun({ adminId: input.adminId, accountId: conversation.accountId, conversationId: conversation.id, inboundMessageId: inboundMessage.id, intent: 'pending', decision: 'skipped', status: 'received', inputDigest });
     } catch (error) {
@@ -376,7 +377,7 @@ export class AutoReplyService {
         await this.recordAudit(input.adminId, conversation.accountId, run.id, requestId, traceId, { decision: 'skipped', reason: failureCode, matchedId: policyVerdict.matchedId });
         return { run: updated ?? run, inboundMessage };
       }
-      const suppressHandoffNotification = policyVerdict.skipNotify;
+      suppressHandoffNotification = policyVerdict.skipNotify;
       const buyerIdentityKeys = [buyerName, normalizeBuyerName(conversation.buyerRef), normalizeBuyerName(conversation.externalConversationRef)].filter((value): value is string => Boolean(value));
       if (runtime.buyerAllowlist.length > 0 && !buyerIdentityKeys.some((key) => runtime.buyerAllowlist.includes(key))) {
         const updated = await updateRun({ status: 'skipped', decision: 'skipped', failureCode: 'TEST_BUYER_NOT_ALLOWLISTED', riskFlags: ['test_buyer_not_allowlisted'], eventPayload: {
