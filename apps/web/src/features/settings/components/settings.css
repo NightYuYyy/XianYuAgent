@@ -103,3 +103,4 @@
 .keyword-rule-grid .full { grid-column: 1 / -1; }
 .keyword-rule-actions { display: flex; gap: 8px; justify-content: flex-end; }
 @media (max-width: 720px) { .keyword-rule-grid { grid-template-columns: 1fr; } }
+.reply-policy-toggles{display:flex;flex-wrap:wrap;align-items:center;gap:14px;margin-top:8px}.reply-policy-toggle{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;font-weight:600}.reply-policy-toggle input{width:14px;height:14px}.reply-policy-grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}@media(max-width:900px){.reply-policy-grid-4{grid-template-columns:1fr}}

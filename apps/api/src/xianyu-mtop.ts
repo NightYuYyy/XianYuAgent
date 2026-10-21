@@ -28,6 +28,7 @@ const CONSIGN_API = 'mtop.taobao.idle.logistic.consign.dummy';
 const ADJUST_PRICE_API = 'mtop.taobao.idle.trade.user.adjust.price';
 const CLOSE_BY_SELLER_API = 'mtop.taobao.idle.trade.merchant.close.by.seller';
 const ITEM_BATCH_OFFLINE_API = 'mtop.alibaba.idle.seller.pc.item.batch.offline';
+const RATE_CREATE_API = 'mtop.taobao.idle.rate.create';
 const ITEM_DELETE_API = 'mtop.alibaba.idle.seller.pc.item.delete';
 const SELLER_ITEM_MANAGE_REFERER = 'https://seller.goofish.com/?site=COMMONPRO';
 // The seller workbench (seller.goofish.com) rejects item mutations unless the request carries the workbench site marker.
@@ -437,6 +438,14 @@ export class XianyuMtopClient {
     if (!normalized) return { status: 'failed', errorCode: 'ITEM_ID_MISSING', message: 'itemId is required', cookieHeader: '' };
     const result = await this.call(adminId, accountId, ITEM_DELETE_API, '1.0', { itemId: normalized, draftId: null }, SELLER_WORKBENCH_PARAMS, { referer: SELLER_ITEM_MANAGE_REFERER, headers: SELLER_WORKBENCH_HEADERS });
     return classifyMutationResult(result, normalized);
+  }
+
+  /** 给买家好评（mtop.taobao.idle.rate.create v4.0，rate=1 为好评）。 */
+  async rateOrder(adminId: string, accountId: string, orderNo: string, feedback: string): Promise<XianyuExternalMutationResult> {
+    const tradeId = String(orderNo ?? '').trim();
+    if (!tradeId) return { status: 'failed', errorCode: 'ORDER_NO_MISSING', message: 'orderNo is required', cookieHeader: '' };
+    const result = await this.call(adminId, accountId, RATE_CREATE_API, '4.0', { tradeId, rate: 1, feedback: feedback.trim() || '不错的买家', createOrAppend: 0 }, { spm_cnt: 'a21ybx.item.0.0' }, { referer: `https://www.goofish.com/order?id=${encodeURIComponent(tradeId)}` });
+    return classifyMutationResult(result, tradeId);
   }
 
   async closeOrderBySeller(adminId: string, accountId: string, orderNo: string): Promise<XianyuExternalMutationResult> {

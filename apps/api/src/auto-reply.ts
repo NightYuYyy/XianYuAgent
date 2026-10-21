@@ -1,7 +1,8 @@
 import { notify } from './notifier.js';
-import type { AutoReplyDecision, AutoReplyOrderContext, AutoReplyProductContext, AutoReplyRunRecord, AutoReplyRunStage, AutoReplyRunStatus, AutoReplyRunUpdate, ConversationRecord, MessageRecord, Store } from './domain.js';
+import type { AutoReplyPolicy, AutoReplyDecision, AutoReplyOrderContext, AutoReplyProductContext, AutoReplyRunRecord, AutoReplyRunStage, AutoReplyRunStatus, AutoReplyRunUpdate, ConversationRecord, MessageRecord, Store } from './domain.js';
 import type { MessageService } from './messages.js';
 import { digestJson } from './security.js';
+import { evaluateInboundPolicy } from './auto-reply-guard.js';
 import type { AutoReplyRepairCandidateResult, AutoReplyRepairRuntime } from './auto-reply-repair-runtime.js';
 import type { AutoReplyGodViewSink } from './auto-reply-god-view.js';
 import { AutoReplyDeadlineError, createAutoReplyDeadline, withAbort, timeoutProgress, type AutoReplyDeadline } from './auto-reply-timeout.js';
@@ -172,6 +173,8 @@ export interface AutoReplyServiceOptions {
 
 export interface AutoReplyServiceRuntimeOptions {
   enabled?: boolean;
+  /** Message filters and blacklist evaluated before the agent runs. */
+  replyPolicy?: AutoReplyPolicy;
   sendMode?: 'simulate' | 'live';
   buyerAllowlist?: string[];
   totalTimeoutMs?: number;
@@ -184,7 +187,7 @@ export interface AutoReplyServiceRuntimeOptions {
   acknowledgementEvaluator?: AutoReplyAcknowledgementEvaluator;
 }
 
-type ResolvedAutoReplyServiceRuntimeOptions = Required<Omit<AutoReplyServiceRuntimeOptions, 'acknowledgementEvaluator'>> & Pick<AutoReplyServiceRuntimeOptions, 'acknowledgementEvaluator'>;
+type ResolvedAutoReplyServiceRuntimeOptions = Required<Omit<AutoReplyServiceRuntimeOptions, 'acknowledgementEvaluator' | 'replyPolicy'>> & Pick<AutoReplyServiceRuntimeOptions, 'replyPolicy'> & Pick<AutoReplyServiceRuntimeOptions, 'acknowledgementEvaluator'>;
 
 interface PendingInitialWindow {
   readonly key: string;
@@ -362,6 +365,18 @@ export class AutoReplyService {
       }
 
       const buyerName = normalizeBuyerName(input.senderName) ?? normalizeBuyerName(conversation.buyerDisplayName);
+      const policyVerdict = evaluateInboundPolicy(runtime.replyPolicy, { buyerRef: conversation.buyerRef, itemRef: conversation.itemRef, text: inboundMessage.bodyText });
+      if (policyVerdict.action !== 'allow') {
+        const failureCode = policyVerdict.action === 'blacklisted' ? 'BUYER_BLACKLISTED' : 'MESSAGE_FILTERED';
+        const updated = await updateRun({ status: 'skipped', decision: 'skipped', failureCode, riskFlags: [failureCode.toLowerCase()], eventPayload: {
+          input: { kind: 'reply_policy', matchedId: policyVerdict.matchedId },
+          output: { decision: 'skipped', reason: failureCode },
+          error: { code: failureCode },
+        } });
+        await this.recordAudit(input.adminId, conversation.accountId, run.id, requestId, traceId, { decision: 'skipped', reason: failureCode, matchedId: policyVerdict.matchedId });
+        return { run: updated ?? run, inboundMessage };
+      }
+      const suppressHandoffNotification = policyVerdict.skipNotify;
       const buyerIdentityKeys = [buyerName, normalizeBuyerName(conversation.buyerRef), normalizeBuyerName(conversation.externalConversationRef)].filter((value): value is string => Boolean(value));
       if (runtime.buyerAllowlist.length > 0 && !buyerIdentityKeys.some((key) => runtime.buyerAllowlist.includes(key))) {
         const updated = await updateRun({ status: 'skipped', decision: 'skipped', failureCode: 'TEST_BUYER_NOT_ALLOWLISTED', riskFlags: ['test_buyer_not_allowlisted'], eventPayload: {
@@ -829,7 +844,7 @@ export class AutoReplyService {
           buyer,
           payload: { status: 'handoff', decision: 'handoff', failureCode, reason },
         });
-        notify({ kind: 'auto_reply_handoff', title: '买家消息需要人工回复', body: `买家：${buyer.buyerName ?? '未知'}\n会话：${conversation.id}${reason ? `\n原因：${reason}` : ''}`, accountId: conversation.accountId, dedupeKey: `handoff:${conversation.id}` });
+        if (!suppressHandoffNotification) notify({ kind: 'auto_reply_handoff', title: '买家消息需要人工回复', body: `买家：${buyer.buyerName ?? '未知'}\n会话：${conversation.id}${reason ? `\n原因：${reason}` : ''}`, accountId: conversation.accountId, dedupeKey: `handoff:${conversation.id}` });
         return { run: updated ?? run, inboundMessage };
       }
       const reason = safeEventReason(error);
@@ -990,6 +1005,7 @@ export class AutoReplyService {
     const buyerAllowlist = [...new Set((provided.buyerAllowlist ?? this.buyerAllowlist).map(normalizeBuyerName).filter((value): value is string => Boolean(value)))];
     return {
       enabled: provided.enabled ?? this.enabled,
+      replyPolicy: provided.replyPolicy,
       sendMode: provided.sendMode ?? this.sendMode,
       buyerAllowlist,
       totalTimeoutMs: Math.max(1_000, Math.min(provided.totalTimeoutMs ?? this.totalTimeoutMs, 600_000)),

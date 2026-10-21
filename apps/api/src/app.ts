@@ -19,6 +19,7 @@ import { ProductPolishService } from './product-polish.js';
 import { createOrderRefundHandlerFromEnv } from './order-refund.js';
 import { ProductListingService } from './product-listing.js';
 import { KeywordFirstAutoReplyGenerator, type KeywordRulesLoader } from './auto-reply-keyword.js';
+import { AutoRateService, DefaultReplyFallbackGenerator, type ReplyPolicyLoader } from './auto-reply-guard.js';
 import { XianyuMtopClient } from './xianyu-mtop.js';
 import { metadataWithCookieSnapshot } from './xianyu-cookie-jar.js';
 import { XianyuImService } from './xianyu-im-service.js';
@@ -144,6 +145,11 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
     if (!adminId) return [];
     const settings = await store.getAutoReplyAgentConfig(adminId, accountId);
     return settings?.keywordRules ?? [];
+  };
+  const replyPolicyLoader: ReplyPolicyLoader = async (adminId, accountId) => {
+    if (!adminId) return undefined;
+    const settings = await store.getAutoReplyAgentConfig(adminId, accountId);
+    return settings?.replyPolicy;
   };
   if (effectiveProxyUrl(undefined)) console.info(JSON.stringify({ component: 'xianyu-proxy', event: 'default_proxy_configured' }));
   const notifier = configureNotifier(createNotifierFromEnv());
@@ -302,7 +308,7 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
     maxReplyLength: autoReplyAgentConfig.maxReplyLength,
     replySegmentDelayMs: autoReplyAgentConfig.replySegmentDelayMs,
     sendDelaySeconds: autoReplyAgentConfig.sendDelaySeconds,
-    generator: new KeywordFirstAutoReplyGenerator(keywordRulesLoader, autoReplyModelClient ? new ToolCallingAutoReplyAgent(store, autoReplyModelClient, autoReplyAgentConfig, { godView: autoReplyGodView }) : new TemplateAutoReplyGenerator()),
+    generator: new DefaultReplyFallbackGenerator(replyPolicyLoader, new KeywordFirstAutoReplyGenerator(keywordRulesLoader, autoReplyModelClient ? new ToolCallingAutoReplyAgent(store, autoReplyModelClient, autoReplyAgentConfig, { godView: autoReplyGodView }) : new TemplateAutoReplyGenerator())),
     acknowledgementEvaluator: options.autoReplyAcknowledgementEvaluator,
     godView: autoReplyGodView,
     totalTimeoutMs: autoReplyAgentConfig.totalTimeoutMs,
@@ -326,7 +332,8 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
         maxReplyLength: settings.maxReplyLength,
         replySegmentDelayMs: secondsToMilliseconds(settings.replySegmentDelaySeconds),
         sendDelaySeconds: settings.sendDelaySeconds,
-        generator: new KeywordFirstAutoReplyGenerator(keywordRulesLoader, runtimeModelClient ? new ToolCallingAutoReplyAgent(store, runtimeModelClient, runtimeConfig, { godView: autoReplyGodView }) : new TemplateAutoReplyGenerator()),
+        replyPolicy: settings.replyPolicy,
+        generator: new DefaultReplyFallbackGenerator(replyPolicyLoader, new KeywordFirstAutoReplyGenerator(keywordRulesLoader, runtimeModelClient ? new ToolCallingAutoReplyAgent(store, runtimeModelClient, runtimeConfig, { godView: autoReplyGodView }) : new TemplateAutoReplyGenerator())),
       };
     },
     sender: new ReliableExternalAutoReplySender(store, messages, async (input) => {
@@ -460,11 +467,12 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
     },
     onError: (error) => console.error(JSON.stringify({ component: 'payment-event-worker', event: 'poll_failed', error: error instanceof Error ? error.message : String(error) })),
   });
+  const autoRate = new AutoRateService(store, xianyu, productAudit);
   xianyuIm = new XianyuImService(store, xianyu, messages, autoReply, productAutomationTrigger, verificationBrowser, async ({ adminId, accountId, event }) => {
     if (!isTrustedPaidEvent(event)) return;
     await store.enqueuePaymentEvent({ adminId, accountId, eventRef: event.externalMessageRef, orderNo: extractTrustedOrderNo(event.raw), buyerRef: event.senderRef, itemRef: event.itemRef, conversationRef: event.externalConversationRef, receivedAt: trustedPaymentOccurredAt(event), observedAt: new Date().toISOString() });
     void paymentEventWorker.pollOnce().catch((error) => console.error(JSON.stringify({ component: 'payment-event-worker', event: 'wake_failed', accountId, error: error instanceof Error ? error.message : String(error) })));
-  });
+  }, autoRate);
 
   const workspaceCommands = new WorkspaceCommandOrchestrator({
     store,
@@ -2244,6 +2252,7 @@ function readAutoReplyAgentPatch(body: Record<string, unknown>): import('./domai
   for (const field of stringFields) if (typeof body[field] === 'string') patch[field] = body[field] as never;
   for (const field of numberFields) if (typeof body[field] === 'number') patch[field] = body[field] as never;
   if (Array.isArray(body.keywordRules)) patch.keywordRules = body.keywordRules as never;
+  if (body.replyPolicy && typeof body.replyPolicy === 'object' && !Array.isArray(body.replyPolicy)) patch.replyPolicy = body.replyPolicy as never;
   return patch;
 }
 

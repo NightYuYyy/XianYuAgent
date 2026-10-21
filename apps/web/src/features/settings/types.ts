@@ -34,6 +34,31 @@ export interface SettingsState {
 
 export type AutoReplyAgentSendMode = 'simulate' | 'live';
 
+export interface AutoReplyMessageFilterVM {
+  id: string;
+  keyword: string;
+  matchMode: 'contains' | 'exact' | 'regex';
+  skipReply: boolean;
+  skipNotify: boolean;
+  enabled: boolean;
+}
+
+export interface AutoReplyBlacklistEntryVM {
+  id: string;
+  buyerRef: string;
+  buyerName?: string;
+  itemRef?: string;
+  reason?: string;
+  enabled: boolean;
+}
+
+export interface AutoReplyPolicyVM {
+  messageFilters: AutoReplyMessageFilterVM[];
+  blacklist: AutoReplyBlacklistEntryVM[];
+  defaultReply: { enabled: boolean; content: string; replyOnce: boolean };
+  autoRate: { enabled: boolean; content: string };
+}
+
 export interface AutoReplyKeywordRuleVM {
   id: string;
   keywords: string[];
@@ -59,6 +84,7 @@ export interface AutoReplyAgentConfigVM {
   sendDelaySeconds: number;
   sendMode: AutoReplyAgentSendMode;
   keywordRules?: AutoReplyKeywordRuleVM[];
+  replyPolicy?: AutoReplyPolicyVM;
   accountId: string;
   updatedByAdminId?: string;
   configVersion: number;

@@ -1089,7 +1089,37 @@ export interface AutoReplyAgentConfig {
   sendMode: AutoReplyAgentSendMode;
   /** Deterministic keyword replies evaluated before the model (see auto-reply-keyword.ts). */
   keywordRules?: AutoReplyKeywordRule[];
+  /** Message filters, buyer blacklist, default reply and auto-rating (see auto-reply-policy.ts). */
+  replyPolicy?: AutoReplyPolicy;
 }
+
+export interface AutoReplyMessageFilter {
+  id: string;
+  keyword: string;
+  matchMode: 'contains' | 'exact' | 'regex';
+  skipReply: boolean;
+  skipNotify: boolean;
+  enabled: boolean;
+}
+
+export interface AutoReplyBlacklistEntry {
+  id: string;
+  buyerRef: string;
+  buyerName?: string;
+  itemRef?: string;
+  reason?: string;
+  enabled: boolean;
+}
+
+export interface AutoReplyPolicy {
+  messageFilters: AutoReplyMessageFilter[];
+  blacklist: AutoReplyBlacklistEntry[];
+  defaultReply: { enabled: boolean; content: string; replyOnce: boolean };
+  autoRate: { enabled: boolean; content: string };
+}
+
+/** The subset of an IM event the auto-rate service needs. */
+export interface XianyuImMessageEventLike { externalMessageRef: string; bodyText?: string; raw?: Record<string, unknown> }
 
 export type AutoReplyKeywordMatchMode = 'contains' | 'exact' | 'regex';
 

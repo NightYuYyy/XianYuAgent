@@ -44,6 +44,7 @@ export class XianyuImService {
     private readonly productAutomation?: ProductAutomationTrigger,
     private readonly verificationBrowser?: XianyuVerificationBrowser,
     private readonly refreshOrdersForTrustedOrderEvent?: (input: { adminId: string; accountId: string; event: XianyuImMessageEvent }) => Promise<void>,
+    private readonly autoRate?: { onSystemMessage(input: { adminId: string; accountId: string; event: XianyuImMessageEvent; kind?: string }): Promise<unknown> },
   ) {
     this.conversationSide = new ConversationSideResolver(store, mtop as Partial<import('./conversation-side.js').ConversationSideItemDetailClient>);
     this.inboundInboxWorker = new InboundInboxWorker(store, this, {
@@ -758,6 +759,14 @@ export class XianyuImService {
     }
     const classified = await this.classifySystemCandidate(adminId, event.accountId, conversation?.id, effectiveEvent);
     effectiveEvent = { ...effectiveEvent, bodyType: classified.bodyType, riskFlags: classified.riskFlags };
+    if (effectiveEvent.bodyType === 'system' && this.autoRate) {
+      const kind = parseXianyuSystemMessageKind(effectiveEvent.bodyText);
+      if (kind === 'received' || kind === 'trade_success') {
+        void this.autoRate.onSystemMessage({ adminId, accountId: event.accountId, event: effectiveEvent, kind }).catch((error) => {
+          console.error(JSON.stringify({ component: 'auto-rate', event: 'hook_failed', accountId: event.accountId, errorCode: recoveryErrorCode(error) }));
+        });
+      }
+    }
     if (event.direction === 'inbound' && !event.senderName && !conversation?.buyerDisplayName) {
       // Gateway pushes can omit the nickname even though the conversation
       // itself is addressable by a stable external ref. Resolve the profile

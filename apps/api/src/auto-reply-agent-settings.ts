@@ -3,6 +3,7 @@ import type { AutoReplyAgentConfig, AutoReplyAgentConfigPatch, AutoReplyAgentCon
 import { digestJson } from './security.js';
 import { ServiceError } from './services.js';
 import { validateKeywordRules } from './auto-reply-keyword.js';
+import { validateReplyPolicy } from './auto-reply-guard.js';
 
 export const DEFAULT_AUTO_REPLY_AGENT_CONFIG: AutoReplyAgentConfig = {
   enabled: true,
@@ -92,6 +93,7 @@ function validateConfig(config: AutoReplyAgentConfig): AutoReplyAgentConfig {
     sendDelaySeconds: boundedNumber(config.sendDelaySeconds, 'sendDelaySeconds', 0, 86_400),
     sendMode: config.sendMode === 'live' ? 'live' : 'simulate',
     keywordRules: validateKeywordRules(config.keywordRules),
+    replyPolicy: validateReplyPolicy(config.replyPolicy),
   };
 }
 
