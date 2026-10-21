@@ -1132,7 +1132,7 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
       if (config.xianyuQrMode === 'stub') return success(ctx, toQrSessionView(loginSession), 201);
       try {
         const qrSession = await runtime.qrLogin.create({ sessionId: loginSession.id, adminId: authContext.admin.id, accountId: loginSession.accountId });
-        return success(ctx, { ...toQrSessionView(loginSession), qrImageDataUrl: qrSession.qrImageDataUrl, pollAfterMs: qrSession.pollAfterMs, expiresAt: qrSession.expiresAt, status: qrSession.status, errorCode: qrSession.errorCode, verificationUrl: qrSession.verificationUrl }, 201);
+        return success(ctx, { ...toQrSessionView(loginSession), qrImageDataUrl: qrSession.qrImageDataUrl, pollAfterMs: qrSession.pollAfterMs, expiresAt: qrSession.expiresAt, status: qrSession.status, errorCode: qrSession.errorCode, verificationUrl: qrSession.verificationUrl, faceQrImageDataUrl: qrSession.faceQrImageDataUrl }, 201);
       } catch (error) {
         await accounts.updateLoginSession({ adminId: authContext.admin.id, accountId, sessionId: loginSession.id, patch: { status: 'failed', failureCode: error instanceof Error ? error.message : 'QR_GENERATE_FAILED', completedAt: new Date().toISOString() }, requestId: ctx.requestId, traceId: ctx.traceId });
         throw new ServiceError(502, 'QR_GENERATE_FAILED', 'unable to generate xianyu qr session');
@@ -1145,7 +1145,7 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
     const local = await accounts.getLoginSessionById({ adminId: authContext.admin.id, sessionId });
     const external = runtime.qrLogin.get(sessionId);
     const terminal = ['succeeded', 'cancelled', 'failed', 'expired'].includes(local.status);
-    return { statusCode: 200, body: success(ctx, external ? { ...toQrSessionView(local), qrImageDataUrl: external.qrImageDataUrl, pollAfterMs: external.pollAfterMs, expiresAt: external.expiresAt, status: terminal ? local.status : external.status, errorCode: terminal ? local.failureCode : external.errorCode, verificationUrl: external.verificationUrl, verificationAutoLaunch: external.verificationAutoLaunch } : toQrSessionView(local)).body };
+    return { statusCode: 200, body: success(ctx, external ? { ...toQrSessionView(local), qrImageDataUrl: external.qrImageDataUrl, pollAfterMs: external.pollAfterMs, expiresAt: external.expiresAt, status: terminal ? local.status : external.status, errorCode: terminal ? local.failureCode : external.errorCode, verificationUrl: external.verificationUrl, verificationAutoLaunch: external.verificationAutoLaunch, faceQrImageDataUrl: external.faceQrImageDataUrl } : toQrSessionView(local)).body };
   }
   const globalQrAction = ctx.path.match(/^\/api\/v1\/auth\/qr-sessions\/([^/]+)\/(cancel|renew)$/);
   if (globalQrAction && ctx.method === 'POST') {
@@ -1161,7 +1161,7 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
       const renewed = await accounts.updateLoginSession({ adminId: authContext.admin.id, accountId, sessionId, patch: { status: 'waiting', expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(), failureCode: undefined }, requestId: ctx.requestId, traceId: ctx.traceId });
       if (config.xianyuQrMode === 'stub') return success(ctx, toQrSessionView(renewed));
       const qrSession = await runtime.qrLogin.create({ sessionId, adminId: authContext.admin.id, accountId: renewed.accountId });
-      return success(ctx, { ...toQrSessionView(renewed), qrImageDataUrl: qrSession.qrImageDataUrl, pollAfterMs: qrSession.pollAfterMs, expiresAt: qrSession.expiresAt, status: qrSession.status, errorCode: qrSession.errorCode, verificationUrl: qrSession.verificationUrl });
+      return success(ctx, { ...toQrSessionView(renewed), qrImageDataUrl: qrSession.qrImageDataUrl, pollAfterMs: qrSession.pollAfterMs, expiresAt: qrSession.expiresAt, status: qrSession.status, errorCode: qrSession.errorCode, verificationUrl: qrSession.verificationUrl, faceQrImageDataUrl: qrSession.faceQrImageDataUrl });
     });
   }
 
@@ -1243,7 +1243,7 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
         if (loginMethod !== 'qr' || config.xianyuQrMode === 'stub') return success(ctx, loginSession, 201);
         try {
           const qrSession = await runtime.qrLogin.create({ sessionId: loginSession.id, adminId: authContext.admin.id, accountId });
-          return success(ctx, { ...toQrSessionView(loginSession), qrImageDataUrl: qrSession.qrImageDataUrl, pollAfterMs: qrSession.pollAfterMs, expiresAt: qrSession.expiresAt, status: qrSession.status, errorCode: qrSession.errorCode, verificationUrl: qrSession.verificationUrl }, 201);
+          return success(ctx, { ...toQrSessionView(loginSession), qrImageDataUrl: qrSession.qrImageDataUrl, pollAfterMs: qrSession.pollAfterMs, expiresAt: qrSession.expiresAt, status: qrSession.status, errorCode: qrSession.errorCode, verificationUrl: qrSession.verificationUrl, faceQrImageDataUrl: qrSession.faceQrImageDataUrl }, 201);
         } catch (error) {
           await accounts.updateLoginSession({ adminId: authContext.admin.id, accountId, sessionId: loginSession.id, patch: { status: 'failed', failureCode: error instanceof Error ? error.message : 'QR_GENERATE_FAILED', completedAt: new Date().toISOString() }, requestId: ctx.requestId, traceId: ctx.traceId });
           throw new ServiceError(502, 'QR_GENERATE_FAILED', 'unable to generate xianyu qr session');
@@ -1255,14 +1255,14 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
       const local = await accounts.getLoginSession({ adminId: authContext.admin.id, accountId, sessionId });
       const external = runtime.qrLogin.get(sessionId);
       const terminal = ['succeeded', 'cancelled', 'failed', 'expired'].includes(local.status);
-      return { statusCode: 200, body: success(ctx, external ? { ...toQrSessionView(local), qrImageDataUrl: external.qrImageDataUrl, pollAfterMs: external.pollAfterMs, expiresAt: external.expiresAt, status: terminal ? local.status : external.status, errorCode: terminal ? local.failureCode : external.errorCode, verificationUrl: external.verificationUrl, verificationAutoLaunch: external.verificationAutoLaunch } : local).body };
+      return { statusCode: 200, body: success(ctx, external ? { ...toQrSessionView(local), qrImageDataUrl: external.qrImageDataUrl, pollAfterMs: external.pollAfterMs, expiresAt: external.expiresAt, status: terminal ? local.status : external.status, errorCode: terminal ? local.failureCode : external.errorCode, verificationUrl: external.verificationUrl, verificationAutoLaunch: external.verificationAutoLaunch, faceQrImageDataUrl: external.faceQrImageDataUrl } : local).body };
     }
     if (sessionId && loginSessionMatch[3] === 'cancel' && ctx.method === 'POST') return mutation(runtime, ctx, authContext, accountId, async () => { runtime.qrLogin.cancel(sessionId); return success(ctx, await accounts.updateLoginSession({ adminId: authContext.admin.id, accountId, sessionId, patch: { status: 'cancelled', completedAt: new Date().toISOString() }, requestId: ctx.requestId, traceId: ctx.traceId })); });
     if (sessionId && loginSessionMatch[3] === 'renew' && ctx.method === 'POST') return mutation(runtime, ctx, authContext, accountId, async () => {
       const renewed = await accounts.updateLoginSession({ adminId: authContext.admin.id, accountId, sessionId, patch: { status: 'waiting', expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(), failureCode: undefined }, requestId: ctx.requestId, traceId: ctx.traceId });
       if (config.xianyuQrMode === 'stub') return success(ctx, renewed);
       const qrSession = await runtime.qrLogin.create({ sessionId, adminId: authContext.admin.id, accountId });
-      return success(ctx, { ...toQrSessionView(renewed), qrImageDataUrl: qrSession.qrImageDataUrl, pollAfterMs: qrSession.pollAfterMs, expiresAt: qrSession.expiresAt, status: qrSession.status, errorCode: qrSession.errorCode, verificationUrl: qrSession.verificationUrl });
+      return success(ctx, { ...toQrSessionView(renewed), qrImageDataUrl: qrSession.qrImageDataUrl, pollAfterMs: qrSession.pollAfterMs, expiresAt: qrSession.expiresAt, status: qrSession.status, errorCode: qrSession.errorCode, verificationUrl: qrSession.verificationUrl, faceQrImageDataUrl: qrSession.faceQrImageDataUrl });
     });
     if (sessionId && loginSessionMatch[3] === 'complete' && ctx.method === 'POST') return mutation(runtime, ctx, authContext, accountId, async () => {
       const result = await credentials.completeLoginSession({

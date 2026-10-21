@@ -10,7 +10,7 @@ import { XianyuQrLoginAdapter } from '../src/xianyu-qr-login.js';
  */
 test('QR login replays the face-verification pages over HTTP, surfaces the face QR and finishes login after the phone succeeds', async () => {
   const originalFetch = globalThis.fetch;
-  const statuses: Array<{ status: string; errorCode?: string; faceQr: boolean }> = [];
+  const statuses: Array<{ status: string; errorCode?: string; faceQr: boolean; autoLaunch?: boolean }> = [];
   const hits: string[] = [];
   let checks = 0;
   let browserCalls = 0;
@@ -58,14 +58,14 @@ test('QR login replays the face-verification pages over HTTP, surfaces the face 
     throw new Error(`unexpected request: ${url.href}`);
   };
 
-  const verificationBrowser = { enabled: true, waitForCompletion: async () => { browserCalls += 1; throw new Error('BROWSER_SHOULD_NOT_RUN'); } };
+  const verificationBrowser = { enabled: false, waitForCompletion: async () => { browserCalls += 1; throw new Error('BROWSER_SHOULD_NOT_RUN'); } };
   try {
     const adapter = new XianyuQrLoginAdapter({
       pollIntervalMs: 5,
       maxWaitMs: 5_000,
       verificationBrowser: verificationBrowser as never,
       allowManualVerificationFallback: false,
-      onStatus: async (status) => { statuses.push({ status: status.status, errorCode: status.errorCode, faceQr: Boolean(status.faceQrImageDataUrl) }); },
+      onStatus: async (status) => { statuses.push({ status: status.status, errorCode: status.errorCode, faceQr: Boolean(status.faceQrImageDataUrl), autoLaunch: status.verificationAutoLaunch }); },
       onSuccess: async ({ unb }) => { if (unb === 'face-user') successCount += 1; },
     });
     await adapter.create({ sessionId: 'face-session', adminId: 'admin-1' });
@@ -73,7 +73,7 @@ test('QR login replays the face-verification pages over HTTP, surfaces the face 
     assert.equal(successCount, 1, 'login completes after the phone-side face check succeeds');
     assert.equal(browserCalls, 0, 'the HTTP replay makes the server-side browser unnecessary');
     assert.equal(adapter.get('face-session')?.status, 'succeeded');
-    assert.ok(statuses.some((entry) => entry.status === 'verification_required' && entry.faceQr && entry.errorCode === 'FACE_VERIFICATION_REQUIRED'), 'the face QR is published while waiting');
+    assert.ok(statuses.some((entry) => entry.status === 'verification_required' && entry.faceQr && entry.errorCode === 'FACE_VERIFICATION_REQUIRED' && entry.autoLaunch === true), 'the face QR is published while waiting and keeps the client polling even without a server-side browser');
     assert.equal(statuses.at(-1)?.status, 'succeeded');
     assert.equal(statuses.at(-1)?.faceQr, false, 'the face QR is cleared once the login finished');
     assert.ok(checks >= 2, 'check.do is polled until it reports success');

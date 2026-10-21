@@ -452,7 +452,7 @@ export class XianyuQrLoginAdapter {
   }
 
   private toPublic(session: InternalSession): XianyuQrPublicSession {
-    return { sessionId: session.sessionId, accountId: session.accountId, status: session.status, qrImageDataUrl: session.qrImageDataUrl, expiresAt: new Date(session.expiresAt).toISOString(), pollAfterMs: this.pollIntervalMs, errorCode: session.errorCode, verificationUrl: session.verificationUrl, faceQrImageDataUrl: session.faceQrImageDataUrl, ...(this.verificationBrowser?.enabled ? { verificationAutoLaunch: true } : {}) };
+    return { sessionId: session.sessionId, accountId: session.accountId, status: session.status, qrImageDataUrl: session.qrImageDataUrl, expiresAt: new Date(session.expiresAt).toISOString(), pollAfterMs: this.pollIntervalMs, errorCode: session.errorCode, verificationUrl: session.verificationUrl, faceQrImageDataUrl: session.faceQrImageDataUrl, ...(this.verificationBrowser?.enabled || session.faceQrImageDataUrl ? { verificationAutoLaunch: true } : {}) };
   }
 
   private async emitStatus(session: InternalSession): Promise<void> {
