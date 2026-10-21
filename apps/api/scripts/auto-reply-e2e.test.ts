@@ -493,14 +493,15 @@ test('xianyu listener drives product and general auto-reply chains without real 
     await waitFor(() => completed.length >= 2);
     const generalResult = completed[1]!;
     assert.equal(generalResult.created, true);
-    assert.equal(generalResult.autoReply?.run.intent, 'general');
-    assert.equal(generalResult.autoReply?.run.status, 'persisted');
-    assert.equal(generalResult.autoReply?.run.productId, undefined);
-    assert.match(generalResult.autoReply?.outboundMessage?.bodyText ?? '', /已收到你的消息/);
+    // A brand-new chat with no item attached cannot be proven to be about one of
+    // the account's own listings, so the seller-side gate keeps the agent quiet.
+    assert.equal(generalResult.autoReply, undefined);
     const generalConversation = await runtime.store.findConversationByExternalRef(adminId, account.id, 'conv-general');
     assert.ok(generalConversation);
+    assert.equal(generalConversation.side, 'unknown');
     const generalMessages = await runtime.messages.listMessages(adminId, generalConversation.id, { limit: 20 });
-    assert.equal(generalMessages.items.filter((message) => message.direction === 'outbound').length, 1);
+    assert.equal(generalMessages.items.filter((message) => message.direction === 'inbound').length, 1);
+    assert.equal(generalMessages.items.filter((message) => message.direction === 'outbound').length, 0);
 
     socket.emit('message', pushFrame('push-blocked-1', 'conv-blocked', 'inbound-blocked-1.PNM', 'buyer-3', '你好', '其他买家'));
     await waitFor(() => completed.length >= 3);
