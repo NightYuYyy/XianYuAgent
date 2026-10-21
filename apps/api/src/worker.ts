@@ -6,6 +6,7 @@ import { InboundQuarantineCleanupWorker } from './inbound-quarantine-cleanup-wor
 import { ProductAutomationOrderRefreshWorker } from './product-automation-order-worker.js';
 import { ProductAutomationReminderWorker } from './product-automation-reminder-worker.js';
 import { AccountRiskAlertWorker } from './account-risk-alert-worker.js';
+import { ProductPolishWorker } from './product-polish.js';
 
 const config = loadConfig();
 const runtime = createApp(config);
@@ -51,6 +52,11 @@ const productAutomationOrderRefreshWorker = new ProductAutomationOrderRefreshWor
   onError: (error) => console.error('product automation order refresh worker poll failed', error),
 });
 const accountRiskAlertWorker = new AccountRiskAlertWorker(runtime.store, (error) => console.error('account risk alert worker poll failed', error));
+const productPolishWorker = new ProductPolishWorker(runtime.productPolish, {
+  enabled: process.env.PRODUCT_POLISH_WORKER_ENABLED?.trim().toLowerCase() !== 'false',
+  pollMs: positiveNumber(process.env.PRODUCT_POLISH_WORKER_POLL_MS, 30 * 60_000),
+  onError: (error) => console.error('product polish worker poll failed', error),
+});
 console.log(`xianyu-agent-worker started; redis=${config.redisUrl ?? 'not_configured'} workerId=${workerId} repairMode=${runtime.autoReplyRepair.currentMode} quarantineCleanupWorker=${quarantineCleanupEnabled ? 'enabled' : 'disabled'} quarantineCleanupPollMs=${quarantineCleanupPollMs} quarantineCleanupRetentionDays=${quarantineCleanupRetentionDays} quarantineCleanupBatchSize=${quarantineCleanupBatchSize} outcomeReviewWorker=${outcomeReviewWorker ? 'enabled' : 'disabled'} productAutomationOrderRefreshWorker=${productAutomationOrderRefreshWorker ? 'enabled' : 'disabled'} productAutomationReminderWorker=${productAutomationReminderWorker ? 'enabled' : 'disabled'}`);
 worker.start();
 quarantineCleanupWorker.start();
@@ -59,6 +65,7 @@ productAutomationOrderRefreshWorker.start();
 runtime.paymentEventWorker.start();
 accountRiskAlertWorker.start();
 productAutomationReminderWorker.start();
+productPolishWorker.start();
 const shutdown = (signal: string) => {
   void (async () => {
     await outcomeReviewWorker?.stop();
@@ -67,6 +74,7 @@ const shutdown = (signal: string) => {
     await runtime.paymentEventWorker.stop();
     await accountRiskAlertWorker.stop();
     await productAutomationReminderWorker.stop();
+    await productPolishWorker.stop();
     await worker.stop();
     await runtime.modelProviderRuntime.close();
     await runtime.xianyuIm.close();

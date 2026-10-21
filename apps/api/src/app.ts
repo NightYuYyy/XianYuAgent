@@ -15,6 +15,7 @@ import { XianyuVerificationBrowser } from './xianyu-verification-browser.js';
 import { XianyuRemoteSliderSolver } from './xianyu-remote-slider.js';
 import { configureNotifier, createNotifierFromEnv, getNotifier, notify, NOTIFICATION_KINDS } from './notifier.js';
 import { AccountProxyResolver, effectiveProxyUrl, normalizeProxyUrl } from './xianyu-proxy.js';
+import { ProductPolishService } from './product-polish.js';
 import { XianyuMtopClient } from './xianyu-mtop.js';
 import { metadataWithCookieSnapshot } from './xianyu-cookie-jar.js';
 import { XianyuImService } from './xianyu-im-service.js';
@@ -57,6 +58,7 @@ export interface AppRuntime {
   config: AppConfig;
   store: Store;
   accountProxy: AccountProxyResolver;
+  productPolish: ProductPolishService;
   auth: AuthService;
   accounts: AccountService;
   coupons: CouponService;
@@ -499,6 +501,10 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
   const server = createServer((request, response) => { void handleRequest(runtime, request, response); });
   const runtime: AppRuntime = {
     accountProxy,
+    productPolish: new ProductPolishService(store, xianyu, {
+      intervalMs: positiveEnvNumber(process.env.PRODUCT_POLISH_INTERVAL_HOURS, 24) * 3_600_000,
+      maxItemsPerRun: positiveEnvNumber(process.env.PRODUCT_POLISH_MAX_ITEMS_PER_RUN, 200),
+    }),
     config, store, auth, accounts, coupons, orders, orderDelivery, products, productPublisher, productKnowledgeBase, productAutomation, productAutomationTrigger, productAutomationWorker, paymentEventWorker, productSync, credentials, apiKeyCredentials, openaiSettings, modelProviderRuntime, dashboard, messages, autoReply, autoReplyRepair, autoReplyAgentSettings, autoReplyActivity, redisRealtime, workspace, piSkills, workspaceCommands, workspaceRuntime, qrLogin, xianyu, xianyuItemDetail, objectStorage, xianyuIm,
     server,
     async listen() {
@@ -1282,7 +1288,7 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
   if (riskNotificationMatch && ctx.method === 'POST') {
     return mutation(runtime, ctx, authContext, undefined, async () => success(ctx, { acknowledged: await store.acknowledgeRiskNotification(authContext.admin.id, riskNotificationMatch[1]) }));
   }
-  const accountMatch = ctx.path.match(/^\/api\/v1\/accounts\/([^/]+)(?:\/(scopes|connection|connection\/verify))?$/);
+  const accountMatch = ctx.path.match(/^\/api\/v1\/accounts\/([^/]+)(?:\/(scopes|connection|connection\/verify|polish))?$/);
   if (ctx.path === '/api/v1/accounts' && ctx.method === 'GET') return { statusCode: 200, body: success(ctx, await accounts.list(authContext.admin.id, parseAccountListQuery(ctx.query))).body };
   if (ctx.path === '/api/v1/accounts' && ctx.method === 'POST') {
     const result = await mutation(runtime, ctx, authContext, undefined, async () => {
@@ -1294,11 +1300,16 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
   if (accountMatch) {
     const accountId = decodeURIComponent(accountMatch[1]);
     if (!accountMatch[2] && ctx.method === 'GET') return { statusCode: 200, body: success(ctx, await accounts.get(authContext.admin.id, accountId)).body };
-     if (!accountMatch[2] && ctx.method === 'PATCH') return mutation(runtime, ctx, authContext, accountId, async () => success(ctx, await accounts.update({ adminId: authContext.admin.id, accountId, patch: { sellerRef: optionalString(ctx.body.sellerRef), displayName: optionalString(ctx.body.displayName), remark: optionalString(ctx.body.remark), avatarUrl: optionalString(ctx.body.avatarUrl), platformUserId: optionalString(ctx.body.platformUserId), proxyUrl: parseProxyUrlPatch(ctx.body.proxyUrl), status: typeof ctx.body.status === 'string' ? ctx.body.status as never : undefined }, requestId: ctx.requestId, traceId: ctx.traceId }).then((updated) => { runtime.accountProxy.invalidate(accountId); return updated; })));
+     if (!accountMatch[2] && ctx.method === 'PATCH') return mutation(runtime, ctx, authContext, accountId, async () => success(ctx, await accounts.update({ adminId: authContext.admin.id, accountId, patch: { sellerRef: optionalString(ctx.body.sellerRef), displayName: optionalString(ctx.body.displayName), remark: optionalString(ctx.body.remark), avatarUrl: optionalString(ctx.body.avatarUrl), platformUserId: optionalString(ctx.body.platformUserId), proxyUrl: parseProxyUrlPatch(ctx.body.proxyUrl), autoPolish: typeof ctx.body.autoPolish === 'boolean' ? ctx.body.autoPolish : undefined, status: typeof ctx.body.status === 'string' ? ctx.body.status as never : undefined }, requestId: ctx.requestId, traceId: ctx.traceId }).then((updated) => { runtime.accountProxy.invalidate(accountId); return updated; })));
      if (!accountMatch[2] && ctx.method === 'DELETE') return mutation(runtime, ctx, authContext, accountId, async () => success(ctx, { account: await accounts.delete({ adminId: authContext.admin.id, accountId, requestId: ctx.requestId, traceId: ctx.traceId }), deleted: true }));
     if (accountMatch[2] === 'connection' && ctx.method === 'GET') {
       const account = await accounts.get(authContext.admin.id, accountId);
       return { statusCode: 200, body: success(ctx, connectionView(account)).body };
+    }
+    if (accountMatch[2] === 'polish' && ctx.method === 'POST') {
+      await accounts.get(authContext.admin.id, accountId);
+      const result = await runtime.productPolish.polishAccount(authContext.admin.id, accountId, { force: ctx.body.force === true });
+      return { statusCode: 200, body: success(ctx, result).body };
     }
     if (accountMatch[2] === 'connection/verify' && ctx.method === 'POST') {
       const result = await mutation(runtime, ctx, authContext, accountId, async () => {
@@ -2230,6 +2241,11 @@ function readCouponMetadata(value: unknown): import('./domain.js').CouponBatchMe
   }
   if (Array.isArray(source.imageUrls)) metadata.imageUrls = source.imageUrls.filter((item): item is string => typeof item === 'string').slice(0, 3);
   return metadata;
+}
+
+function positiveEnvNumber(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function parseProxyUrlPatch(value: unknown): string | null | undefined {

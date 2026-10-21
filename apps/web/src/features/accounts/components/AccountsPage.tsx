@@ -86,6 +86,19 @@ export function AccountsPage({ api: providedApi }: AccountsPageProps) {
     setDeleteAccountTarget(account);
   }
 
+  async function toggleAutoPolish(account: AccountVM) {
+    if (!api.updateAccount) return;
+    const next = !account.autoPolish;
+    try {
+      await api.updateAccount(account.id, { autoPolish: next });
+      showToast({ id: 'account-auto-polish', tone: 'success', message: next ? '已开启自动擦亮，Worker 每天会擦亮该账号的在售商品。' : '已关闭自动擦亮。' });
+      void controller.reload();
+      void refreshAccounts();
+    } catch (error) {
+      showToast({ id: 'account-auto-polish', tone: 'error', message: accountErrorMessage(error, '自动擦亮设置失败，请稍后重试。') });
+    }
+  }
+
   async function saveProxy(proxyUrl: string | null) {
     if (!proxyAccountTarget || !api.updateAccount) return;
     setProxySubmitting(true);
@@ -132,7 +145,7 @@ export function AccountsPage({ api: providedApi }: AccountsPageProps) {
       </div>
       <article className="card panel accounts-domain-panel">
         <AccountToolbar filters={controller.filters} phase={controller.state.phase} onSearchChange={controller.setSearch} onStatusChange={(status) => controller.setFilters((previous) => ({ ...previous, status, page: 1 }))} onConnectionStatusChange={(connectionStatus) => controller.setFilters((previous) => ({ ...previous, connectionStatus, page: 1 }))} onRefresh={controller.reload} onAddAccount={() => openLogin()} />
-        {controller.state.phase === 'success' && <AccountTable accounts={accounts} activeAccountId={currentAccountId} page={page} total={total} totalPages={totalPages} onPageChange={(nextPage) => controller.setFilters((previous) => ({ ...previous, page: Math.max(1, Math.min(nextPage, totalPages)) }))} onEditProxy={api.updateAccount ? (account) => setProxyAccountTarget(account) : undefined} onReauthorize={openLogin} onSwitch={switchAccount} onDelete={requestDeleteAccount} />}
+        {controller.state.phase === 'success' && <AccountTable accounts={accounts} activeAccountId={currentAccountId} page={page} total={total} totalPages={totalPages} onPageChange={(nextPage) => controller.setFilters((previous) => ({ ...previous, page: Math.max(1, Math.min(nextPage, totalPages)) }))} onEditProxy={api.updateAccount ? (account) => setProxyAccountTarget(account) : undefined} onToggleAutoPolish={api.updateAccount ? (account) => { void toggleAutoPolish(account); } : undefined} onReauthorize={openLogin} onSwitch={switchAccount} onDelete={requestDeleteAccount} />}
         <AccountStateView phase={controller.state.phase} error={controller.state.error} onRetry={controller.reload} />
       </article>
       {loginOpen && <AccountLoginModal api={api} account={loginAccount} initialMethod={loginMethod} onClose={closeLogin} onStatusChanged={() => { void controller.reload(); void refreshAccounts(); }} onCompleted={() => { void controller.reload(); void refreshAccounts(); closeLogin(); }} />}

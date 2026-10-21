@@ -23,7 +23,7 @@ export interface AccountsApi {
   acknowledgeRiskNotification(id: string): Promise<void>;
   createAccount(input: { platform: 'xianyu'; sellerRef: string; displayName?: string }): Promise<AccountVM>;
   deleteAccount?(accountId: string): Promise<void>;
-  updateAccount?(accountId: string, patch: { proxyUrl?: string | null; remark?: string }): Promise<AccountVM>;
+  updateAccount?(accountId: string, patch: { proxyUrl?: string | null; autoPolish?: boolean; remark?: string }): Promise<AccountVM>;
   getDetail(accountId: string): Promise<AccountVM>;
   getConnection(accountId: string): Promise<AccountConnectionVM>;
   createQrSession(accountId?: string): Promise<QrLoginSessionVM>;
@@ -41,6 +41,7 @@ interface CanonicalAccountResponse {
   displayName: string;
   remark?: string;
   proxyUrl?: string;
+  autoPolish?: boolean;
   avatarUrl?: string;
   platformUserId?: string;
   status?: AccountStatus | 'active' | 'error';
@@ -80,6 +81,7 @@ function toAccountVM(account: CanonicalAccountResponse): AccountVM {
     displayName: account.displayName,
     remark: account.remark,
     proxyUrl: account.proxyUrl || undefined,
+    autoPolish: account.autoPolish === true,
     avatarUrl: account.avatarUrl,
     platformUserId: account.platformUserId,
     status: normalizedStatus,

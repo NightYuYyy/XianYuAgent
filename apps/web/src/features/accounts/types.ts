@@ -20,6 +20,8 @@ export interface AccountVM {
   remark?: string;
   /** Outbound HTTP(S) proxy for this account; empty = default / direct. */
   proxyUrl?: string;
+  /** Scheduled product polishing opt-in. */
+  autoPolish?: boolean;
   avatarUrl?: string;
   platformUserId?: string;
   status: AccountStatus;

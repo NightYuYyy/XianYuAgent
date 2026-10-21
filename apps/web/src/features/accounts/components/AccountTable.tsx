@@ -1,7 +1,7 @@
 import { AccountConnectionBadge, AccountCredentialBadge, AccountStatusBadge } from './AccountStatusBadge';
 import type { AccountVM } from '../types';
 
-export function AccountTable({ accounts, activeAccountId, page, total, totalPages, onPageChange, onReauthorize, onSwitch, onDelete, onEditProxy }: {
+export function AccountTable({ accounts, activeAccountId, page, total, totalPages, onPageChange, onReauthorize, onSwitch, onDelete, onEditProxy, onToggleAutoPolish }: {
   accounts: AccountVM[];
   activeAccountId?: string;
   page: number;
@@ -12,6 +12,7 @@ export function AccountTable({ accounts, activeAccountId, page, total, totalPage
   onSwitch: (account: AccountVM) => void;
   onDelete: (account: AccountVM) => void;
   onEditProxy?: (account: AccountVM) => void;
+  onToggleAutoPolish?: (account: AccountVM) => void;
 }) {
   const pageItems = getPageItems(page, totalPages);
   return <div className="accounts-domain-table-region">
@@ -49,6 +50,7 @@ export function AccountTable({ accounts, activeAccountId, page, total, totalPage
             <span role="cell" className="accounts-domain-row-actions">
               <button className={account.id === activeAccountId ? 'btn primary' : 'btn ghost'} type="button" data-testid="account-switch" onClick={() => onSwitch(account)} disabled={account.id === activeAccountId || account.status === 'disabled'}>{account.id === activeAccountId ? '当前账号' : '切换账号'}</button>
               <button className={account.status === 'connected' ? 'btn ghost' : 'btn primary'} type="button" onClick={() => onReauthorize(account)}>{account.status === 'connected' ? '重新授权' : '扫码授权'}</button>
+              {onToggleAutoPolish && <button className={account.autoPolish ? 'btn primary' : 'btn ghost'} type="button" data-testid="account-auto-polish" title={account.autoPolish ? '自动擦亮已开启，点击关闭' : '自动擦亮已关闭，点击开启'} onClick={() => onToggleAutoPolish(account)}>{account.autoPolish ? '擦亮 ✓' : '擦亮'}</button>}
               {onEditProxy && <button className="btn ghost" type="button" data-testid="account-proxy" title={account.proxyUrl ?? '未配置代理'} onClick={() => onEditProxy(account)}>{account.proxyUrl ? '代理 ✓' : '代理'}</button>}
               <button className="btn danger" type="button" data-testid="account-delete" onClick={() => onDelete(account)}>删除账号</button>
             </span>
