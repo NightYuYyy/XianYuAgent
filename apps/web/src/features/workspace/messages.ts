@@ -172,6 +172,13 @@ export function buildWorkspaceMessages(run: WorkspaceRunVM, events: WorkspaceRun
     .map((event) => typeof event.payload.streamId === 'string' ? event.payload.streamId : ''));
   let finalAnswerRendered = false;
   const hasPersistedFinalAnswer = events.some((event) => event.eventType !== 'assistant.delta' && messageType(event) === 'final_answer');
+  // Draft assistant deltas narrate progress while tools run. When the model
+  // answered directly, the draft stream is just the final answer streamed in
+  // pieces; showing it next to the persisted final answer duplicates the reply.
+  const persistedFinalAnswerTexts = events
+    .filter((event) => event.eventType !== 'assistant.delta' && messageType(event) === 'final_answer' && typeof event.payload.content === 'string')
+    .map((event) => normalizeAnswerText(String(event.payload.content)))
+    .filter(Boolean);
   const toolStreams = new Set(events.filter((event) => event.eventType.startsWith('tool.call.')).map((event) => event.payload.streamId).filter((value): value is string => typeof value === 'string'));
   const toolBackedStreams = new Set([
     ...toolStreams,
@@ -236,6 +243,7 @@ export function buildWorkspaceMessages(run: WorkspaceRunVM, events: WorkspaceRun
       return;
     }
     if (messageKind === 'reasoning_summary') {
+      if (event.eventType === 'assistant.delta' && isDraftOfFinalAnswer(content, persistedFinalAnswerTexts)) return;
       const reasoningKey = `${summary ?? ''}:${content}`;
       if (seenReasoningKeys.has(reasoningKey)) return;
       seenReasoningKeys.add(reasoningKey);
@@ -280,6 +288,17 @@ export function buildWorkspaceMessages(run: WorkspaceRunVM, events: WorkspaceRun
     if (bySequence !== 0) return bySequence;
     return new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime();
   });
+}
+
+function normalizeAnswerText(value: string): string {
+  return value.replace(/\s+/g, '').trim();
+}
+
+/** A draft stream that reproduces the persisted final answer (fully or as its prefix) carries no extra information. */
+function isDraftOfFinalAnswer(draft: string, finalAnswers: string[]): boolean {
+  const normalized = normalizeAnswerText(draft);
+  if (!normalized) return false;
+  return finalAnswers.some((answer) => answer === normalized || answer.startsWith(normalized));
 }
 
 function mergeStreamingEvents(events: WorkspaceRunEventVM[], options: { ignoreTerminalAssistantDeltas?: boolean; toolBackedStreams?: Set<string> } = {}): WorkspaceRunEventVM[] {

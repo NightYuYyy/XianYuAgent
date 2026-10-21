@@ -147,6 +147,30 @@ describe('workspace message projection', () => {
     expect(messages).toContainEqual(expect.objectContaining({ type: 'reasoning_summary', summary: '检索商品信息' }));
   });
 
+  it('drops a draft assistant stream that merely repeats the persisted final answer', () => {
+    const messages = buildWorkspaceMessages({ ...run, status: 'succeeded' }, [
+      { sequence: 2, runId: 'run-1', eventType: 'workspace.execution.summary', payload: { streamId: 'round-1', messageType: 'reasoning_summary', content: '正在核对任务目标与已有结果。' }, createdAt: '2026-09-20T00:00:01.000Z' },
+      { sequence: 3, runId: 'run-1', eventType: 'assistant.delta', payload: { streamId: 'round-1', messageId: 'round-1:assistant', phase: 'draft', contentDelta: '你好！有什么' }, createdAt: '2026-09-20T00:00:01.100Z' },
+      { sequence: 4, runId: 'run-1', eventType: 'assistant.delta', payload: { streamId: 'round-1', messageId: 'round-1:assistant', phase: 'draft', contentDelta: '需要我帮你处理的？' }, createdAt: '2026-09-20T00:00:01.200Z' },
+      { sequence: 5, runId: 'run-1', eventType: 'message.appended', payload: { messageType: 'final_answer', messageId: 'msg-final', content: '你好！有什么需要我帮你处理的？' }, createdAt: '2026-09-20T00:00:02.000Z' },
+      { sequence: 6, runId: 'run-1', eventType: 'run.succeeded', payload: { messageType: 'final_answer', status: 'succeeded', content: '你好！有什么需要我帮你处理的？' }, createdAt: '2026-09-20T00:00:02.100Z' },
+    ]);
+
+    expect(messages.filter((message) => message.content.includes('有什么需要我帮你处理的'))).toHaveLength(1);
+    expect(messages.filter((message) => message.type === 'final_answer')).toHaveLength(1);
+    expect(messages.some((message) => message.type === 'reasoning_summary' && message.content === '正在核对任务目标与已有结果。')).toBe(true);
+  });
+
+  it('keeps a draft assistant stream that differs from the final answer', () => {
+    const messages = buildWorkspaceMessages({ ...run, status: 'succeeded' }, [
+      { sequence: 3, runId: 'run-1', eventType: 'assistant.delta', payload: { streamId: 'round-1', messageId: 'round-1:assistant', phase: 'draft', contentDelta: '先检查商品列表。' }, createdAt: '2026-09-20T00:00:01.100Z' },
+      { sequence: 5, runId: 'run-1', eventType: 'message.appended', payload: { messageType: 'final_answer', messageId: 'msg-final', content: '共有 3 个在售商品。' }, createdAt: '2026-09-20T00:00:02.000Z' },
+    ]);
+
+    expect(messages.some((message) => message.type === 'reasoning_summary' && message.content === '先检查商品列表。')).toBe(true);
+    expect(messages.filter((message) => message.type === 'final_answer')).toHaveLength(1);
+  });
+
   it('does not trust a transient terminal status while tool events are still arriving', () => {
     const messages = buildWorkspaceMessages({ ...run, status: 'succeeded' }, [
       { sequence: 2, runId: 'run-1', eventType: 'workspace.execution.summary', payload: { streamId: 'round-1', messageType: 'reasoning_summary', summary: '检索商品信息', content: '正在检索商品信息，等待工具返回真实结果。' }, createdAt: '2026-09-20T00:00:01.000Z' },
