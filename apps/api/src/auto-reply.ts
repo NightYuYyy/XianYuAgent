@@ -829,8 +829,7 @@ export class AutoReplyService {
           buyer,
           payload: { status: 'handoff', decision: 'handoff', failureCode, reason },
         });
-        const buyerLabel = typeof buyer === 'string' ? buyer : ((buyer as { nickname?: string; name?: string } | undefined)?.nickname ?? (buyer as { name?: string } | undefined)?.name ?? '');
-        notify({ kind: 'auto_reply_handoff', title: '买家消息需要人工回复', body: `买家：${buyerLabel || '未知'}\n会话：${conversation.id}${reason ? `\n原因：${reason}` : ''}`, accountId: conversation.accountId, dedupeKey: `handoff:${conversation.id}` });
+        notify({ kind: 'auto_reply_handoff', title: '买家消息需要人工回复', body: `买家：${buyer.buyerName ?? '未知'}\n会话：${conversation.id}${reason ? `\n原因：${reason}` : ''}`, accountId: conversation.accountId, dedupeKey: `handoff:${conversation.id}` });
         return { run: updated ?? run, inboundMessage };
       }
       const reason = safeEventReason(error);
