@@ -150,6 +150,22 @@ export interface AutoReplyProcessResult {
   repair?: AutoReplyRepairCandidateResult;
 }
 
+export interface AutoReplySuggestion {
+  text: string;
+  segments?: string[];
+  decision: 'reply' | 'skip';
+  reason?: string;
+  intent: AutoReplyIntent;
+  inboundMessageId: string;
+}
+
+export class AutoReplySuggestError extends Error {
+  constructor(readonly code: 'CONVERSATION_NOT_FOUND' | 'NO_BUYER_MESSAGE', message: string) {
+    super(message);
+    this.name = 'AutoReplySuggestError';
+  }
+}
+
 export interface AutoReplyServiceOptions {
   enabled?: boolean;
   sendMode?: 'simulate' | 'live';
@@ -887,6 +903,45 @@ export class AutoReplyService {
     let resolvePromise!: () => void;
     const promise = new Promise<void>((resolve) => { resolvePromise = resolve; });
     return { key, promise, coveredMessageIds: new Set<string>(), resolve: resolvePromise };
+  }
+
+  /**
+   * Draft a reply for the operator without sending it. Uses the same context,
+   * per-account generator and reply policy as the automatic path, so what the
+   * operator sees is what the agent would have said.
+   */
+  async suggestReply(input: { adminId: string; conversationId: string; requestId?: string; traceId?: string }): Promise<AutoReplySuggestion> {
+    const conversation = await this.store.getConversation(input.adminId, input.conversationId);
+    if (!conversation) throw new AutoReplySuggestError('CONVERSATION_NOT_FOUND', '会话不存在');
+    const all = await this.store.listMessages(input.adminId, conversation.id, { limit: 200 });
+    const events = await this.store.listConversationEvents(input.adminId, conversation.id, 0, 500);
+    const eventCursorByMessageId = new Map<string, number>();
+    for (const event of events) {
+      const message = event.payload?.message as { id?: unknown } | undefined;
+      if (typeof message?.id === 'string') eventCursorByMessageId.set(message.id, event.cursor);
+    }
+    const inboundMessage = all.items
+      .filter((message) => message.direction === 'inbound' && message.senderRole === 'buyer' && Boolean(message.bodyText?.trim() || message.bodyRef))
+      .sort((left, right) => compareConversationMessageOrder(left, right, eventCursorByMessageId))
+      .at(-1);
+    if (!inboundMessage) throw new AutoReplySuggestError('NO_BUYER_MESSAGE', '这个会话里还没有买家消息，没法拟稿');
+    const runtime = await this.resolveRuntimeOptions(input.adminId, conversation.accountId);
+    const traceId = input.traceId ?? `suggest:${inboundMessage.id}:${Date.now()}`;
+    const context = await this.buildContext(input.adminId, conversation, inboundMessage, runtime.maxHistory);
+    const classification = this.classifier.classify(inboundMessage.bodyText ?? '');
+    const deadline = createAutoReplyDeadline(runtime.totalTimeoutMs);
+    let generated: AutoReplyGeneratedReply | undefined;
+    try {
+      generated = normalizeGeneratedReply(await runtime.generator.generate({ adminId: input.adminId, context, classification: { ...classification, decision: 'replied' }, traceId, signal: deadline.signal, deadlineAt: deadline.deadlineAt }));
+    } finally {
+      deadline.dispose();
+    }
+    const text = (normalizeReply(generated?.text) ?? '').slice(0, runtime.maxReplyLength);
+    const suggestion: AutoReplySuggestion = generated?.decision === 'skip' || !text
+      ? { text: '', decision: 'skip', reason: generated?.reason ?? 'empty_reply', intent: classification.intent, inboundMessageId: inboundMessage.id }
+      : { text, segments: generated?.segments, decision: 'reply', intent: classification.intent, inboundMessageId: inboundMessage.id };
+    await this.audit({ actorId: input.adminId, action: 'auto_reply.suggested', targetRef: conversation.id, requestId: input.requestId ?? traceId, traceId, payload: { decision: suggestion.decision, intent: suggestion.intent, inboundMessageId: inboundMessage.id, textLength: suggestion.text.length }, accountId: conversation.accountId });
+    return suggestion;
   }
 
   private async isAgentTakeoverActive(adminId: string, conversationId: string): Promise<boolean> {

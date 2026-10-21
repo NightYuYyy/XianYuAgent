@@ -144,6 +144,18 @@ export class MessageService {
     return this.toConversationView(conversation);
   }
 
+  /** Operator takeover: 'human' makes the auto-reply agent hand off every inbound message of this conversation until it is given back to 'ai'. */
+  async setHandlingMode(adminId: string, conversationId: string, mode: ConversationRecord['handlingMode'], requestId: string, traceId: string): Promise<ConversationVM> {
+    if (mode !== 'ai' && mode !== 'human') throw new ServiceError(422, 'VALIDATION_FAILED', 'mode must be ai or human');
+    const existing = await this.store.getConversation(adminId, conversationId);
+    if (!existing) throw new ServiceError(404, 'NOT_FOUND', 'conversation not found');
+    if (existing.handlingMode === mode) return this.toConversationView(existing);
+    const conversation = await this.store.setConversationHandlingMode(adminId, conversationId, mode);
+    if (!conversation) throw new ServiceError(404, 'NOT_FOUND', 'conversation not found');
+    await this.audit({ actorId: adminId, action: 'conversation.handling_mode', targetRef: conversationId, requestId, traceId, payload: { from: existing.handlingMode, to: mode }, accountId: conversation.accountId });
+    return this.toConversationView(conversation);
+  }
+
   async listMessages(adminId: string, conversationId: string, query: MessageListQuery): Promise<{ items: MessageVM[]; nextCursor?: number; hasMore: boolean; latestCursor: number; hasMoreHistory: boolean; historyCursor?: string }> {
     await this.getConversation(adminId, conversationId);
     this.validateLimit(query.limit, 200);

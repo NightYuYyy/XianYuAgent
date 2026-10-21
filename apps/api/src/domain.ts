@@ -1626,6 +1626,7 @@ export interface Store {
   findConversationByExternalRef(adminId: string, accountId: string, externalConversationRef: string): Promise<ConversationRecord | undefined>;
   upsertExternalConversation(input: { adminId: string; accountId: string; externalConversationRef: string; buyerRef: string; buyerDisplayName?: string; buyerAvatarUrl?: string; itemRef?: string; itemTitle?: string; itemImageUrl?: string; unreadCount?: number; lastMessagePreview?: string; lastMessageAt?: string }): Promise<ConversationRecord>;
   setConversationSide(adminId: string, conversationId: string, side: ConversationSide): Promise<ConversationRecord | undefined>;
+  setConversationHandlingMode(adminId: string, conversationId: string, mode: ConversationHandlingMode): Promise<ConversationRecord | undefined>;
   listMessages(adminId: string, conversationId: string, query: MessageListQuery): Promise<MessageListResult>;
   listProductKnowledgeBaseMessages(adminId: string, productId: string): Promise<ProductKnowledgeBaseMessageRecord[]>;
   listAutoReplyMessages(adminId: string, conversationId: string, query: AutoReplyMessageListQuery): Promise<AutoReplyMessageListResult>;

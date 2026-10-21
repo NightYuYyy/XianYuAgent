@@ -3,7 +3,7 @@ import { useAccountContext } from '../../../app/account-context';
 import { createMessagesApi, type MessagesApi } from '../api';
 import { appendImageAttachments, clipboardImageFiles, type PendingImageAttachment } from '../attachments';
 import { canSubmitComposer, insertXianyuEmojiMarker, MESSAGES_COMPOSER_PLACEHOLDER, moveXianyuEmojiCursor, removeXianyuEmojiMarkerAtCursor } from '../composer';
-import { useMessagesController } from '../controller';
+import { normalizeError, useMessagesController } from '../controller';
 import { filterConversations } from '../model';
 import { emojiURL, renderXianyuTextWithCaret, xianyuEmojis } from '../xianyu-emojis';
 import { ConnectionBanner } from './ConnectionBanner';
@@ -27,6 +27,9 @@ export function MessagesPage({ api: providedApi, active = true }: { api?: Messag
   const [chatImagePreviewUrl, setChatImagePreviewUrl] = useState<string | null>(null);
   const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0 });
   const [composerFocused, setComposerFocused] = useState(false);
+  const [suggestPhase, setSuggestPhase] = useState<'idle' | 'loading' | 'skip' | 'error'>('idle');
+  const [suggestNote, setSuggestNote] = useState('');
+  const [modeBusy, setModeBusy] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const composerToolsRef = useRef<HTMLDivElement>(null);
@@ -34,6 +37,8 @@ export function MessagesPage({ api: providedApi, active = true }: { api?: Messag
   const activeConversation = controller.state.conversations.find((conversation) => conversation.conversationId === controller.state.activeConversationId);
   const visibleConversations = useMemo(() => filterConversations(controller.state.conversations, search, unreadOnly), [controller.state.conversations, search, unreadOnly]);
   const conversationsLoading = controller.state.listPhase === 'loading';
+  const handlingMode = activeConversation?.handlingMode ?? 'ai';
+  const buyerSideConversation = activeConversation?.side === 'buyer';
 
   useEffect(() => { pendingImagesRef.current = pendingImages; }, [pendingImages]);
 
@@ -57,6 +62,8 @@ export function MessagesPage({ api: providedApi, active = true }: { api?: Messag
     });
     setAttachmentPreviewUrl(null);
     setChatImagePreviewUrl(null);
+    setSuggestPhase('idle');
+    setSuggestNote('');
   }, [controller.state.activeConversationId, currentAccountId]);
 
   useEffect(() => {
@@ -128,6 +135,49 @@ export function MessagesPage({ api: providedApi, active = true }: { api?: Messag
     document.addEventListener('pointerdown', onPointerDown);
     return () => document.removeEventListener('pointerdown', onPointerDown);
   }, [emojiOpen]);
+
+  const handleToggleHandlingMode = async () => {
+    if (!activeConversation || modeBusy) return;
+    setModeBusy(true);
+    setSuggestNote('');
+    try {
+      await controller.setHandlingMode(activeConversation.handlingMode === 'human' ? 'ai' : 'human');
+    } catch (error) {
+      setSuggestPhase('error');
+      setSuggestNote(`切换失败：${normalizeError(error).message}`);
+    } finally {
+      setModeBusy(false);
+    }
+  };
+
+  const handleSuggestReply = async () => {
+    if (!activeConversation || suggestPhase === 'loading') return;
+    setSuggestPhase('loading');
+    setSuggestNote('');
+    try {
+      const suggestion = await controller.suggestReply();
+      if (!suggestion) { setSuggestPhase('idle'); return; }
+      if (suggestion.decision === 'skip' || !suggestion.text) {
+        setSuggestPhase('skip');
+        setSuggestNote(suggestion.reason ? `AI 认为这条暂时不用回（${suggestion.reason}）` : 'AI 认为这条暂时不用回');
+        return;
+      }
+      const text = suggestion.text;
+      setDraft(text);
+      setComposerSelection({ start: text.length, end: text.length });
+      setSuggestPhase('idle');
+      setSuggestNote('已填入 AI 草稿，改好后再发送');
+      setTimeout(() => {
+        const element = textareaRef.current;
+        if (!element) return;
+        element.focus();
+        element.setSelectionRange(text.length, text.length);
+      }, 0);
+    } catch (error) {
+      setSuggestPhase('error');
+      setSuggestNote(`AI 拟稿失败：${normalizeError(error).message}`);
+    }
+  };
 
   const handleComposerSubmit = async () => {
     if (controller.state.sendPhase === 'submitting') return;
@@ -207,7 +257,12 @@ export function MessagesPage({ api: providedApi, active = true }: { api?: Messag
                   <div ref={composerToolsRef} className="messages-composer-tools">
                     <button className="messages-tool-button" type="button" aria-label="添加图片附件" onClick={() => { setEmojiOpen(false); imageInputRef.current?.click(); }}>+</button>
                     <button className="messages-tool-button messages-emoji-button" type="button" aria-label="插入闲鱼表情" aria-expanded={emojiOpen} onClick={() => setEmojiOpen((open) => !open)}>☺</button>
-                    <span className="messages-ai-assist-label">AI 建议回复已开启</span>
+                    {activeConversation && <span className="messages-handling-group" data-handling-mode={handlingMode}>
+                      <span className={`messages-handling-chip ${buyerSideConversation ? 'buyer' : handlingMode}`} title={buyerSideConversation ? '这是你去咨询别人的商品，自动回复不会介入' : handlingMode === 'human' ? '已人工接管：买家消息只提醒你，AI 不会自动回复' : 'AI 正在自动回复这个会话；你手动发一条也会优先于 AI'}>{buyerSideConversation ? '我在买 · 不自动回复' : handlingMode === 'human' ? '已人工接管' : 'AI 自动回复中'}</span>
+                      {!buyerSideConversation && <button className="messages-handling-toggle" type="button" disabled={modeBusy} data-testid="handling-mode-toggle" onClick={() => void handleToggleHandlingMode()}>{modeBusy ? '切换中…' : handlingMode === 'human' ? '交还 AI' : '我来接管'}</button>}
+                      <button className="messages-suggest-button" type="button" disabled={suggestPhase === 'loading'} data-testid="suggest-reply" onClick={() => void handleSuggestReply()}>{suggestPhase === 'loading' ? 'AI 拟稿中…' : 'AI 帮我拟一条'}</button>
+                      {suggestNote && <span className={`messages-suggest-note ${suggestPhase}`} role={suggestPhase === 'error' ? 'alert' : 'status'}>{suggestNote}</span>}
+                    </span>}
                     <input ref={imageInputRef} className="messages-file-input" type="file" accept="image/*" multiple onChange={(event) => { addImageFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = ''; }} />
                     {emojiOpen && <div className="messages-emoji-picker" role="dialog" aria-label="闲鱼表情选择器">{xianyuEmojis.map(([name, url], index) => <button key={`${name}-${index}`} type="button" aria-label={`插入${name}`} title={name} onClick={() => insertEmoji(name)}><img src={emojiURL(url)} alt={name} /></button>)}</div>}
                   </div>

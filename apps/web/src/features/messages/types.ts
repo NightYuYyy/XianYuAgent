@@ -24,6 +24,15 @@ export interface ConversationVM {
   updatedAt: string;
 }
 
+export interface ReplySuggestionVM {
+  text: string;
+  segments?: string[];
+  decision: 'reply' | 'skip';
+  reason?: string;
+  intent: string;
+  inboundMessageId: string;
+}
+
 export interface MessageVM {
   messageId: string;
   conversationId: string;

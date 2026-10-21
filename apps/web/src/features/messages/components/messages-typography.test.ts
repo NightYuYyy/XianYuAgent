@@ -22,7 +22,8 @@ describe('messages typography hierarchy', () => {
   it('keeps composer controls and outbound links legible', () => {
     expect(messagesCss).toMatch(/\.messages-composer-assist-row\s*\{[\s\S]*?min-height:\s*36px;/);
     expect(messagesCss).toMatch(/\.messages-tool-button\s*\{[\s\S]*?width:\s*34px;[\s\S]*?height:\s*34px;[\s\S]*?font-size:\s*22px;/);
-    expect(messagesCss).toMatch(/\.messages-ai-assist-label\s*\{[\s\S]*?font-size:\s*12px;/);
+    expect(messagesCss).toMatch(/\.messages-handling-chip\s*\{[\s\S]*?font-size:\s*11px;/);
+    expect(messagesCss).toMatch(/\.messages-suggest-button\s*\{[\s\S]*?color:\s*#1D4ED8/);
     expect(messagesCss).toMatch(/\.messages-composer-shortcuts\s*\{[\s\S]*?font-size:\s*12px;/);
     expect(messagesCss).toMatch(/\.messages-bubble\.outbound \.messages-link\s*\{[\s\S]*?color:\s*#fff;/);
   });

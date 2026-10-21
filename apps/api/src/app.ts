@@ -33,7 +33,7 @@ import { OpenAICompatibleModelClient, PiModelClientError, PiRuntimeAdapter, type
 import { ModelClientService, type ModelClient, type ModelClientRuntimeSnapshot, type ModelProviderRole } from './model-client.js';
 import { ApiKeyCredentialService } from './credential-store.js';
 import { DashboardService, type DashboardRange } from './dashboard.js';
-import { AutoReplyService, TemplateAutoReplyGenerator, type AutoReplyAcknowledgementEvaluator } from './auto-reply.js';
+import { AutoReplyService, AutoReplySuggestError, TemplateAutoReplyGenerator, type AutoReplyAcknowledgementEvaluator } from './auto-reply.js';
 import { ReliableExternalAutoReplySender } from './auto-reply-outbox.js';
 import { AutoReplyAgentSettingsService, resolveAutoReplyAgentDefaults, secondsToMilliseconds } from './auto-reply-agent-settings.js';
 import { ToolCallingAutoReplyAgent } from './auto-reply-agent.js';
@@ -1091,6 +1091,26 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
     const local = await messages.getConversation(authContext.admin.id, conversationId);
     const result = await xianyuIm.markConversationRead(authContext.admin.id, local.accountId, conversationId, ctx.requestId, ctx.traceId);
     return { statusCode: 200, body: success(ctx, result).body };
+  }
+  const conversationHandlingModeMatch = ctx.path.match(/^\/api\/v1\/conversations\/([^/]+)\/handling-mode$/);
+  if (conversationHandlingModeMatch && ctx.method === 'POST') {
+    const conversationId = decodeURIComponent(conversationHandlingModeMatch[1]);
+    const mode = ctx.body?.mode;
+    if (mode !== 'ai' && mode !== 'human') throw new ServiceError(422, 'VALIDATION_FAILED', 'mode must be ai or human');
+    const result = await messages.setHandlingMode(authContext.admin.id, conversationId, mode, ctx.requestId, ctx.traceId);
+    return { statusCode: 200, body: success(ctx, result).body };
+  }
+  const conversationSuggestMatch = ctx.path.match(/^\/api\/v1\/conversations\/([^/]+)\/suggest-reply$/);
+  if (conversationSuggestMatch && ctx.method === 'POST') {
+    const conversationId = decodeURIComponent(conversationSuggestMatch[1]);
+    await messages.getConversation(authContext.admin.id, conversationId);
+    try {
+      const suggestion = await runtime.autoReply.suggestReply({ adminId: authContext.admin.id, conversationId, requestId: ctx.requestId, traceId: ctx.traceId });
+      return { statusCode: 200, body: success(ctx, suggestion).body };
+    } catch (error) {
+      if (error instanceof AutoReplySuggestError) throw new ServiceError(error.code === 'CONVERSATION_NOT_FOUND' ? 404 : 422, error.code, error.message);
+      throw error;
+    }
   }
   const conversationMessagesMatch = ctx.path.match(/^\/api\/v1\/conversations\/([^/]+)\/messages$/);
   if (conversationMessagesMatch && ctx.method === 'GET') {

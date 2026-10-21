@@ -1293,6 +1293,16 @@ export class MemoryStore implements Store {
     current.side = side;
     return { ...current };
   }
+  async setConversationHandlingMode(adminId: string, conversationId: string, mode: ConversationRecord['handlingMode']): Promise<ConversationRecord | undefined> {
+    const existing = await this.getConversation(adminId, conversationId);
+    if (!existing) return undefined;
+    const current = this.conversations.get(existing.id);
+    if (!current) return undefined;
+    current.handlingMode = mode;
+    current.version += 1;
+    current.updatedAt = new Date().toISOString();
+    return { ...current };
+  }
   async createConversation(input: { adminId: string; accountId: string; buyerRef: string; buyerDisplayName?: string; buyerAvatarUrl?: string; itemRef?: string; itemTitle?: string; itemImageUrl?: string; externalConversationRef?: string }): Promise<ConversationRecord> {
     if (!(await this.hasAccountScope(input.adminId, input.accountId))) throw new Error('ACCOUNT_SCOPE_FORBIDDEN');
     const now = new Date().toISOString();

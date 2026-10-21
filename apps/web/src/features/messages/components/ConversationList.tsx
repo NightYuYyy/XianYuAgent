@@ -44,7 +44,7 @@ export function ConversationList({ conversations, activeConversationId, onSelect
       {conversations.map((conversation) => <button key={conversation.conversationId} type="button" data-conversation-id={conversation.conversationId} className={conversation.conversationId === activeConversationId ? 'active' : ''} onClick={() => onSelect(conversation.conversationId)}>
         <ConversationAvatar conversation={conversation} />
         <span className="messages-conversation-copy">
-          <strong>{conversationDisplayName(conversation)}{conversation.side === 'buyer' && <i className="messages-conversation-side" title="这是你去咨询别人的商品，自动回复不会介入">我在买</i>}</strong>
+          <strong>{conversationDisplayName(conversation)}{conversation.side === 'buyer' && <i className="messages-conversation-side" title="这是你去咨询别人的商品，自动回复不会介入">我在买</i>}{conversation.handlingMode === 'human' && conversation.side !== 'buyer' && <i className="messages-conversation-mode" title="已人工接管，自动回复不会介入">人工</i>}</strong>
           <small>{conversation.lastMessagePreview || '暂无消息'}</small>
           <em>{conversation.itemTitle || '未关联商品'}</em>
         </span>

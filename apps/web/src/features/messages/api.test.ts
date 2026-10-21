@@ -95,3 +95,28 @@ describe('messages API media contract', () => {
     expect(new Headers(capturedHeaders).has('Content-Type')).toBe(false);
   });
 });
+
+describe('messages API handling mode and reply suggestion', () => {
+  it('posts the handling mode switch and returns the refreshed conversation', async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const api = createMessagesApi({
+      get: async <T>() => ({}) as T,
+      post: async <T>(path: string, body?: unknown) => { calls.push({ path, body }); return { data: { conversationId: 'c 1', handlingMode: 'human', version: 3 } } as unknown as T; },
+    });
+    const conversation = await api.setHandlingMode!({ accountId: 'a-1', conversationId: 'c 1', mode: 'human' });
+    expect(calls).toEqual([{ path: '/api/v1/conversations/c%201/handling-mode', body: { mode: 'human' } }]);
+    expect(conversation.handlingMode).toBe('human');
+  });
+
+  it('requests a reply suggestion without sending anything', async () => {
+    const calls: string[] = [];
+    const api = createMessagesApi({
+      get: async <T>() => ({}) as T,
+      post: async <T>(path: string) => { calls.push(path); return { data: { text: '在的，今天就能发', decision: 'reply', intent: 'delivery', inboundMessageId: 'm-1' } } as unknown as T; },
+    });
+    const suggestion = await api.suggestReply!({ accountId: 'a-1', conversationId: 'c-1' });
+    expect(calls).toEqual(['/api/v1/conversations/c-1/suggest-reply']);
+    expect(suggestion.text).toBe('在的，今天就能发');
+    await expect(createMessagesApi({ get: async <T>() => ({}) as T }).suggestReply!({ accountId: 'a-1', conversationId: 'c-1' })).rejects.toThrow('messages suggest api unavailable');
+  });
+});

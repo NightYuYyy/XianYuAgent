@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createMessagesApi, type MessagesApi } from './api';
 import { applyRealtimeEvent, markConversationRead, mergeConversation, mergeTimelineMessages, reconcileConversations } from './model';
-import type { MessagesError, MessagesState, RealtimeEvent, RealtimePhase } from './types';
+import type { MessagesError, MessagesState, RealtimeEvent, RealtimePhase, ReplySuggestionVM } from './types';
 
 const defaultApi = createMessagesApi({ get: async () => { throw new Error('messages api unavailable'); } });
 export const MESSAGE_SEND_TIMEOUT_MS = 40_000;
@@ -35,7 +35,7 @@ export function normalizeError(error: unknown): MessagesError {
   return { code: 'UNKNOWN', message: error instanceof Error ? error.message : '消息加载失败，请重试。', retryable: true };
 }
 
-export interface MessagesController { state: MessagesState; setActiveConversation: (conversationId?: string) => void; reload: (options?: { preserveData?: boolean; refreshExternal?: boolean }) => Promise<void>; loadMoreConversations: () => Promise<void>; loadMoreMessages: () => Promise<void>; retryRealtime: () => void; sendMessage: (text: string) => Promise<void>; sendImage: (file: File) => Promise<void>; }
+export interface MessagesController { state: MessagesState; setActiveConversation: (conversationId?: string) => void; reload: (options?: { preserveData?: boolean; refreshExternal?: boolean }) => Promise<void>; loadMoreConversations: () => Promise<void>; loadMoreMessages: () => Promise<void>; retryRealtime: () => void; sendMessage: (text: string) => Promise<void>; sendImage: (file: File) => Promise<void>; setHandlingMode: (mode: 'ai' | 'human') => Promise<void>; suggestReply: () => Promise<ReplySuggestionVM | undefined>; }
 
 /**
  * A socket can emit `close` after a replacement socket has already opened.
@@ -361,7 +361,20 @@ export function useMessagesController(options: { api?: MessagesApi; accountId?: 
     }
   }, [accountId, api, state.activeConversationId]);
 
-  return { state, setActiveConversation, reload, loadMoreConversations, loadMoreMessages, retryRealtime, sendMessage, sendImage };
+  const setHandlingMode = useCallback(async (mode: 'ai' | 'human') => {
+    const conversationId = state.activeConversationId;
+    if (!accountId || !conversationId || !api.setHandlingMode) return;
+    const conversation = await api.setHandlingMode({ accountId, conversationId, mode });
+    setState((previous) => ({ ...previous, conversations: mergeConversation(previous.conversations, conversation) }));
+  }, [accountId, api, state.activeConversationId]);
+
+  const suggestReply = useCallback(async () => {
+    const conversationId = state.activeConversationId;
+    if (!accountId || !conversationId || !api.suggestReply) return undefined;
+    return api.suggestReply({ accountId, conversationId });
+  }, [accountId, api, state.activeConversationId]);
+
+  return { state, setActiveConversation, reload, loadMoreConversations, loadMoreMessages, retryRealtime, sendMessage, sendImage, setHandlingMode, suggestReply };
 }
 
 export { createMessagesApi };
