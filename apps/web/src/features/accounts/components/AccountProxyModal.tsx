@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { InputField } from '../../../shared/ui/InputField';
 import type { AccountVM } from '../types';
 
 const PROXY_PATTERN = /^https?:\/\/(?:[^@/\s]+@)?[^/\s:]+(?::\d{1,5})?\/?$/i;
@@ -25,23 +26,21 @@ export function AccountProxyModal({ account, submitting = false, onClose, onSave
         <button className="icon-button" type="button" aria-label="关闭代理设置弹窗" onClick={onClose} disabled={submitting}>×</button>
       </header>
       <form className="account-proxy-body" onSubmit={(event) => { event.preventDefault(); if (valid) onSave(trimmed || null); }}>
-        <label className="field">
-          <span>代理地址</span>
-          <input
-            type="text"
-            inputMode="url"
-            autoComplete="off"
-            spellCheck={false}
-            placeholder="http://user:pass@host:port"
-            value={value}
-            onChange={(event) => setValue(event.target.value)}
-            disabled={submitting}
-            data-testid="account-proxy-input"
-            aria-invalid={!valid}
-          />
-        </label>
-        <p className="account-proxy-hint">仅支持 HTTP / HTTPS 代理，可带用户名密码。留空则使用服务端默认代理，未配置默认代理时直连。建议每个账号使用独立的国内住宅 IP。</p>
-        {!valid && <p className="qr-login-error" role="alert">地址格式不正确，示例：http://user:pass@1.2.3.4:3128</p>}
+        <InputField
+          label="代理地址"
+          type="text"
+          inputMode="url"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="http://user:pass@host:port"
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          disabled={submitting}
+          data-testid="account-proxy-input"
+          aria-invalid={!valid}
+          hint="仅支持 HTTP / HTTPS 代理，可带用户名密码。留空则使用服务端默认代理，未配置默认代理时直连。建议每个账号使用独立的国内住宅 IP。"
+          error={valid ? undefined : '地址格式不正确，示例：http://user:pass@1.2.3.4:3128'}
+        />
         <div className="modal-actions">
           <button className="btn ghost" type="button" data-testid="account-proxy-cancel" onClick={onClose} disabled={submitting}>取消</button>
           {account.proxyUrl && <button className="btn ghost" type="button" data-testid="account-proxy-clear" onClick={() => onSave(null)} disabled={submitting}>清除代理</button>}
