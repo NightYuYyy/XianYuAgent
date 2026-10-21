@@ -1354,6 +1354,12 @@ test('workspace model messages follow the language of the current user instructi
   assert.equal(detectWorkspaceResponseLanguage('请查看商品状态'), 'zh-CN');
   assert.equal(detectWorkspaceResponseLanguage('Check the product status'), 'zh-CN');
 
+  const scoped = buildWorkspaceModelMessages([], '你能做什么');
+  const scopedSystem = scoped.find((message) => message.role === 'system');
+  assert.ok(scopedSystem && typeof scopedSystem.content === 'string');
+  assert.match(String(scopedSystem.content), /闲鱼店铺的 Workspace Agent/u, 'the agent is scoped to the shop');
+  assert.match(String(scopedSystem.content), /不能编写或修改代码/u, 'the prompt forbids claiming coding abilities');
+  assert.match(String(scopedSystem.content), /只根据当前可用工具/u, 'capability answers must come from the tool list');
   const chineseMessages = buildWorkspaceModelMessages([{ role: 'assistant', content: 'previous English history' }], '请用中文总结商品状态');
   const chineseSystem = chineseMessages.find((message) => message.role === 'system');
   assert.match(String(chineseSystem?.content), /简体中文/);
