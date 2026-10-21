@@ -474,7 +474,6 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
     productKnowledgeBase,
     productAutomation,
     productPublisher,
-    productListing,
     objectStorage,
     coupons,
     orders,
