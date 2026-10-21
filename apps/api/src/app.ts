@@ -56,6 +56,7 @@ import { extractTrustedOrderNo, isTrustedPaidEvent, trustedPaymentOccurredAt } f
 export interface AppRuntime {
   config: AppConfig;
   store: Store;
+  accountProxy: AccountProxyResolver;
   auth: AuthService;
   accounts: AccountService;
   coupons: CouponService;
@@ -497,6 +498,7 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
 
   const server = createServer((request, response) => { void handleRequest(runtime, request, response); });
   const runtime: AppRuntime = {
+    accountProxy,
     config, store, auth, accounts, coupons, orders, orderDelivery, products, productPublisher, productKnowledgeBase, productAutomation, productAutomationTrigger, productAutomationWorker, paymentEventWorker, productSync, credentials, apiKeyCredentials, openaiSettings, modelProviderRuntime, dashboard, messages, autoReply, autoReplyRepair, autoReplyAgentSettings, autoReplyActivity, redisRealtime, workspace, piSkills, workspaceCommands, workspaceRuntime, qrLogin, xianyu, xianyuItemDetail, objectStorage, xianyuIm,
     server,
     async listen() {
@@ -1292,7 +1294,7 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
   if (accountMatch) {
     const accountId = decodeURIComponent(accountMatch[1]);
     if (!accountMatch[2] && ctx.method === 'GET') return { statusCode: 200, body: success(ctx, await accounts.get(authContext.admin.id, accountId)).body };
-     if (!accountMatch[2] && ctx.method === 'PATCH') return mutation(runtime, ctx, authContext, accountId, async () => success(ctx, await accounts.update({ adminId: authContext.admin.id, accountId, patch: { sellerRef: optionalString(ctx.body.sellerRef), displayName: optionalString(ctx.body.displayName), remark: optionalString(ctx.body.remark), avatarUrl: optionalString(ctx.body.avatarUrl), platformUserId: optionalString(ctx.body.platformUserId), proxyUrl: parseProxyUrlPatch(ctx.body.proxyUrl), status: typeof ctx.body.status === 'string' ? ctx.body.status as never : undefined }, requestId: ctx.requestId, traceId: ctx.traceId }).then((updated) => { accountProxy.invalidate(accountId); return updated; })));
+     if (!accountMatch[2] && ctx.method === 'PATCH') return mutation(runtime, ctx, authContext, accountId, async () => success(ctx, await accounts.update({ adminId: authContext.admin.id, accountId, patch: { sellerRef: optionalString(ctx.body.sellerRef), displayName: optionalString(ctx.body.displayName), remark: optionalString(ctx.body.remark), avatarUrl: optionalString(ctx.body.avatarUrl), platformUserId: optionalString(ctx.body.platformUserId), proxyUrl: parseProxyUrlPatch(ctx.body.proxyUrl), status: typeof ctx.body.status === 'string' ? ctx.body.status as never : undefined }, requestId: ctx.requestId, traceId: ctx.traceId }).then((updated) => { runtime.accountProxy.invalidate(accountId); return updated; })));
      if (!accountMatch[2] && ctx.method === 'DELETE') return mutation(runtime, ctx, authContext, accountId, async () => success(ctx, { account: await accounts.delete({ adminId: authContext.admin.id, accountId, requestId: ctx.requestId, traceId: ctx.traceId }), deleted: true }));
     if (accountMatch[2] === 'connection' && ctx.method === 'GET') {
       const account = await accounts.get(authContext.admin.id, accountId);
