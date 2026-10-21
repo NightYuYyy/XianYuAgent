@@ -17,6 +17,7 @@ import { configureNotifier, createNotifierFromEnv, getNotifier, notify, NOTIFICA
 import { AccountProxyResolver, effectiveProxyUrl, normalizeProxyUrl } from './xianyu-proxy.js';
 import { ProductPolishService } from './product-polish.js';
 import { createOrderRefundHandlerFromEnv } from './order-refund.js';
+import { ProductListingService } from './product-listing.js';
 import { KeywordFirstAutoReplyGenerator, type KeywordRulesLoader } from './auto-reply-keyword.js';
 import { XianyuMtopClient } from './xianyu-mtop.js';
 import { metadataWithCookieSnapshot } from './xianyu-cookie-jar.js';
@@ -68,6 +69,7 @@ export interface AppRuntime {
   orderDelivery: OrderDeliveryService;
   products: ProductService;
   productPublisher: ProductPublishService;
+  productListing: ProductListingService;
   productKnowledgeBase: ProductKnowledgeBaseService;
   productAutomation: ProductAutomationService;
   productAutomationTrigger: ProductAutomationTrigger;
@@ -411,6 +413,7 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
     return auditId;
   };
   const productPublisher = new ProductPublishService(xianyu, products, resolveAccountModelClient, productAudit);
+  const productListing = new ProductListingService(store, xianyu, productAudit);
   const productKnowledgeBase = new ProductKnowledgeBaseService(store, products, resolveAccountModelClient, productAudit);
   const xianyuItemDetail = new XianyuItemDetailService(store, xianyu, objectStorage, async (input) => {
     const auditId = createId();
@@ -471,6 +474,7 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
     productKnowledgeBase,
     productAutomation,
     productPublisher,
+    productListing,
     objectStorage,
     coupons,
     orders,
@@ -515,7 +519,7 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
       intervalMs: positiveEnvNumber(process.env.PRODUCT_POLISH_INTERVAL_HOURS, 24) * 3_600_000,
       maxItemsPerRun: positiveEnvNumber(process.env.PRODUCT_POLISH_MAX_ITEMS_PER_RUN, 200),
     }),
-    config, store, auth, accounts, coupons, orders, orderDelivery, products, productPublisher, productKnowledgeBase, productAutomation, productAutomationTrigger, productAutomationWorker, paymentEventWorker, productSync, credentials, apiKeyCredentials, openaiSettings, modelProviderRuntime, dashboard, messages, autoReply, autoReplyRepair, autoReplyAgentSettings, autoReplyActivity, redisRealtime, workspace, piSkills, workspaceCommands, workspaceRuntime, qrLogin, xianyu, xianyuItemDetail, objectStorage, xianyuIm,
+    config, store, auth, accounts, coupons, orders, orderDelivery, products, productPublisher, productListing, productKnowledgeBase, productAutomation, productAutomationTrigger, productAutomationWorker, paymentEventWorker, productSync, credentials, apiKeyCredentials, openaiSettings, modelProviderRuntime, dashboard, messages, autoReply, autoReplyRepair, autoReplyAgentSettings, autoReplyActivity, redisRealtime, workspace, piSkills, workspaceCommands, workspaceRuntime, qrLogin, xianyu, xianyuItemDetail, objectStorage, xianyuIm,
     server,
     async listen() {
       await new Promise<void>((resolve) => runtime.server.listen(config.port, config.host, resolve));
@@ -1648,6 +1652,18 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
         ? await runtime.productKnowledgeBase.optimize(input)
         : await runtime.productKnowledgeBase.appendFromConversations(input);
       return success(ctx, { ...result, product: toProductView(result.product) });
+    });
+  }
+  const productBatchListingMatch = ctx.path.match(/^\/api\/v1\/products\/batch\/(offline|delete)$/);
+  if (productBatchListingMatch && ctx.method === 'POST') {
+    const action = productBatchListingMatch[1] as 'offline' | 'delete';
+    const accountId = optionalString(ctx.body.accountId);
+    return mutation(runtime, ctx, authContext, accountId, async () => {
+      if (!accountId) throw new ServiceError(422, 'VALIDATION_FAILED', 'accountId is required');
+      const productIds = Array.isArray(ctx.body.productIds) ? ctx.body.productIds.map((value) => String(value ?? '')) : [];
+      const input = { adminId: authContext.admin.id, accountId, productIds, requestId: ctx.requestId, traceId: ctx.traceId };
+      const result = action === 'offline' ? await runtime.productListing.offline(input) : await runtime.productListing.delete(input);
+      return success(ctx, { ...result, products: result.products.map(toProductView) });
     });
   }
   const productMatch = ctx.path.match(/^\/api\/v1\/products\/([^/]+)$/);

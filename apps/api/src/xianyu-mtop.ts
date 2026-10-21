@@ -27,6 +27,9 @@ const SELLER_ORDER_MANAGE_REFERER = SOLD_ORDERS_REFERER;
 const CONSIGN_API = 'mtop.taobao.idle.logistic.consign.dummy';
 const ADJUST_PRICE_API = 'mtop.taobao.idle.trade.user.adjust.price';
 const CLOSE_BY_SELLER_API = 'mtop.taobao.idle.trade.merchant.close.by.seller';
+const ITEM_BATCH_OFFLINE_API = 'mtop.alibaba.idle.seller.pc.item.batch.offline';
+const ITEM_DELETE_API = 'mtop.alibaba.idle.seller.pc.item.delete';
+const SELLER_ITEM_MANAGE_REFERER = 'https://www.goofish.com/personal?spm=a21ybx.home.sidebar.1';
 /** Preset wording on the seller workbench; the platform rejects free-form reasons. */
 export const CLOSE_BY_SELLER_REASON = '其他原因';
 const ORDER_DETAIL_API = 'mtop.idle.web.trade.order.detail';
@@ -56,6 +59,8 @@ export type XianyuExternalMutationStatus = 'succeeded' | 'failed' | 'unknown';
 export interface XianyuExternalMutationResult {
   status: XianyuExternalMutationStatus;
   externalRef?: string;
+  /** Per-item outcome for batch mutations (item.batch.offline). */
+  items?: Array<{ itemId: string; success: boolean }>;
   errorCode?: string;
   message?: string;
   response?: Record<string, unknown>;
@@ -408,6 +413,29 @@ export class XianyuMtopClient {
    * Close an order from the seller side (seller workbench "关闭订单"). For a paid
    * order this refunds the buyer; use it when delivery must not happen.
    */
+  /** 批量下架在售商品（闲鱼卖家工作台 mtop.alibaba.idle.seller.pc.item.batch.offline，itemIds 为逗号拼接）。 */
+  async offlineItems(adminId: string, accountId: string, itemIds: string[]): Promise<XianyuExternalMutationResult> {
+    const ids = [...new Set(itemIds.map((id) => String(id ?? '').trim()).filter(Boolean))];
+    if (ids.length === 0) return { status: 'failed', errorCode: 'ITEM_ID_MISSING', message: 'itemIds is required', cookieHeader: '' };
+    const result = await this.call(adminId, accountId, ITEM_BATCH_OFFLINE_API, '1.0', { itemIds: ids.join(',') }, { spm_cnt: 'a21ybx.item.0.0' }, { referer: SELLER_ITEM_MANAGE_REFERER });
+    const classified = classifyMutationResult(result, ids.join(','));
+    const inner = record(record(result.response?.data).data);
+    const rawResults = Array.isArray(inner.results) ? inner.results : [];
+    const items = rawResults
+      .map((entry) => record(entry))
+      .map((entry) => ({ itemId: String(entry.itemId ?? entry.itemID ?? ''), success: entry.success === true || String(entry.success).toLowerCase() === 'true' }))
+      .filter((entry) => entry.itemId);
+    return { ...classified, items: items.length > 0 ? items : ids.map((itemId) => ({ itemId, success: classified.status === 'succeeded' })) };
+  }
+
+  /** 删除商品（mtop.alibaba.idle.seller.pc.item.delete）。 */
+  async deleteItem(adminId: string, accountId: string, itemId: string): Promise<XianyuExternalMutationResult> {
+    const normalized = String(itemId ?? '').trim();
+    if (!normalized) return { status: 'failed', errorCode: 'ITEM_ID_MISSING', message: 'itemId is required', cookieHeader: '' };
+    const result = await this.call(adminId, accountId, ITEM_DELETE_API, '1.0', { itemId: normalized, draftId: null }, { spm_cnt: 'a21ybx.item.0.0' }, { referer: SELLER_ITEM_MANAGE_REFERER });
+    return classifyMutationResult(result, normalized);
+  }
+
   async closeOrderBySeller(adminId: string, accountId: string, orderNo: string): Promise<XianyuExternalMutationResult> {
     const normalizedOrderNo = String(orderNo ?? '').trim();
     if (!normalizedOrderNo) return { status: 'failed', errorCode: 'ORDER_NO_MISSING', message: 'orderNo is required', cookieHeader: '' };

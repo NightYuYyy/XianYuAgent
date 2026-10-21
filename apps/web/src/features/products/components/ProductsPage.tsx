@@ -71,6 +71,17 @@ export function ProductsPage({ api: providedApi, automationApi: providedAutomati
 
   const products = controller.state.data?.items ?? [];
   const pageData = controller.state.data;
+  async function runBatchListing(action: 'offline' | 'delete') {
+    if (!currentAccountId || selectedProductIds.length === 0) return;
+    const verb = action === 'offline' ? '下架' : '删除';
+    const confirmed = window.confirm(`确定要在闲鱼${verb}所选的 ${selectedProductIds.length} 个商品吗？${action === 'delete' ? '删除后无法恢复。' : ''}`);
+    if (!confirmed) return;
+    const result = await controller.batchListing(action, { accountId: currentAccountId, productIds: selectedProductIds });
+    if (!result) return;
+    setSelectedProductIds([]);
+    const failures = result.items.filter((item) => item.status !== 'succeeded');
+    setSyncToast(failures.length === 0 ? `已${verb} ${result.succeeded} 个商品` : `${verb}完成：成功 ${result.succeeded} 个，失败 ${failures.length} 个（${failures.slice(0, 3).map((item) => `${item.title || item.productId}：${item.message || item.errorCode || '未知原因'}`).join('；')}）`);
+  }
   const contextMissing = !accountsLoading && !accountsError && !currentAccountId;
 
   useEffect(() => {
@@ -138,7 +149,7 @@ export function ProductsPage({ api: providedApi, automationApi: providedAutomati
   return (
     <section className="page-stack products-domain" data-products-domain>
       <article className="card panel products-panel">
-        <ProductToolbar currentAccount={currentAccount} contextLoading={accountsLoading} contextError={accountsError} contextMissing={contextMissing} filters={controller.filters} phase={controller.state.phase} syncing={controller.mutation.phase === 'saving'} selectedCount={selectedProductIds.length} onKeywordChange={controller.setKeyword} onStatusChange={(status) => controller.setFilters((previous) => ({ ...previous, status, page: 1 }))} onRefresh={controller.reload} onSync={() => { if (currentAccountId) void controller.syncFromXianyu(currentAccountId); }} onCreate={() => { if (!currentAccountId) return; openProductEditor({ mode: 'create' }); }} onChooseAccount={() => { window.history.pushState({}, '', buildAccountsReauthorizePath()); window.dispatchEvent(new PopStateEvent('popstate')); }} onBatchConfigure={openBatchAutomation} />
+        <ProductToolbar currentAccount={currentAccount} contextLoading={accountsLoading} contextError={accountsError} contextMissing={contextMissing} filters={controller.filters} phase={controller.state.phase} syncing={controller.mutation.phase === 'saving'} selectedCount={selectedProductIds.length} onKeywordChange={controller.setKeyword} onStatusChange={(status) => controller.setFilters((previous) => ({ ...previous, status, page: 1 }))} onRefresh={controller.reload} onSync={() => { if (currentAccountId) void controller.syncFromXianyu(currentAccountId); }} onCreate={() => { if (!currentAccountId) return; openProductEditor({ mode: 'create' }); }} onChooseAccount={() => { window.history.pushState({}, '', buildAccountsReauthorizePath()); window.dispatchEvent(new PopStateEvent('popstate')); }} onBatchConfigure={openBatchAutomation} onBatchOffline={() => void runBatchListing('offline')} onBatchDelete={() => void runBatchListing('delete')} />
         {controller.mutation.error && <div className="products-inline-error" role="alert">{controller.mutation.error.message}</div>}
         {controller.state.phase === 'success' && pageData && <ProductTable products={products} page={pageData.page} totalPages={pageData.totalPages} total={pageData.total} sortBy={controller.filters.sortBy ?? 'xianyuOrder'} sortOrder={controller.filters.sortOrder ?? 'asc'} onSortChange={(sortBy, sortOrder) => controller.setFilters((previous) => ({ ...previous, sortBy, sortOrder, page: 1 }))} onPageChange={(page) => controller.setFilters((previous) => ({ ...previous, page }))} onOpen={openProduct} onOpenXianyuDetail={openXianyuDetail} onOpenKnowledgeBase={openKnowledgeBase} selectedIds={selectedProductIds} onToggleSelected={(productId) => setSelectedProductIds((previous) => previous.includes(productId) ? previous.filter((id) => id !== productId) : [...previous, productId])} onToggleAll={(checked) => setSelectedProductIds(checked ? products.map((product) => product.id) : [])} onOpenAutomation={(productId) => { setAutomationNotice(null); openAutomation(productId); }} automationSummary={(product) => automationSummaries[product.id] ?? { label: '读取中...', detail: '正在读取规则', tone: 'muted' }} />}
         <ProductListStateView phase={controller.state.phase} error={controller.state.error} onRetry={controller.reload} accountSelectionRequired={contextMissing} />

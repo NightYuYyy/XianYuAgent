@@ -21,6 +21,14 @@ export interface ProductsApi {
   previewProduct(input: ProductPublishPreviewRequest, options?: { idempotencyKey?: string }): Promise<ProductPublishPreviewVM>;
   optimizeDescription(input: { accountId: string; title: string; description: string }, options?: { idempotencyKey?: string }): Promise<{ description: string; provider: string; model: string }>;
   syncFromXianyu(accountId: string, options?: { pageSize?: number; maxPages?: number; idempotencyKey?: string }): Promise<ProductSyncResultVM>;
+  batchListing(action: 'offline' | 'delete', input: { accountId: string; productIds: string[] }, options?: { idempotencyKey?: string }): Promise<ProductListingResultVM>;
+}
+
+export interface ProductListingResultVM {
+  action: 'offline' | 'delete';
+  succeeded: number;
+  failed: number;
+  items: Array<{ productId: string; externalProductRef?: string; title: string; status: 'succeeded' | 'failed' | 'unknown'; errorCode?: string; message?: string }>;
 }
 
 export interface ProductKnowledgeBaseActionVM {
@@ -503,6 +511,12 @@ export function createProductsApi(transport: ProductsApiTransport): ProductsApi 
       const payload = await post<{ description: string; provider: string; model: string } | ApiEnvelope<{ description: string; provider: string; model: string }>>('/api/v1/products/publish/optimize-description', input, { headers: { 'Idempotency-Key': options.idempotencyKey ?? idempotencyKey('product-copy') } });
       return unwrapEnvelope(payload);
     },
+    async batchListing(action, input, options = {}) {
+      const post = requireTransportMethod(transport, 'post');
+      const payload = await post<ProductListingResultVM | ApiEnvelope<ProductListingResultVM>>(`/api/v1/products/batch/${action}`, { accountId: input.accountId, productIds: input.productIds }, { headers: { 'Idempotency-Key': options.idempotencyKey ?? idempotencyKey(`product-${action}`) } });
+      const result = unwrapEnvelope(payload);
+      return { action: result.action, succeeded: result.succeeded, failed: result.failed, items: result.items ?? [] };
+    },
     async syncFromXianyu(accountId, options = {}) {
       const post = requireTransportMethod(transport, 'post');
       const payload = await post<{ syncRunId: string; accountId: string; fetchedCount: number; createdCount: number; updatedCount: number; skippedLocalDraftCount: number; hasMore: boolean; nextPageNumber?: number; items: ProductPayload[] } | ApiEnvelope<{ syncRunId: string; accountId: string; fetchedCount: number; createdCount: number; updatedCount: number; skippedLocalDraftCount: number; hasMore: boolean; nextPageNumber?: number; items: ProductPayload[] }>>('/api/v1/products/sync', {
@@ -667,6 +681,9 @@ export function createMockProductsApi(seed: ProductVM[] = [
     },
     async optimizeDescription(input) {
       return { description: input.description.trim() ? `${input.description.trim()}\n\n成色与发货信息已保留，请以实物为准。` : '请补充商品卖点、成色、适用场景和发货说明。', provider: 'mock', model: 'mock' };
+    },
+    async batchListing(action, input) {
+      return { action, succeeded: input.productIds.length, failed: 0, items: input.productIds.map((productId) => ({ productId, title: productId, status: 'succeeded' as const })) };
     },
     async syncFromXianyu(accountId) {
       const items = seed.filter((item) => item.accountId === accountId);
