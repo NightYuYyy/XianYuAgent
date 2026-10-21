@@ -14,7 +14,7 @@ async function setup(sellerRef = 'me-123') {
 
 test('resolver treats a locally known listing as the seller side without calling the detail API', async () => {
   const { store, admin, account } = await setup();
-  await store.createProduct({ adminId: admin.id, accountId: account.id, externalProductRef: 'item-mine', title: '我的商品', priceMinor: 100, requestId: 'r', traceId: 't' });
+  await store.createProduct({ adminId: admin.id, accountId: account.id, externalProductRef: 'item-mine', title: '我的商品', priceMinor: 100 });
   let detailCalls = 0;
   const resolver = new ConversationSideResolver(store, { fetchItemDetail: async () => { detailCalls += 1; return { success: true, summary: { sellerId: 'someone-else' } }; } });
   assert.equal(await resolver.resolve({ adminId: admin.id, accountId: account.id, itemRef: 'item-mine' }), 'seller');

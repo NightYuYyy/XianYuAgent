@@ -188,6 +188,7 @@ test('buyer manually typing the exact status text stays text and can enter auto 
   const store = new MemoryStore();
   const admin = await store.createAdmin({ email: 'manual-status@example.com', passwordHash: 'hash', displayName: 'Manual Status' });
   const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'seller-manual-status' });
+  await store.createProduct({ adminId: admin.id, accountId: account.id, externalProductRef: 'item-manual-status', title: '测试商品 item-manual-status' });
   const messages = new MessageService(store, async () => 'audit-manual-status');
   const autoReplyCalls: string[] = [];
   const autoReply = { processInbound: async () => { autoReplyCalls.push('called'); return undefined; } };
@@ -195,7 +196,7 @@ test('buyer manually typing the exact status text stays text and can enter auto 
 
   const result = await service.handleExternalEvent(admin.id, {
     accountId: account.id,
-    externalConversationRef: 'conv-manual-status',
+    externalConversationRef: 'conv-manual-status', itemRef: 'item-manual-status',
     externalMessageRef: 'manual-status-1.PNM',
     senderRef: 'buyer-manual-status',
     direction: 'inbound',
@@ -246,6 +247,7 @@ test('generic platform reminder is isolated while a normal buyer message enters 
   const store = new MemoryStore();
   const admin = await store.createAdmin({ email: 'generic-system@example.com', passwordHash: 'hash', displayName: 'Generic System' });
   const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'seller-generic-system' });
+  await store.createProduct({ adminId: admin.id, accountId: account.id, externalProductRef: 'item-generic-system', title: '测试商品 item-generic-system' });
   const messages = new MessageService(store, async () => 'audit-generic-system');
   const autoReplyCalls: string[] = [];
   const autoReply = { processInbound: async () => { autoReplyCalls.push('called'); return undefined; } };
@@ -254,7 +256,7 @@ test('generic platform reminder is isolated while a normal buyer message enters 
 
   const systemResult = await service.handleExternalEvent(admin.id, {
     accountId: account.id,
-    externalConversationRef: 'generic-system-conversation',
+    externalConversationRef: 'generic-system-conversation', itemRef: 'item-generic-system',
     externalMessageRef: 'generic-system-message.PNM',
     senderRef: 'generic-system-buyer',
     direction: 'inbound',
@@ -273,7 +275,7 @@ test('generic platform reminder is isolated while a normal buyer message enters 
 
   const buyerResult = await service.handleExternalEvent(admin.id, {
     accountId: account.id,
-    externalConversationRef: 'generic-system-conversation',
+    externalConversationRef: 'generic-system-conversation', itemRef: 'item-generic-system',
     externalMessageRef: 'generic-buyer-message.PNM',
     senderRef: 'generic-system-buyer',
     direction: 'inbound',
@@ -329,6 +331,7 @@ test('inbox processing forwards persisted source ordering to AutoReplyService', 
   const admin = await store.createAdmin({ email: 'source-forward@example.com', passwordHash: 'hash', displayName: 'Source Forward' });
   const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'seller-source-forward' });
   const conversation = await store.createConversation({ adminId: admin.id, accountId: account.id, buyerRef: 'buyer-source-forward', buyerDisplayName: 'Buyer', externalConversationRef: 'conv-source-forward' });
+  await store.setConversationSide(admin.id, conversation.id, 'seller');
   const message = await store.createMessage({ adminId: admin.id, conversationId: conversation.id, direction: 'inbound', senderRole: 'buyer', bodyType: 'text', bodyText: 'hello', externalMessageRef: 'message-source-forward.PNM', source: 'system', traceId: 'source-forward-test' });
   const queued = await store.enqueueInboundInbox({ adminId: admin.id, accountId: account.id, conversationId: conversation.id, inboundMessageId: message.message.id, externalConversationRef: 'conv-source-forward', externalMessageRef: 'message-source-forward.PNM', sourceEventId: 'push-event-forward', sourceSequence: 29 });
   const claimed = (await store.claimInboundInbox({ workerId: 'source-forward-worker', limit: 1, leaseMs: 5_000 }))[0];
@@ -349,6 +352,7 @@ test('recent history recovery enqueues a buyer message missed by live push', asy
   const admin = await store.createAdmin({ email: 'recovery@example.com', passwordHash: 'hash', displayName: 'Recovery' });
   const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'seller-recovery' });
   const conversation = await store.createConversation({ adminId: admin.id, accountId: account.id, buyerRef: 'buyer-recovery', buyerDisplayName: 'Recovery Buyer', externalConversationRef: 'conv-recovery' });
+  await store.setConversationSide(admin.id, conversation.id, 'seller');
   await store.createMessage({ adminId: admin.id, conversationId: conversation.id, direction: 'inbound', senderRole: 'buyer', bodyType: 'text', bodyText: '上一条', externalMessageRef: 'recovery-old.PNM', source: 'system', createdAt: '2026-09-24T03:00:00.000Z' });
 
   const encoded = Buffer.from(JSON.stringify({ contentType: 1, text: { text: '漏掉的这一条' } }), 'utf8').toString('base64');
@@ -443,6 +447,7 @@ test('listener fallback wakes the durable inbox when no dedicated worker is poll
   const store = new MemoryStore();
   const admin = await store.createAdmin({ email: 'fallback-worker@example.com', passwordHash: 'hash', displayName: 'Fallback Worker' });
   const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'fallback-seller' });
+  await store.createProduct({ adminId: admin.id, accountId: account.id, externalProductRef: 'item-fallback', title: '测试商品 item-fallback' });
   const calls: string[] = [];
   const messages = new MessageService(store, async () => 'audit-fallback-worker');
   const autoReply = { processInbound: async (input: { inboundMessageId: string }) => { calls.push(input.inboundMessageId); return undefined; } };
@@ -450,7 +455,7 @@ test('listener fallback wakes the durable inbox when no dedicated worker is poll
 
   const result = await service.handleExternalEvent(admin.id, {
     accountId: account.id,
-    externalConversationRef: 'fallback-conversation',
+    externalConversationRef: 'fallback-conversation', itemRef: 'item-fallback',
     externalMessageRef: 'fallback-message.PNM',
     senderRef: 'fallback-buyer',
     senderName: 'Fallback Buyer',

@@ -580,10 +580,22 @@ async function startXianyuListenerBestEffort(runtime: AppRuntime, adminId: strin
   }
 }
 
+/**
+ * Best-effort lookups whose failure says nothing about the account's health.
+ * The buyer profile endpoint regularly answers FAIL_SYS_INTERNAL_FAULT or times
+ * out from overseas; degrading the account for it only makes a healthy listener
+ * look offline in the UI.
+ */
+const SOFT_FAILURE_SOURCES = new Set(['mtop.taobao.idlemessage.pc.user.query']);
+
 async function markXianyuAccountFailure(store: Store, adminId: string, accountId: string, input: { errorCode?: string; message?: string; accountInvalid: boolean; source?: string }): Promise<void> {
     const account = await store.getAccount(adminId, accountId);
     if (!account || account.status === 'disabled') return;
     const classification = classifyXianyuFailure(input);
+    if (classification.kind === 'degraded' && input.source && SOFT_FAILURE_SOURCES.has(input.source)) {
+      console.warn(JSON.stringify({ component: 'xianyu-account-health', event: 'soft_failure_ignored', accountId, source: input.source, errorCode: input.errorCode }));
+      return;
+    }
     if (classification.kind === 'verification_required') {
       const code = input.errorCode ?? 'ACCOUNT_VALIDATION_REQUIRED';
       await store.recordAccountRisk({ adminId, accountId, code, source: input.source ?? 'xianyu' });

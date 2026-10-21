@@ -240,6 +240,7 @@ test('multimodal inbound image reaches the model Agent and persists a structured
   const admin = await runtime.store.createAdmin({ email: 'vision@example.com', passwordHash: 'hash', displayName: 'Vision' });
   const account = await runtime.store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'vision-seller' });
   const conversation = await runtime.store.createConversation({ adminId: admin.id, accountId: account.id, buyerRef: 'vision-buyer', buyerDisplayName: 'Vision Buyer', itemRef: 'vision-item', itemTitle: '图片商品', itemImageUrl: 'https://img.example/product.png', externalConversationRef: 'vision-conversation' });
+  await runtime.store.setConversationSide(admin.id, conversation.id, 'seller');
   await runtime.listen();
   try {
     const result = await runtime.xianyuIm.handleExternalEvent(admin.id, {
@@ -306,6 +307,7 @@ test('model provider failure fails the run without creating an outbound message'
   const admin = await runtime.store.createAdmin({ email: 'model-failure@example.com', passwordHash: 'hash', displayName: 'Model Failure' });
   const account = await runtime.store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'model-failure-seller' });
   const conversation = await runtime.store.createConversation({ adminId: admin.id, accountId: account.id, buyerRef: 'buyer-1', buyerDisplayName: 'Allowlisted Buyer', externalConversationRef: 'model-failure-conversation' });
+  await runtime.store.setConversationSide(admin.id, conversation.id, 'seller');
   await runtime.listen();
   try {
     const result = await runtime.xianyuIm.handleExternalEvent(admin.id, {
@@ -468,6 +470,7 @@ test('history import followed by the same push still runs one idempotent auto-re
   const admin = await runtime.store.createAdmin({ email: 'history-push-race@example.com', passwordHash: 'hash', displayName: 'History Push Race' });
   const account = await runtime.store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'history-push-race-seller' });
   const conversation = await runtime.store.createConversation({ adminId: admin.id, accountId: account.id, buyerRef: 'buyer-history-1', buyerDisplayName: 'Allowlisted Buyer', externalConversationRef: 'history-push-conversation' });
+  await runtime.store.setConversationSide(admin.id, conversation.id, 'seller');
   await runtime.listen();
 
   const historyMessageRef = 'history-push-race-1.PNM';
@@ -551,6 +554,7 @@ test('push without senderName enriches buyer identity before the allowlist gate'
   }));
   const admin = await runtime.store.createAdmin({ email: 'push-identity@example.com', passwordHash: 'hash', displayName: 'Push Identity' });
   const account = await runtime.store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'push-identity-seller' });
+  await runtime.store.createProduct({ adminId: admin.id, accountId: account.id, externalProductRef: 'item-push-identity', title: '测试商品 item-push-identity' });
   await runtime.listen();
   let profileCalls = 0;
   const unsafeIm = runtime.xianyuIm as unknown as { mtop: { fetchChatUserInfo: () => Promise<unknown> } };
@@ -564,7 +568,7 @@ test('push without senderName enriches buyer identity before the allowlist gate'
   try {
     const result = await runtime.xianyuIm.handleExternalEvent(admin.id, {
       accountId: account.id,
-      externalConversationRef: 'push-identity-conversation',
+      externalConversationRef: 'push-identity-conversation', itemRef: 'item-push-identity',
       externalMessageRef: 'push-identity-1.PNM',
       senderRef: 'buyer-identity-1',
       direction: 'inbound',
