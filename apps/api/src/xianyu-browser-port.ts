@@ -28,6 +28,7 @@ export interface XianyuVerificationLaunchOptions {
   hideWindow: boolean;
   executablePath?: string;
   userAgent?: string;
+  proxy?: { server: string; username?: string; password?: string };
 }
 
 export interface XianyuVerificationBrowserFactory {

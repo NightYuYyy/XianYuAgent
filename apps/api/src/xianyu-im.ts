@@ -102,7 +102,9 @@ export interface XianyuImClientOptions {
   timeoutMs?: number;
   heartbeatIntervalMs?: number;
   fetch?: typeof fetch;
-  webSocketFactory?: (url: string, options: { headers: Record<string, string> }) => ImWebSocket;
+  /** Outbound HTTP(S) proxy for the token refresh and the WebSocket CONNECT tunnel. */
+  proxyUrl?: string;
+  webSocketFactory?: (url: string, options: { headers: Record<string, string>; agent?: unknown }) => ImWebSocket;
   refreshCredential?: () => Promise<XianyuImCredential>;
   onStatusChange?: (status: XianyuImConnectionStatus) => Promise<void> | void;
   onFailure?: (error: unknown) => Promise<void> | void;
@@ -133,6 +135,7 @@ export class XianyuImClient {
   private readonly timeoutMs: number;
   private readonly heartbeatIntervalMs: number;
   private readonly fetchImpl: typeof fetch;
+  private readonly proxyUrl?: string;
   private readonly webSocketFactory: NonNullable<XianyuImClientOptions['webSocketFactory']>;
   private readonly refreshCredential?: XianyuImClientOptions['refreshCredential'];
   private readonly onStatusChange?: XianyuImClientOptions['onStatusChange'];
@@ -159,8 +162,9 @@ export class XianyuImClient {
     this.credential = { ...options.credential };
     this.timeoutMs = options.timeoutMs ?? 20_000;
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? 15_000;
-    this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
-    this.webSocketFactory = options.webSocketFactory ?? ((url, wsOptions) => new WebSocket(url, wsOptions) as unknown as ImWebSocket);
+    this.proxyUrl = options.proxyUrl?.trim() || undefined;
+    this.fetchImpl = options.fetch ?? proxiedFetchFor(this.proxyUrl);
+    this.webSocketFactory = options.webSocketFactory ?? ((url, wsOptions) => new WebSocket(url, wsOptions as never) as unknown as ImWebSocket);
     this.refreshCredential = options.refreshCredential;
     this.onStatusChange = options.onStatusChange;
     this.onFailure = options.onFailure;
@@ -369,6 +373,7 @@ export class XianyuImClient {
 
   private setupSocket(): ImWebSocket {
     const socket = this.webSocketFactory(XIANYU_IM_WS_URL, {
+      ...(this.proxyUrl ? { agent: wsAgentFor(this.proxyUrl) } : {}),
       headers: {
         Cookie: this.credential.cookieHeader,
         Origin: 'https://www.goofish.com',

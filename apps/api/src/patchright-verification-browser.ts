@@ -23,6 +23,7 @@ export function createPatchrightVerificationBrowserFactory(): XianyuVerification
         channel: options.executablePath ? undefined : 'chrome',
         ...(options.executablePath ? { executablePath: options.executablePath } : {}),
         headless: options.headless,
+        ...(options.proxy ? { proxy: options.proxy } : {}),
         ...(options.userAgent ? { userAgent: options.userAgent } : {}),
         viewport: { width: 1440, height: 900 },
         locale: 'zh-CN',

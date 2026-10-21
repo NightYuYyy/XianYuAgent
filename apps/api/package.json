@@ -69,11 +69,13 @@
   },
   "dependencies": {
     "fuse.js": "^7.5.0",
+    "https-proxy-agent": "^7.0.6",
     "ioredis": "^5.7.0",
     "patchright": "^1.63.0",
     "pg": "^8.16.3",
     "qrcode": "^1.5.4",
     "re2-wasm": "^1.0.2",
+    "undici": "^7.10.0",
     "ws": "^8.21.3"
   },
   "devDependencies": {

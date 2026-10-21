@@ -14,6 +14,7 @@ import { XianyuQrLoginAdapter, type XianyuQrPublicSession } from './xianyu-qr-lo
 import { XianyuVerificationBrowser } from './xianyu-verification-browser.js';
 import { XianyuRemoteSliderSolver } from './xianyu-remote-slider.js';
 import { configureNotifier, createNotifierFromEnv, getNotifier, notify, NOTIFICATION_KINDS } from './notifier.js';
+import { AccountProxyResolver, effectiveProxyUrl, normalizeProxyUrl } from './xianyu-proxy.js';
 import { XianyuMtopClient } from './xianyu-mtop.js';
 import { metadataWithCookieSnapshot } from './xianyu-cookie-jar.js';
 import { XianyuImService } from './xianyu-im-service.js';
@@ -131,6 +132,8 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
   });
   let xianyu: XianyuMtopClient;
   let xianyuIm!: XianyuImService;
+  const accountProxy = new AccountProxyResolver((adminId, accountId) => store.getAccount(adminId, accountId));
+  if (effectiveProxyUrl(undefined)) console.info(JSON.stringify({ component: 'xianyu-proxy', event: 'default_proxy_configured' }));
   const notifier = configureNotifier(createNotifierFromEnv());
   console.info(JSON.stringify({ component: 'notifier', event: 'configured', ...notifier.status() }));
   const remoteSlider = config.xianyuSliderRemoteUrl && config.xianyuSliderRemoteSecret
@@ -324,6 +327,7 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
   let productSync: ProductSyncService;
   const qrLogin = new XianyuQrLoginAdapter({
     verificationBrowser,
+    resolveProxy: async (adminId, accountId) => accountId ? accountProxy.resolve(adminId, accountId) : effectiveProxyUrl(undefined),
     allowManualVerificationFallback: config.xianyuVerificationSliderMode !== 'auto',
     onStatus: async (status) => {
       const localStatus = mapQrStatusToLoginStatus(status.status);
@@ -373,6 +377,7 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
     },
   });
   xianyu = new XianyuMtopClient({
+    resolveProxy: (adminId, accountId) => accountProxy.resolve(adminId, accountId),
     loadCredential: async (adminId, accountId) => store.getCredential(adminId, accountId),
     saveCookie: async (adminId, accountId, cookieHeader, metadata) => {
       const account = await store.getAccount(adminId, accountId);
@@ -1287,7 +1292,7 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
   if (accountMatch) {
     const accountId = decodeURIComponent(accountMatch[1]);
     if (!accountMatch[2] && ctx.method === 'GET') return { statusCode: 200, body: success(ctx, await accounts.get(authContext.admin.id, accountId)).body };
-     if (!accountMatch[2] && ctx.method === 'PATCH') return mutation(runtime, ctx, authContext, accountId, async () => success(ctx, await accounts.update({ adminId: authContext.admin.id, accountId, patch: { sellerRef: optionalString(ctx.body.sellerRef), displayName: optionalString(ctx.body.displayName), remark: optionalString(ctx.body.remark), avatarUrl: optionalString(ctx.body.avatarUrl), platformUserId: optionalString(ctx.body.platformUserId), status: typeof ctx.body.status === 'string' ? ctx.body.status as never : undefined }, requestId: ctx.requestId, traceId: ctx.traceId })));
+     if (!accountMatch[2] && ctx.method === 'PATCH') return mutation(runtime, ctx, authContext, accountId, async () => success(ctx, await accounts.update({ adminId: authContext.admin.id, accountId, patch: { sellerRef: optionalString(ctx.body.sellerRef), displayName: optionalString(ctx.body.displayName), remark: optionalString(ctx.body.remark), avatarUrl: optionalString(ctx.body.avatarUrl), platformUserId: optionalString(ctx.body.platformUserId), proxyUrl: parseProxyUrlPatch(ctx.body.proxyUrl), status: typeof ctx.body.status === 'string' ? ctx.body.status as never : undefined }, requestId: ctx.requestId, traceId: ctx.traceId }).then((updated) => { accountProxy.invalidate(accountId); return updated; })));
      if (!accountMatch[2] && ctx.method === 'DELETE') return mutation(runtime, ctx, authContext, accountId, async () => success(ctx, { account: await accounts.delete({ adminId: authContext.admin.id, accountId, requestId: ctx.requestId, traceId: ctx.traceId }), deleted: true }));
     if (accountMatch[2] === 'connection' && ctx.method === 'GET') {
       const account = await accounts.get(authContext.admin.id, accountId);
@@ -2223,6 +2228,16 @@ function readCouponMetadata(value: unknown): import('./domain.js').CouponBatchMe
   }
   if (Array.isArray(source.imageUrls)) metadata.imageUrls = source.imageUrls.filter((item): item is string => typeof item === 'string').slice(0, 3);
   return metadata;
+}
+
+function parseProxyUrlPatch(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== 'string') throw new ServiceError(422, 'VALIDATION_FAILED', 'proxyUrl must be a string');
+  if (!value.trim()) return null;
+  const normalized = normalizeProxyUrl(value);
+  if (!normalized) throw new ServiceError(422, 'VALIDATION_FAILED', 'proxyUrl must look like http(s)://[user:pass@]host:port');
+  return normalized;
 }
 
 function mapQrStatusToLoginStatus(status: string): 'waiting' | 'scanned' | 'succeeded' | 'expired' | 'failed' | 'cancelled' | 'verification_required' | undefined {

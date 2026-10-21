@@ -594,6 +594,8 @@ export interface AccountRecord {
   sellerRef: string;
   displayName?: string;
   remark?: string;
+  /** Outbound HTTP(S) proxy for every Xianyu request made on behalf of this account. */
+  proxyUrl?: string;
   avatarUrl?: string;
   platformUserId?: string;
   status: AccountStatus;
@@ -1426,7 +1428,7 @@ export interface Store {
   findAccountForLogin(input: { adminId: string; platform: string; sellerRef: string }): Promise<AccountRecord | undefined>;
   restoreAccountForLogin(adminId: string, accountId: string): Promise<AccountRecord | undefined>;
   createAccount(input: { platform: string; sellerRef: string; displayName?: string; adminId: string }): Promise<AccountRecord>;
-  updateAccount(adminId: string, accountId: string, patch: { sellerRef?: string; displayName?: string; remark?: string; avatarUrl?: string; platformUserId?: string; status?: AccountStatus; lastConnectedAt?: string }): Promise<AccountRecord | undefined>;
+  updateAccount(adminId: string, accountId: string, patch: { sellerRef?: string; displayName?: string; remark?: string; avatarUrl?: string; platformUserId?: string; proxyUrl?: string | null; status?: AccountStatus; lastConnectedAt?: string }): Promise<AccountRecord | undefined>;
   recordAccountRisk(input: { adminId: string; accountId: string; code: string; source: string }): Promise<AccountRecord | undefined>;
   clearAccountRisk(input: { adminId: string; accountId: string; episode: string; source: string; startedAt: string }): Promise<AccountRecord | undefined>;
   recordAccountDegraded(input: { adminId: string; accountId: string; source: string }): Promise<AccountRecord | undefined>;

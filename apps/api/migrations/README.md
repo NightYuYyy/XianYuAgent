@@ -17,6 +17,7 @@
 - `020_order_buyer_avatar.sql`：为订单补充可选 `buyer_avatar_url` 字段，支持订单头像持久化并与本地会话头像聚合。
 - `018_credential_store.sql`：为 S4-VS7A 建立账号级 `accounts.credential_refs` 与 `accounts.credential_values`；仅支持 `api_key/model_client`，保存 provider/alias/status/version/last_rotated_at 与 AES-256-GCM 密文、key_version、checksum、metadata_json。API 默认只读 CredentialRef 脱敏投影，不返回明文。
 - `025_auto_reply_inbound_inbox.sql`：建立自动回复入站 inbox，提供持久化队列状态、重试/死信字段与账号/消息幂等约束。
+- `066_account_proxy.sql`：为账号补充 `proxy_url`，该账号的 MTOP、IM、扫码登录与验证浏览器全部经此 HTTP(S) 代理出站。
 - `026_auto_reply_inbound_alias_quarantine.sql`：建立 history/live 外部消息引用别名表与解析失败隔离表。
 - `027_auto_reply_inbound_lease_expiry.sql`：为入站 inbox 补充显式租约过期时间和索引，支持多 worker 竞争 claim 与旧 worker fencing。
 - `029_product_xianyu_updated_at.sql`：为商品保存闲鱼侧更新时间，并支持显式按闲鱼更新时间排序；不再把本地 `updated_at` 当作闲鱼更新时间。

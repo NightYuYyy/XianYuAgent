@@ -57,6 +57,8 @@ export interface XianyuQrAdapterOptions {
   verificationBrowser?: XianyuVerificationBrowser;
   /** Automatic slider mode must not fall back to a visible/manual window. */
   allowManualVerificationFallback?: boolean;
+  /** Effective outbound proxy for the (re)authorised account; undefined = direct. */
+  resolveProxy?: (adminId: string, accountId?: string) => Promise<string | undefined>;
 }
 
 type CookieJar = XianyuCookieSnapshot;
@@ -75,6 +77,7 @@ interface InternalSession {
   errorCode?: string;
   verificationUrl?: string;
   completionNotified: boolean;
+  proxyUrl?: string;
 }
 
 export class XianyuQrLoginAdapter {
@@ -86,6 +89,7 @@ export class XianyuQrLoginAdapter {
   private readonly onStatus?: XianyuQrAdapterOptions['onStatus'];
   private readonly verificationBrowser?: XianyuVerificationBrowser;
   private readonly allowManualVerificationFallback: boolean;
+  private readonly resolveProxy?: XianyuQrAdapterOptions['resolveProxy'];
 
   constructor(options: XianyuQrAdapterOptions = {}) {
     this.timeoutMs = options.timeoutMs ?? 25_000;
@@ -95,6 +99,7 @@ export class XianyuQrLoginAdapter {
     this.onStatus = options.onStatus;
     this.verificationBrowser = options.verificationBrowser;
     this.allowManualVerificationFallback = options.allowManualVerificationFallback ?? true;
+    this.resolveProxy = options.resolveProxy;
   }
 
   async create(input: { sessionId: string; adminId: string; accountId?: string }): Promise<XianyuQrPublicSession> {
@@ -120,6 +125,7 @@ export class XianyuQrLoginAdapter {
     };
     this.sessions.set(session.sessionId, session);
     try {
+      session.proxyUrl = await this.resolveProxy?.(input.adminId, input.accountId);
       await this.getMh5Token(session);
       await this.getLoginParams(session);
       const result = await this.generateQr(session);
@@ -183,6 +189,8 @@ export class XianyuQrLoginAdapter {
                 const completed = await this.verificationBrowser.waitForCompletion({
                   verificationUrl: result.iframeRedirectUrl,
                   profileKey: session.accountId ?? session.sessionId,
+                  accountId: session.accountId,
+                  proxyUrl: session.proxyUrl,
                   initialCookieSnapshot: session.jar,
                   allowManualFallback: this.allowManualVerificationFallback,
                 });
@@ -235,7 +243,7 @@ export class XianyuQrLoginAdapter {
   }
 
   private async getMh5Token(session: InternalSession): Promise<void> {
-    const response = await this.request(API_H5TK, { method: 'GET', headers: passportHeaders() });
+    const response = await this.requestFor(session, API_H5TK, { method: 'GET', headers: passportHeaders() });
     absorbSetCookies(session.jar, API_H5TK, response.headers);
     const data = '{"bizScene":"home"}';
     const timestamp = String(Date.now());
@@ -246,7 +254,7 @@ export class XianyuQrLoginAdapter {
       v: '1.0', type: 'originaljson', dataType: 'json', timeout: '20000',
       api: 'mtop.gaia.nodejs.gaia.idle.data.gw.v2.index.get', data,
     });
-    const post = await this.request(`${API_H5TK}?${params.toString()}`, {
+    const post = await this.requestFor(session, `${API_H5TK}?${params.toString()}`, {
       method: 'POST', headers: { ...passportHeaders(), 'content-type': 'application/x-www-form-urlencoded', cookie: cookieHeader(session.jar, API_H5TK) },
     });
     absorbSetCookies(session.jar, API_H5TK, post.headers);
@@ -256,7 +264,7 @@ export class XianyuQrLoginAdapter {
   private async getLoginParams(session: InternalSession): Promise<void> {
     const params = new URLSearchParams({ lang: 'zh_cn', appName: 'xianyu', appEntrance: 'web', styleType: 'vertical', bizParams: '', notLoadSsoView: 'false', notKeepLogin: 'false', isMobile: 'false', qrCodeFirst: 'false', stie: '77', rnd: String(Math.random()) });
     const url = `${API_MINI_LOGIN}?${params.toString()}`;
-    const response = await this.request(url, { method: 'GET', headers: { ...passportHeaders(), cookie: cookieHeader(session.jar, url) } });
+    const response = await this.requestFor(session, url, { method: 'GET', headers: { ...passportHeaders(), cookie: cookieHeader(session.jar, url) } });
     absorbSetCookies(session.jar, url, response.headers);
     const html = await response.text();
     const viewData = extractJsonAssignment(html, 'window.viewData') as Record<string, unknown>;
@@ -269,7 +277,7 @@ export class XianyuQrLoginAdapter {
   private async generateQr(session: InternalSession): Promise<XianyuQrPublicSession> {
     const params = new URLSearchParams(session.qrParams);
     const url = `${API_GENERATE_QR}?${params.toString()}`;
-    const response = await this.request(url, { method: 'GET', headers: { ...passportHeaders(), cookie: cookieHeader(session.jar, url) } });
+    const response = await this.requestFor(session, url, { method: 'GET', headers: { ...passportHeaders(), cookie: cookieHeader(session.jar, url) } });
     absorbSetCookies(session.jar, url, response.headers);
     const payload = await response.json() as { content?: { success?: boolean; data?: { codeContent?: string; t?: string | number; ck?: string } } };
     const data = payload.content?.data;
@@ -282,7 +290,7 @@ export class XianyuQrLoginAdapter {
 
   private async pollQrStatus(session: InternalSession): Promise<{ status: string; iframeRedirect?: boolean; iframeRedirectUrl?: string }> {
     const form = new URLSearchParams({ ...session.qrParams, ua: '', navlanguage: 'zh-CN', navUserAgent: USER_AGENT, navPlatform: xianyuNavigatorPlatform(), isIframe: 'true', documentReferer: QR_VERIFY_TARGET, defaultView: 'qrcode' });
-    const response = await this.request(API_SCAN_STATUS, { method: 'POST', headers: { ...passportHeaders(), 'content-type': 'application/x-www-form-urlencoded', cookie: cookieHeader(session.jar, API_SCAN_STATUS) }, body: form.toString() });
+    const response = await this.requestFor(session, API_SCAN_STATUS, { method: 'POST', headers: { ...passportHeaders(), 'content-type': 'application/x-www-form-urlencoded', cookie: cookieHeader(session.jar, API_SCAN_STATUS) }, body: form.toString() });
     absorbSetCookies(session.jar, API_SCAN_STATUS, response.headers);
     const payload = await response.json() as { hasError?: boolean; content?: { data?: { qrCodeStatus?: string; iframeRedirect?: boolean; iframeRedirectUrl?: string } } };
     if (payload.hasError) return { status: 'ERROR' };
@@ -324,7 +332,7 @@ export class XianyuQrLoginAdapter {
     for (let redirectCount = 0; redirectCount <= 10; redirectCount += 1) {
       if (!this.isCurrent(session)) throw new Error('QR_SESSION_REPLACED');
       requestHeaders.cookie = cookieHeader(session.jar, currentUrl);
-      const response = await this.request(currentUrl, { method: 'GET', headers: requestHeaders, redirect: 'manual' });
+      const response = await this.requestFor(session, currentUrl, { method: 'GET', headers: requestHeaders, redirect: 'manual' });
       absorbSetCookies(session.jar, currentUrl, response.headers);
       if (response.status < 300 || response.status >= 400) return response;
       const location = response.headers.get('location');
@@ -344,11 +352,15 @@ export class XianyuQrLoginAdapter {
     if (this.onStatus) await this.onStatus({ ...this.toPublic(session), adminId: session.adminId });
   }
 
-  private async request(url: string, init: RequestInit): Promise<Response> {
+  private requestFor(session: InternalSession, url: string, init: RequestInit): Promise<Response> {
+    return this.request(url, init, session.proxyUrl);
+  }
+
+  private async request(url: string, init: RequestInit, proxyUrl?: string): Promise<Response> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const response = await fetch(url, { ...init, redirect: init.redirect ?? 'follow', signal: controller.signal });
+      const response = await proxiedFetchFor(proxyUrl)(url, { ...init, redirect: init.redirect ?? 'follow', signal: controller.signal });
       if (!response.ok && response.status >= 500) throw new Error(`HTTP_${response.status}`);
       return response;
     } finally { clearTimeout(timeout); }

@@ -434,6 +434,7 @@ export class XianyuImService {
         let connectionAttemptStartedAt = new Date().toISOString();
         const client = new XianyuImClient({
           accountId,
+          proxyUrl: effectiveProxyUrl(account),
           credential: toImCredential(credential),
           selfUserIds: [account.sellerRef, account.platformUserId].filter((value): value is string => Boolean(value)),
           refreshCredential: async () => {
@@ -522,6 +523,7 @@ export class XianyuImService {
               profileKey: account.id,
               accountId: account.id,
               deviceId,
+              proxyUrl: effectiveProxyUrl(account),
               initialCookieSnapshot: initialSnapshot,
               allowManualFallback: false,
               pollIntervalMs: 250,

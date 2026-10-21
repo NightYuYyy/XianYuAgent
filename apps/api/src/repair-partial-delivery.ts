@@ -36,7 +36,7 @@ async function main(): Promise<void> {
     const authoritative = await new XianyuProductAutomationExecutionAdapter(store, () => mtop, () => undefined).readOrder({ adminId, accountId, orderNo, productId: order.productId, itemId: order.itemId });
     if (!authoritative || authoritative.paymentStatus !== 'paid' || authoritative.orderStatus !== 'open'
       || authoritative.deliveryStatus !== 'pending' || authoritative.afterSalesStatus !== 'none') throw new Error('DELIVERY_RECOVERY_PLATFORM_ORDER_MISMATCH');
-    im = new XianyuImClient({ accountId, credential: { cookieHeader: credential.cookieHeader, accessToken: credential.accessToken, deviceId: credential.deviceId }, selfUserIds: [account.sellerRef, account.platformUserId].filter((id): id is string => Boolean(id)) });
+    im = new XianyuImClient({ accountId, proxyUrl: effectiveProxyUrl(account), credential: { cookieHeader: credential.cookieHeader, accessToken: credential.accessToken, deviceId: credential.deviceId }, selfUserIds: [account.sellerRef, account.platformUserId].filter((id): id is string => Boolean(id)) });
     await im.connect();
     const history = await im.listMessages(conversation.externalConversationRef, undefined, 100);
     if (!confirmPartialDeliveryImage(history.userMessageModels, im.selfUserIds, { externalMessageRef: imageRef, imageUrl, startedAt: new Date(step.created_at).toISOString() })) throw new Error('DELIVERY_RECOVERY_PLATFORM_HISTORY_MISMATCH');

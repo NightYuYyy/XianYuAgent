@@ -103,6 +103,8 @@ export interface XianyuMtopClientOptions {
   saveCookie: (adminId: string, accountId: string, cookieHeader: string, metadata?: Record<string, string>) => Promise<void>;
   onFailure?: (input: { adminId: string; accountId: string; api: string; errorCode?: string; message?: string; accountInvalid: boolean }) => Promise<void> | void;
   onSuccess?: (input: { adminId: string; accountId: string; api: string; startedAt: string }) => Promise<void> | void;
+  /** Effective outbound proxy for the account; undefined = direct. */
+  resolveProxy?: (adminId: string, accountId: string) => Promise<string | undefined>;
 }
 
 export class XianyuMtopClient {
@@ -110,6 +112,7 @@ export class XianyuMtopClient {
   private readonly loadCredential: XianyuMtopClientOptions['loadCredential'];
   private readonly saveCookie: XianyuMtopClientOptions['saveCookie'];
   private readonly onFailure?: XianyuMtopClientOptions['onFailure'];
+  private readonly resolveProxy?: XianyuMtopClientOptions['resolveProxy'];
   private readonly onSuccess?: XianyuMtopClientOptions['onSuccess'];
 
   constructor(options: XianyuMtopClientOptions) {
@@ -117,6 +120,7 @@ export class XianyuMtopClient {
     this.loadCredential = options.loadCredential;
     this.saveCookie = options.saveCookie;
     this.onFailure = options.onFailure;
+    this.resolveProxy = options.resolveProxy;
     this.onSuccess = options.onSuccess;
   }
 
@@ -222,7 +226,7 @@ export class XianyuMtopClient {
       const requestCookieHeader = cookieSnapshot
         ? cookieHeaderForUrl(cookieSnapshot, endpoint.toString(), Date.now(), XIANYU_TOP_SITE)
         : cookieHeader;
-      const response = await fetch(endpoint, {
+      const response = await proxiedFetchFor(await this.resolveProxy?.(adminId, accountId))(endpoint, {
         method: 'POST',
         headers: {
           accept: 'application/json, text/javascript, */*; q=0.01',
@@ -469,6 +473,7 @@ export class XianyuMtopClient {
   async call(adminId: string, accountId: string, api: string, version: string, data: Record<string, unknown>, extraParams: Record<string, string> = {}, requestOptions: MtopRequestOptions = {}): Promise<MtopResult> {
     const startedAt = new Date().toISOString();
     const credential = await this.loadCredential(adminId, accountId);
+    const fetchForAccount = proxiedFetchFor(await this.resolveProxy?.(adminId, accountId));
     const initialCookieHeader = credential?.cookieHeader?.trim() ?? '';
     let cookieHeader = initialCookieHeader;
     let cookieSnapshot: XianyuCookieSnapshot | undefined = cookieSnapshotFromMetadata(credential?.metadata);
@@ -538,7 +543,7 @@ export class XianyuMtopClient {
           'user-agent': USER_AGENT,
           cookie: requestCookieHeader,
         };
-        const response = await fetch(`${requestUrl}?${params.toString()}`, {
+        const response = await fetchForAccount(`${requestUrl}?${params.toString()}`, {
           method: 'POST',
           headers: requestHeaders,
           body: new URLSearchParams({ data: dataValue }).toString(),

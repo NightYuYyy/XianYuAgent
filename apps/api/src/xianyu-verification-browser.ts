@@ -126,6 +126,8 @@ export class XianyuVerificationBrowser {
     /** Forwarded to the remote solver so the fresh x5sec is bound to the right account. */
     accountId?: string;
     deviceId?: string;
+    /** Outbound proxy for the verification browser; undefined = direct. */
+    proxyUrl?: string;
   }): Promise<XianyuVerificationBrowserResult> {
     assertVerificationUrl(input.verificationUrl);
     if (this.remoteSlider && classifyVerificationUrl(input.verificationUrl) === 'slider') {
@@ -206,6 +208,7 @@ export class XianyuVerificationBrowser {
     allowManualFallback?: boolean;
     maxWaitMs?: number;
     pollIntervalMs?: number;
+    proxyUrl?: string;
   }, profileDir: string): Promise<XianyuVerificationBrowserResult> {
     const kind = classifyVerificationUrl(input.verificationUrl);
     const defaultMaxWaitMs = kind === 'identity' ? Math.max(this.maxWaitMs, IDENTITY_MAX_WAIT_MS) : this.maxWaitMs;
@@ -224,6 +227,7 @@ export class XianyuVerificationBrowser {
         hideWindow,
         executablePath: this.executablePath,
         userAgent: this.userAgent,
+        proxy: patchrightProxyFor(input.proxyUrl),
       });
       try {
         await context.addInitScript({ content: buildAutomationEvasionScript() });
