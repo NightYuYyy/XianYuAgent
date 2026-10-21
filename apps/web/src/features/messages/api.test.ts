@@ -120,3 +120,20 @@ describe('messages API handling mode and reply suggestion', () => {
     await expect(createMessagesApi({ get: async <T>() => ({}) as T }).suggestReply!({ accountId: 'a-1', conversationId: 'c-1' })).rejects.toThrow('messages suggest api unavailable');
   });
 });
+
+describe('messages API quick phrases', () => {
+  it('reads phrases from the agent settings and saves them with a version guard', async () => {
+    const calls: Array<{ method: string; path: string; body?: unknown }> = [];
+    const api = createMessagesApi({
+      get: async <T>(path: string) => { calls.push({ method: 'get', path }); return { data: { quickPhrases: [{ id: 'a', label: '问好', content: '在的' }], configVersion: 4 } } as unknown as T; },
+      patch: async <T>(path: string, body?: unknown) => { calls.push({ method: 'patch', path, body }); return { data: { quickPhrases: [], configVersion: 5 } } as unknown as T; },
+    });
+    const loaded = await api.getQuickPhrases!({ accountId: 'a 1' });
+    expect(loaded).toEqual({ items: [{ id: 'a', label: '问好', content: '在的' }], version: 4 });
+    const saved = await api.saveQuickPhrases!({ accountId: 'a 1', expectedVersion: 4, quickPhrases: [] });
+    expect(saved).toEqual({ items: [], version: 5 });
+    expect(calls[0]).toEqual({ method: 'get', path: '/api/v1/settings/agent?accountId=a%201' });
+    expect(calls[1]).toMatchObject({ method: 'patch', path: '/api/v1/settings/agent', body: { accountId: 'a 1', expectedVersion: 4, quickPhrases: [] } });
+    await expect(createMessagesApi({ get: async <T>() => ({}) as T }).saveQuickPhrases!({ accountId: 'a', expectedVersion: 0, quickPhrases: [] })).rejects.toThrow('messages settings api unavailable');
+  });
+});

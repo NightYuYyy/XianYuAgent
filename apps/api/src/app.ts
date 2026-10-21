@@ -2273,6 +2273,7 @@ function readAutoReplyAgentPatch(body: Record<string, unknown>): import('./domai
   for (const field of numberFields) if (typeof body[field] === 'number') patch[field] = body[field] as never;
   if (Array.isArray(body.keywordRules)) patch.keywordRules = body.keywordRules as never;
   if (body.replyPolicy && typeof body.replyPolicy === 'object' && !Array.isArray(body.replyPolicy)) patch.replyPolicy = body.replyPolicy as never;
+  if (Array.isArray(body.quickPhrases)) patch.quickPhrases = body.quickPhrases as never;
   return patch;
 }
 

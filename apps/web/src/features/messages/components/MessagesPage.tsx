@@ -11,6 +11,8 @@ import { ConversationList, ConversationListState } from './ConversationList';
 import { MessageTimeline } from './MessageTimeline';
 import { ConversationListSkeleton, TimelineSkeleton } from './MessagesSkeletons';
 import { SearchField } from '../../../shared/ui/SearchField';
+import { QuickPhrasePicker } from './QuickPhrasePicker';
+import type { QuickPhraseVM } from '../types';
 import './messages.css';
 
 export function MessagesPage({ api: providedApi, active = true }: { api?: MessagesApi; active?: boolean }) {
@@ -30,6 +32,13 @@ export function MessagesPage({ api: providedApi, active = true }: { api?: Messag
   const [suggestPhase, setSuggestPhase] = useState<'idle' | 'loading' | 'skip' | 'error'>('idle');
   const [suggestNote, setSuggestNote] = useState('');
   const [modeBusy, setModeBusy] = useState(false);
+  const [quickPhrases, setQuickPhrases] = useState<QuickPhraseVM[]>([]);
+  const [quickPhrasesVersion, setQuickPhrasesVersion] = useState(0);
+  const [phrasesOpen, setPhrasesOpen] = useState(false);
+  const [phraseManage, setPhraseManage] = useState(false);
+  const [phraseDraft, setPhraseDraft] = useState({ label: '', content: '' });
+  const [phraseBusy, setPhraseBusy] = useState(false);
+  const [phraseError, setPhraseError] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const composerToolsRef = useRef<HTMLDivElement>(null);
@@ -64,7 +73,31 @@ export function MessagesPage({ api: providedApi, active = true }: { api?: Messag
     setChatImagePreviewUrl(null);
     setSuggestPhase('idle');
     setSuggestNote('');
+    setPhrasesOpen(false);
+    setPhraseManage(false);
   }, [controller.state.activeConversationId, currentAccountId]);
+
+  useEffect(() => {
+    if (!currentAccountId || !api.getQuickPhrases) { setQuickPhrases([]); return; }
+    let cancelled = false;
+    api.getQuickPhrases({ accountId: currentAccountId }).then((result) => {
+      if (cancelled) return;
+      setQuickPhrases(result.items);
+      setQuickPhrasesVersion(result.version);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [api, currentAccountId]);
+
+  useEffect(() => {
+    if (!phrasesOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (composerToolsRef.current?.contains(event.target as Node)) return;
+      setPhrasesOpen(false);
+      setPhraseManage(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, [phrasesOpen]);
 
   useEffect(() => {
     if (!attachmentPreviewUrl && !chatImagePreviewUrl) return;
@@ -135,6 +168,52 @@ export function MessagesPage({ api: providedApi, active = true }: { api?: Messag
     document.addEventListener('pointerdown', onPointerDown);
     return () => document.removeEventListener('pointerdown', onPointerDown);
   }, [emojiOpen]);
+
+  const insertQuickPhrase = (content: string) => {
+    const textarea = textareaRef.current;
+    const start = textarea?.selectionStart ?? draft.length;
+    const end = textarea?.selectionEnd ?? draft.length;
+    const next = `${draft.slice(0, start)}${content}${draft.slice(end)}`;
+    const cursor = start + content.length;
+    setDraft(next);
+    setComposerSelection({ start: cursor, end: cursor });
+    setComposerFocused(true);
+    setPhrasesOpen(false);
+    setPhraseManage(false);
+    setTimeout(() => {
+      const element = textareaRef.current;
+      if (!element) return;
+      element.focus();
+      element.setSelectionRange(cursor, cursor);
+    }, 0);
+  };
+
+  const persistQuickPhrases = async (next: QuickPhraseVM[]): Promise<boolean> => {
+    if (!currentAccountId || !api.saveQuickPhrases) return false;
+    setPhraseBusy(true);
+    setPhraseError('');
+    try {
+      const result = await api.saveQuickPhrases({ accountId: currentAccountId, expectedVersion: quickPhrasesVersion, quickPhrases: next });
+      setQuickPhrases(result.items);
+      setQuickPhrasesVersion(result.version);
+      return true;
+    } catch (error) {
+      setPhraseError(`保存失败：${normalizeError(error).message}`);
+      // The settings page may have bumped the version meanwhile; pick up the latest copy so the next save goes through.
+      api.getQuickPhrases?.({ accountId: currentAccountId }).then((result) => { setQuickPhrases(result.items); setQuickPhrasesVersion(result.version); }).catch(() => undefined);
+      return false;
+    } finally {
+      setPhraseBusy(false);
+    }
+  };
+
+  const addQuickPhrase = async () => {
+    const content = phraseDraft.content.trim();
+    if (!content) return;
+    const label = phraseDraft.label.trim() || content.split('\n')[0]!.slice(0, 20);
+    const ok = await persistQuickPhrases([...quickPhrases, { id: `qp-${Date.now().toString(36)}-${quickPhrases.length + 1}`, label, content }]);
+    if (ok) setPhraseDraft({ label: '', content: '' });
+  };
 
   const handleToggleHandlingMode = async () => {
     if (!activeConversation || modeBusy) return;
@@ -256,7 +335,8 @@ export function MessagesPage({ api: providedApi, active = true }: { api?: Messag
                 <div className="messages-composer-assist-row">
                   <div ref={composerToolsRef} className="messages-composer-tools">
                     <button className="messages-tool-button" type="button" aria-label="添加图片附件" onClick={() => { setEmojiOpen(false); imageInputRef.current?.click(); }}>+</button>
-                    <button className="messages-tool-button messages-emoji-button" type="button" aria-label="插入闲鱼表情" aria-expanded={emojiOpen} onClick={() => setEmojiOpen((open) => !open)}>☺</button>
+                    <button className="messages-tool-button messages-emoji-button" type="button" aria-label="插入闲鱼表情" aria-expanded={emojiOpen} onClick={() => { setPhrasesOpen(false); setEmojiOpen((open) => !open); }}>☺</button>
+                    <button className="messages-tool-button messages-phrase-button" type="button" aria-label="插入快捷短语" aria-expanded={phrasesOpen} title="快捷短语" data-testid="quick-phrase-trigger" onClick={() => { setEmojiOpen(false); setPhrasesOpen((open) => !open); }}>短语</button>
                     {activeConversation && <span className="messages-handling-group" data-handling-mode={handlingMode}>
                       <span className={`messages-handling-chip ${buyerSideConversation ? 'buyer' : handlingMode}`} title={buyerSideConversation ? '这是你去咨询别人的商品，自动回复不会介入' : handlingMode === 'human' ? '已人工接管：买家消息只提醒你，AI 不会自动回复' : 'AI 正在自动回复这个会话；你手动发一条也会优先于 AI'}>{buyerSideConversation ? '我在买 · 不自动回复' : handlingMode === 'human' ? '已人工接管' : 'AI 自动回复中'}</span>
                       {!buyerSideConversation && <button className="messages-handling-toggle" type="button" disabled={modeBusy} data-testid="handling-mode-toggle" onClick={() => void handleToggleHandlingMode()}>{modeBusy ? '切换中…' : handlingMode === 'human' ? '交还 AI' : '我来接管'}</button>}
@@ -264,6 +344,7 @@ export function MessagesPage({ api: providedApi, active = true }: { api?: Messag
                       {suggestNote && <span className={`messages-suggest-note ${suggestPhase}`} role={suggestPhase === 'error' ? 'alert' : 'status'}>{suggestNote}</span>}
                     </span>}
                     <input ref={imageInputRef} className="messages-file-input" type="file" accept="image/*" multiple onChange={(event) => { addImageFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = ''; }} />
+                    {phrasesOpen && <QuickPhrasePicker phrases={quickPhrases} manage={phraseManage} busy={phraseBusy} error={phraseError} draft={phraseDraft} onToggleManage={() => setPhraseManage((value) => !value)} onInsert={insertQuickPhrase} onRemove={(id) => void persistQuickPhrases(quickPhrases.filter((item) => item.id !== id))} onDraftChange={setPhraseDraft} onAdd={() => void addQuickPhrase()} />}
                     {emojiOpen && <div className="messages-emoji-picker" role="dialog" aria-label="闲鱼表情选择器">{xianyuEmojis.map(([name, url], index) => <button key={`${name}-${index}`} type="button" aria-label={`插入${name}`} title={name} onClick={() => insertEmoji(name)}><img src={emojiURL(url)} alt={name} /></button>)}</div>}
                   </div>
                 </div>

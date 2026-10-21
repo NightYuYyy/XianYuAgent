@@ -85,6 +85,7 @@ export interface AutoReplyAgentConfigVM {
   sendMode: AutoReplyAgentSendMode;
   keywordRules?: AutoReplyKeywordRuleVM[];
   replyPolicy?: AutoReplyPolicyVM;
+  quickPhrases?: ChatQuickPhraseVM[];
   accountId: string;
   updatedByAdminId?: string;
   configVersion: number;
@@ -181,4 +182,10 @@ export interface OpenAISettingsState {
   data: OpenAIConfigListVM | null;
   error: string | null;
   lastAction?: string;
+}
+
+export interface ChatQuickPhraseVM {
+  id: string;
+  label: string;
+  content: string;
 }

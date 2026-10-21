@@ -7,6 +7,7 @@ import type { AutoReplyAgentSettingsController } from '../agent-settings-control
 import type { AutoReplyAgentConfigVM } from '../types';
 import { KeywordRulesEditor } from './KeywordRulesEditor';
 import { EMPTY_REPLY_POLICY_VM, ReplyPolicyEditor } from './ReplyPolicyEditor';
+import { QuickPhrasesEditor } from './QuickPhrasesEditor';
 
 type EditableConfig = Omit<AutoReplyAgentConfigVM, 'accountId' | 'updatedByAdminId' | 'configVersion' | 'configDigest' | 'createdAt' | 'updatedAt' | 'debounceMs'>;
 
@@ -71,6 +72,7 @@ export function AutoReplyAgentPanel({ controller, accountName, accountId }: { co
       </div>
       <KeywordRulesEditor rules={draft.keywordRules ?? []} disabled={!draft.enabled} onChange={(rules) => setField('keywordRules', rules)} />
       <ReplyPolicyEditor policy={draft.replyPolicy ?? EMPTY_REPLY_POLICY_VM} disabled={!draft.enabled} onChange={(policy) => setField('replyPolicy', policy)} />
+      <QuickPhrasesEditor phrases={draft.quickPhrases ?? []} onChange={(phrases) => setField('quickPhrases', phrases)} />
       <div className="modal-actions"><Button variant="primary" type="submit" disabled={state.phase === 'submitting'}>{state.phase === 'submitting' ? '保存中…' : '保存自动回复 Agent 配置'}</Button></div>
     </form>
     </div>

@@ -15,6 +15,7 @@ import { removeCouponBatchFromAutomationConfig } from './product-automation-coup
 import { DEFAULT_AUTO_REPLY_AGENT_CONFIG, millisecondsToSeconds } from './auto-reply-agent-settings.js';
 import { sanitizeKeywordRules } from './auto-reply-keyword.js';
 import { sanitizeReplyPolicy } from './auto-reply-guard.js';
+import { sanitizeQuickPhrases } from './chat-quick-phrases.js';
 import type { PaymentEventJob } from './domain.js';
 
 type Row = Record<string, unknown>;
@@ -2702,6 +2703,7 @@ export class PostgresStore implements Store {
       sendMode: config.sendMode === 'live' ? 'live' : 'simulate',
       keywordRules: sanitizeKeywordRules(config.keywordRules),
       replyPolicy: sanitizeReplyPolicy(config.replyPolicy),
+      quickPhrases: sanitizeQuickPhrases(config.quickPhrases),
       configVersion: Number(row.config_version ?? 1),
       configDigest: String(row.config_digest ?? ''),
       createdAt: new Date(String(row.created_at)).toISOString(),

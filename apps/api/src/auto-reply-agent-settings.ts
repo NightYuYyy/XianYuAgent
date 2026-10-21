@@ -4,6 +4,7 @@ import { digestJson } from './security.js';
 import { ServiceError } from './services.js';
 import { validateKeywordRules } from './auto-reply-keyword.js';
 import { validateReplyPolicy } from './auto-reply-guard.js';
+import { validateQuickPhrases } from './chat-quick-phrases.js';
 
 export const DEFAULT_AUTO_REPLY_AGENT_CONFIG: AutoReplyAgentConfig = {
   enabled: true,
@@ -94,6 +95,7 @@ function validateConfig(config: AutoReplyAgentConfig): AutoReplyAgentConfig {
     sendMode: config.sendMode === 'live' ? 'live' : 'simulate',
     keywordRules: validateKeywordRules(config.keywordRules),
     replyPolicy: validateReplyPolicy(config.replyPolicy),
+    quickPhrases: validateQuickPhrases(config.quickPhrases),
   };
 }
 

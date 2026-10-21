@@ -1091,6 +1091,14 @@ export interface AutoReplyAgentConfig {
   keywordRules?: AutoReplyKeywordRule[];
   /** Message filters, buyer blacklist, default reply and auto-rating (see auto-reply-policy.ts). */
   replyPolicy?: AutoReplyPolicy;
+  /** Canned replies the operator inserts by hand in the chat composer (see chat-quick-phrases.ts). */
+  quickPhrases?: ChatQuickPhrase[];
+}
+
+export interface ChatQuickPhrase {
+  id: string;
+  label: string;
+  content: string;
 }
 
 export interface AutoReplyMessageFilter {

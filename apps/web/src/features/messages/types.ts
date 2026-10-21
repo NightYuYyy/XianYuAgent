@@ -88,3 +88,9 @@ export interface MessagesState {
   sendError?: string;
   error: MessagesError | null;
 }
+
+export interface QuickPhraseVM {
+  id: string;
+  label: string;
+  content: string;
+}

@@ -1,4 +1,4 @@
-import type { ConversationVM, MessageVM, RealtimeEvent, ReplySuggestionVM } from './types';
+import type { ConversationVM, MessageVM, QuickPhraseVM, RealtimeEvent, ReplySuggestionVM } from './types';
 
 interface Envelope<T> { data?: T; }
 
@@ -8,12 +8,14 @@ export interface MessagesApi {
   markConversationRead?(input: { accountId: string; conversationId: string }): Promise<ConversationVM>;
   setHandlingMode?(input: { accountId: string; conversationId: string; mode: 'ai' | 'human' }): Promise<ConversationVM>;
   suggestReply?(input: { accountId: string; conversationId: string }): Promise<ReplySuggestionVM>;
+  getQuickPhrases?(input: { accountId: string }): Promise<{ items: QuickPhraseVM[]; version: number }>;
+  saveQuickPhrases?(input: { accountId: string; expectedVersion: number; quickPhrases: QuickPhraseVM[] }): Promise<{ items: QuickPhraseVM[]; version: number }>;
   sendMessage(input: { accountId: string; conversationId: string; text: string; idempotencyKey: string }): Promise<MessageVM>;
   sendImage(input: { accountId: string; conversationId: string; file: File; idempotencyKey: string }): Promise<MessageVM>;
   openRealtime(input: { accountId: string; conversationId: string; cursor: number; onEvent: (event: RealtimeEvent) => void; onOpen?: () => void; onClose?: () => void; onError?: () => void }): { close: () => void };
 }
 
-export function createMessagesApi(input: { get: <T>(path: string) => Promise<T>; post?: <T>(path: string, body?: unknown, init?: RequestInit) => Promise<T>; baseUrl?: string }): MessagesApi {
+export function createMessagesApi(input: { get: <T>(path: string) => Promise<T>; post?: <T>(path: string, body?: unknown, init?: RequestInit) => Promise<T>; patch?: <T>(path: string, body?: unknown, init?: RequestInit) => Promise<T>; baseUrl?: string }): MessagesApi {
   return {
     async listConversations(query) {
       const params = new URLSearchParams({ accountId: query.accountId, limit: String(query.limit ?? 50) });
@@ -47,6 +49,17 @@ export function createMessagesApi(input: { get: <T>(path: string) => Promise<T>;
       const payload = await input.post<Envelope<ReplySuggestionVM>>(`/api/v1/conversations/${encodeURIComponent(query.conversationId)}/suggest-reply`, {});
       if (!payload.data) throw new Error('suggest reply returned no data');
       return payload.data;
+    },
+    async getQuickPhrases(query) {
+      const payload = await input.get<Envelope<{ quickPhrases?: QuickPhraseVM[]; configVersion?: number }>>(`/api/v1/settings/agent?accountId=${encodeURIComponent(query.accountId)}`);
+      return { items: payload.data?.quickPhrases ?? [], version: payload.data?.configVersion ?? 0 };
+    },
+    async saveQuickPhrases(query) {
+      if (!input.patch) throw new Error('messages settings api unavailable');
+      const idempotencyKey = globalThis.crypto?.randomUUID?.() ?? `qp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const payload = await input.patch<Envelope<{ quickPhrases?: QuickPhraseVM[]; configVersion?: number }>>('/api/v1/settings/agent', { accountId: query.accountId, expectedVersion: query.expectedVersion, quickPhrases: query.quickPhrases }, { headers: { 'Idempotency-Key': idempotencyKey } });
+      if (!payload.data) throw new Error('quick phrases save returned no data');
+      return { items: payload.data.quickPhrases ?? [], version: payload.data.configVersion ?? 0 };
     },
     async sendMessage(query) {
       if (!input.post) throw new Error('messages send api unavailable');

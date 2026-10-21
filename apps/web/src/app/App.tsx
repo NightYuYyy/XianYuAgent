@@ -84,7 +84,7 @@ export default function App() {
     ? createMockProductAutomationApi()
     : createProductAutomationApi({ get: transport.get, post: transport.post, patch: transport.patch }), [transport]);
   const couponsApi = useMemo(() => createCouponsApi({ get: transport.get, post: transport.post, patch: transport.patch, delete: transport.delete }), [transport]);
-  const messagesApi = useMemo(() => createMessagesApi({ get: transport.get, post: transport.post, baseUrl: import.meta.env.VITE_API_BASE_URL ?? undefined }), [transport]);
+  const messagesApi = useMemo(() => createMessagesApi({ get: transport.get, post: transport.post, patch: transport.patch, baseUrl: import.meta.env.VITE_API_BASE_URL ?? undefined }), [transport]);
   const workspaceApi = useMemo(() => createWorkspaceApi({ get: transport.get, post: transport.post, delete: transport.delete }, { baseUrl: import.meta.env.VITE_API_BASE_URL ?? '' }), [transport]);
   const ordersApi = useMemo(() => createOrdersApi({ get: transport.get, post: transport.post }), [transport]);
   const settingsApi = useMemo(() => createCredentialApi({ get: transport.get, post: transport.post, patch: transport.patch }), [transport]);
