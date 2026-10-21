@@ -519,6 +519,8 @@ export class XianyuImService {
             const verificationPromise = this.verificationBrowser.waitForCompletion({
               verificationUrl: token.verificationUrl,
               profileKey: account.id,
+              accountId: account.id,
+              deviceId,
               initialCookieSnapshot: initialSnapshot,
               allowManualFallback: false,
               pollIntervalMs: 250,

@@ -7,6 +7,8 @@ import { XIANYU_USER_AGENT } from './xianyu-browser-identity.js';
 import type { XianyuVerificationBrowserFactory, XianyuVerificationContext, XianyuVerificationCookie, XianyuVerificationPage } from './xianyu-browser-port.js';
 import { acquireXianyuVerificationProfileLock } from './xianyu-verification-profile-lock.js';
 import { XianyuSliderSolver, type XianyuSliderMode } from './xianyu-slider-solver.js';
+import { cookieHeaderFromSnapshot } from './xianyu-cookie-jar.js';
+import { isRemoteSliderRetryableError, remoteSliderCookiesToSnapshot, type XianyuRemoteSliderSolver } from './xianyu-remote-slider.js';
 
 export type XianyuVerificationBrowserMode = 'disabled' | 'launch';
 
@@ -37,6 +39,10 @@ export interface XianyuVerificationBrowserOptions {
   userAgent?: string;
   /** Injectable boundary for unit tests and future browser implementations. */
   browserFactory?: XianyuVerificationBrowserFactory;
+  /** External physical-mouse solver tried first for slider challenges. */
+  remoteSlider?: XianyuRemoteSliderSolver;
+  /** When the remote solver is unreachable: 'local' retries with the browser, 'none' fails. */
+  remoteSliderFallback?: 'local' | 'none';
 }
 
 export interface XianyuVerificationBrowserResult {
@@ -85,8 +91,12 @@ export class XianyuVerificationBrowser {
   private readonly allowManualFallback: boolean;
   private readonly userAgent?: string;
   private readonly browserFactory: XianyuVerificationBrowserFactory;
+  private readonly remoteSlider?: XianyuRemoteSliderSolver;
+  private readonly remoteSliderFallback: 'local' | 'none';
 
   constructor(options: XianyuVerificationBrowserOptions = {}) {
+    this.remoteSlider = options.remoteSlider?.enabled ? options.remoteSlider : undefined;
+    this.remoteSliderFallback = options.remoteSliderFallback ?? 'local';
     this.mode = options.mode ?? 'disabled';
     this.sliderMode = options.sliderMode ?? 'disabled';
     this.sliderMaxRetries = Math.max(1, Math.floor(options.sliderMaxRetries ?? 3));
@@ -100,7 +110,10 @@ export class XianyuVerificationBrowser {
     this.browserFactory = options.browserFactory ?? createPatchrightVerificationBrowserFactory();
   }
 
-  get enabled(): boolean { return this.mode !== 'disabled'; }
+  get enabled(): boolean { return this.mode !== 'disabled' || this.remoteSlider !== undefined; }
+
+  /** True when slider challenges are delegated to the external physical-mouse solver. */
+  get remoteSliderEnabled(): boolean { return this.remoteSlider !== undefined; }
 
   async waitForCompletion(input: {
     verificationUrl: string;
@@ -109,9 +122,16 @@ export class XianyuVerificationBrowser {
     allowManualFallback?: boolean;
     maxWaitMs?: number;
     pollIntervalMs?: number;
+    /** Forwarded to the remote solver so the fresh x5sec is bound to the right account. */
+    accountId?: string;
+    deviceId?: string;
   }): Promise<XianyuVerificationBrowserResult> {
-    if (this.mode === 'disabled') throw new Error('XIANYU_VERIFICATION_BROWSER_DISABLED');
     assertVerificationUrl(input.verificationUrl);
+    if (this.remoteSlider && classifyVerificationUrl(input.verificationUrl) === 'slider') {
+      const remote = await this.solveWithRemoteSlider(input);
+      if (remote) return remote;
+    }
+    if (this.mode === 'disabled') throw new Error('XIANYU_VERIFICATION_BROWSER_DISABLED');
     const profileDir = await this.resolveProfileDir(input.profileKey);
     const profileLockKey = normalizeProfileLockKey(profileDir);
     const verificationKey = `${profileLockKey}\u0000${input.verificationUrl}\u0000${JSON.stringify(input.initialCookieSnapshot ?? [])}`;
@@ -138,6 +158,42 @@ export class XianyuVerificationBrowser {
       return await task;
     } finally {
       if (activeVerifications.get(verificationKey) === task) activeVerifications.delete(verificationKey);
+    }
+  }
+
+  /**
+   * Returns the merged cookie snapshot on success, `undefined` when the remote
+   * is unreachable and the local browser should take over, and throws when the
+   * remote answered but could not pass the slider.
+   */
+  private async solveWithRemoteSlider(input: {
+    verificationUrl: string;
+    profileKey?: string;
+    initialCookieSnapshot?: XianyuCookieSnapshot;
+    accountId?: string;
+    deviceId?: string;
+  }): Promise<XianyuVerificationBrowserResult | undefined> {
+    if (!this.remoteSlider) return undefined;
+    const initialSnapshot = normalizeCookieSnapshot(input.initialCookieSnapshot) ?? [];
+    const accountId = input.accountId ?? input.profileKey;
+    try {
+      const result = await this.remoteSlider.solve({
+        verificationUrl: input.verificationUrl,
+        accountId,
+        cookieHeader: cookieHeaderFromSnapshot(initialSnapshot) || undefined,
+        deviceId: input.deviceId,
+      });
+      const merged = mergeSnapshots(initialSnapshot, remoteSliderCookiesToSnapshot(result.cookies));
+      console.info(JSON.stringify({ component: 'xianyu-verification', event: 'remote_slider_completed', accountId, elapsedMs: result.elapsedMs }));
+      return { finalUrl: input.verificationUrl, cookieSnapshot: dropStaleCaptchaChallengeCookies(merged) };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (isRemoteSliderRetryableError(error) && this.remoteSliderFallback === 'local' && this.mode !== 'disabled') {
+        console.warn(JSON.stringify({ component: 'xianyu-verification', event: 'remote_slider_fallback_local', accountId, reason }));
+        return undefined;
+      }
+      console.warn(JSON.stringify({ component: 'xianyu-verification', event: 'remote_slider_failed', accountId, reason }));
+      throw error;
     }
   }
 
@@ -342,6 +398,21 @@ function toBrowserCookies(snapshot: XianyuCookieSnapshot, verificationUrl: strin
     ...(cookie.secure !== undefined ? { secure: cookie.secure } : {}),
     ...(cookie.sameSite ? { sameSite: cookie.sameSite } : {}),
   }));
+}
+
+function mergeSnapshots(current: XianyuCookieSnapshot, incoming: XianyuCookieSnapshot): XianyuCookieSnapshot {
+  const identity = (cookie: XianyuCookieSnapshot[number]) => `${cookie.name.toLowerCase()}\u0000${(cookie.domain ?? '').toLowerCase()}\u0000${cookie.path ?? '/'}`;
+  const merged = new Map<string, XianyuCookieSnapshot[number]>();
+  for (const cookie of current) merged.set(identity(cookie), cookie);
+  for (const cookie of incoming) {
+    // A fresh x5* value supersedes the same cookie on any domain variant the
+    // account already carried (e.g. h5api.m.goofish.com vs .goofish.com).
+    for (const [key, existing] of merged) {
+      if (existing.name.toLowerCase() === cookie.name.toLowerCase()) merged.delete(key);
+    }
+    merged.set(identity(cookie), cookie);
+  }
+  return [...merged.values()];
 }
 
 function mapCookies(cookies: Array<{ name: string; value: string; domain?: string; path?: string; expires?: number; httpOnly?: boolean; secure?: boolean; sameSite?: string }>): XianyuCookieSnapshot {

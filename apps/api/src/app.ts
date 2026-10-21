@@ -12,6 +12,7 @@ import type { ProductListResult, ProductRecord, Store } from './domain.js';
 import { createId, digestJson } from './security.js';
 import { XianyuQrLoginAdapter, type XianyuQrPublicSession } from './xianyu-qr-login.js';
 import { XianyuVerificationBrowser } from './xianyu-verification-browser.js';
+import { XianyuRemoteSliderSolver } from './xianyu-remote-slider.js';
 import { XianyuMtopClient } from './xianyu-mtop.js';
 import { metadataWithCookieSnapshot } from './xianyu-cookie-jar.js';
 import { XianyuImService } from './xianyu-im-service.js';
@@ -129,7 +130,15 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
   });
   let xianyu: XianyuMtopClient;
   let xianyuIm!: XianyuImService;
-  const verificationBrowser = config.xianyuVerificationBrowserMode === 'disabled'
+  const remoteSlider = config.xianyuSliderRemoteUrl && config.xianyuSliderRemoteSecret
+    ? new XianyuRemoteSliderSolver({
+      url: config.xianyuSliderRemoteUrl,
+      secret: config.xianyuSliderRemoteSecret,
+      timeoutMs: config.xianyuSliderRemoteTimeoutMs,
+      browserTimeoutSeconds: config.xianyuSliderRemoteBrowserTimeoutSeconds,
+    })
+    : undefined;
+  const verificationBrowser = config.xianyuVerificationBrowserMode === 'disabled' && !remoteSlider
     ? undefined
     : new XianyuVerificationBrowser({
       mode: config.xianyuVerificationBrowserMode,
@@ -139,7 +148,10 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
       executablePath: config.xianyuVerificationBrowserExecutablePath,
       userDataDir: config.xianyuVerificationBrowserUserDataDir,
       maxWaitMs: config.xianyuVerificationBrowserMaxWaitMs,
+      remoteSlider,
+      remoteSliderFallback: config.xianyuSliderRemoteFallback,
     });
+  if (remoteSlider) console.info(JSON.stringify({ component: 'xianyu-verification', event: 'remote_slider_configured', url: config.xianyuSliderRemoteUrl, fallback: config.xianyuSliderRemoteFallback }));
   const productAutomationExecution = new XianyuProductAutomationExecutionAdapter(store, () => xianyu, () => xianyuIm, async (input) => {
     const auditId = createId();
     await store.recordAudit({ id: auditId, actorType: 'system', actorId: input.adminId, action: input.action, targetRef: input.orderNo ?? input.executionKey, requestId: `automation:${input.executionKey ?? auditId}`, traceId: `automation:${input.executionKey ?? auditId}`, payloadDigest: digestJson(input.payload ?? {}), accountId: input.accountId, createdAt: new Date().toISOString() });
