@@ -34,6 +34,7 @@ test('verified transaction status notices are persisted as system messages and n
     const adminId = boot.admin.id;
     const account = await runtime.store.createAccount({ adminId, platform: 'xianyu', sellerRef: 'system-message-seller' });
     const conversation = await runtime.store.createConversation({ adminId, accountId: account.id, buyerRef: 'system-message-buyer', buyerDisplayName: '系统消息买家', externalConversationRef: 'system-message-conversation' });
+    await runtime.store.setConversationSide(adminId, conversation.id, 'seller');
     await runtime.store.createOrder({ adminId, order: { orderNo: 'SYSTEM-MESSAGE-ORDER-1', accountId: account.id, buyerId: conversation.buyerRef, buyerName: conversation.buyerDisplayName ?? '系统消息买家', conversationId: conversation.id, itemId: 'system-message-item', itemTitle: '系统消息商品', amountMinor: 1_000, paymentStatus: 'unpaid', orderStatus: 'open', deliveryStatus: 'pending', afterSalesStatus: 'none', deliveryType: 'manual' } });
 
     const result = await runtime.xianyuIm.handleExternalEvent(adminId, {
@@ -74,7 +75,9 @@ test('manual status text remains an auto-reply message while an unverified platf
     const adminId = boot.admin.id;
     const account = await runtime.store.createAccount({ adminId, platform: 'xianyu', sellerRef: 'status-boundary-seller' });
     const manual = await runtime.store.createConversation({ adminId, accountId: account.id, buyerRef: 'manual-status-buyer', buyerDisplayName: '手动同文案买家', externalConversationRef: 'manual-status-conversation' });
+    await runtime.store.setConversationSide(adminId, manual.id, 'seller');
     const candidate = await runtime.store.createConversation({ adminId, accountId: account.id, buyerRef: 'candidate-status-buyer', buyerDisplayName: '未核验买家', externalConversationRef: 'candidate-status-conversation' });
+    await runtime.store.setConversationSide(adminId, candidate.id, 'seller');
 
     const manualResult = await runtime.xianyuIm.handleExternalEvent(adminId, {
       accountId: account.id,
@@ -128,6 +131,7 @@ test('delayed auto reply is cancelled by a human reply and never persists AI tex
     const adminId = boot.admin.id;
     const account = await runtime.store.createAccount({ adminId, platform: 'xianyu', sellerRef: 'delay-cancel-seller' });
     const conversation = await runtime.store.createConversation({ adminId, accountId: account.id, buyerRef: 'delay-cancel-buyer', buyerDisplayName: '延迟买家', externalConversationRef: 'delay-cancel-conversation' });
+    await runtime.store.setConversationSide(adminId, conversation.id, 'seller');
     const current = await runtime.autoReplyAgentSettings.get(adminId, account.id);
     await runtime.autoReplyAgentSettings.update({ adminId, accountId: account.id, expectedVersion: current.configVersion, patch: { sendDelaySeconds: 1, debounceMs: 0 }, requestId: 'delay-cancel-settings', traceId: 'delay-cancel-settings' });
 
@@ -170,6 +174,7 @@ test('delayed auto reply sends and persists when no human reply arrives', async 
     const adminId = boot.admin.id;
     const account = await runtime.store.createAccount({ adminId, platform: 'xianyu', sellerRef: 'delay-send-seller' });
     const conversation = await runtime.store.createConversation({ adminId, accountId: account.id, buyerRef: 'delay-send-buyer', buyerDisplayName: '延迟发送买家', externalConversationRef: 'delay-send-conversation' });
+    await runtime.store.setConversationSide(adminId, conversation.id, 'seller');
     const current = await runtime.autoReplyAgentSettings.get(adminId, account.id);
     await runtime.autoReplyAgentSettings.update({ adminId, accountId: account.id, expectedVersion: current.configVersion, patch: { sendDelaySeconds: 1, debounceMs: 0 }, requestId: 'delay-send-settings', traceId: 'delay-send-settings' });
 
@@ -208,6 +213,7 @@ test('buyer acknowledgement after the latest AI reply is skipped without generat
     const adminId = boot.admin.id;
     const account = await runtime.store.createAccount({ adminId, platform: 'xianyu', sellerRef: 'ack-gate-seller' });
     const conversation = await runtime.store.createConversation({ adminId, accountId: account.id, buyerRef: 'ack-gate-buyer', buyerDisplayName: 'Ack Buyer', externalConversationRef: 'ack-gate-conversation' });
+    await runtime.store.setConversationSide(adminId, conversation.id, 'seller');
 
     const first = await runtime.xianyuIm.handleExternalEvent(adminId, {
       accountId: account.id,
@@ -258,6 +264,7 @@ test('acknowledgement is not suppressed when a newer buyer message follows the a
     const adminId = boot.admin.id;
     const account = await runtime.store.createAccount({ adminId, platform: 'xianyu', sellerRef: 'ack-gate-follow-up-seller' });
     const conversation = await runtime.store.createConversation({ adminId, accountId: account.id, buyerRef: 'ack-gate-follow-up-buyer', buyerDisplayName: 'Ack Follow Up Buyer', externalConversationRef: 'ack-gate-follow-up-conversation' });
+    await runtime.store.setConversationSide(adminId, conversation.id, 'seller');
 
     const first = await runtime.xianyuIm.handleExternalEvent(adminId, {
       accountId: account.id, externalConversationRef: conversation.externalConversationRef!, externalMessageRef: 'ack-follow-up-question.PNM',
@@ -291,6 +298,7 @@ test('deferred inbox aggregates messages received during the takeover wait', asy
     const adminId = boot.admin.id;
     const account = await runtime.store.createAccount({ adminId, platform: 'xianyu', sellerRef: 'deferred-aggregate-seller' });
     const conversation = await runtime.store.createConversation({ adminId, accountId: account.id, buyerRef: 'deferred-aggregate-buyer', buyerDisplayName: '延迟聚合买家', externalConversationRef: 'deferred-aggregate-conversation' });
+    await runtime.store.setConversationSide(adminId, conversation.id, 'seller');
     const current = await runtime.autoReplyAgentSettings.get(adminId, account.id);
     await runtime.autoReplyAgentSettings.update({ adminId, accountId: account.id, expectedVersion: current.configVersion, patch: { sendDelaySeconds: 1, debounceMs: 0 }, requestId: 'deferred-aggregate-settings', traceId: 'deferred-aggregate-settings' });
     await runtime.xianyuIm.handleExternalEvent(adminId, {
@@ -328,6 +336,7 @@ test('deferred inbox cancels queued auto replies after human takeover', async ()
     const adminId = boot.admin.id;
     const account = await runtime.store.createAccount({ adminId, platform: 'xianyu', sellerRef: 'deferred-human-seller' });
     const conversation = await runtime.store.createConversation({ adminId, accountId: account.id, buyerRef: 'deferred-human-buyer', buyerDisplayName: '延迟人工买家', externalConversationRef: 'deferred-human-conversation' });
+    await runtime.store.setConversationSide(adminId, conversation.id, 'seller');
     const current = await runtime.autoReplyAgentSettings.get(adminId, account.id);
     await runtime.autoReplyAgentSettings.update({ adminId, accountId: account.id, expectedVersion: current.configVersion, patch: { sendDelaySeconds: 1, debounceMs: 0 }, requestId: 'deferred-human-settings', traceId: 'deferred-human-settings' });
     const event = (externalMessageRef: string, bodyText: string) => ({
@@ -375,6 +384,7 @@ test('production listener callback defers to the inbox worker and publishes both
     const adminId = boot.admin.id;
     const account = await runtime.store.createAccount({ adminId, platform: 'xianyu', sellerRef: 'listener-worker-seller' });
     const conversation = await runtime.store.createConversation({ adminId, accountId: account.id, buyerRef: 'buyer-1', buyerDisplayName: 'Buyer', externalConversationRef: 'listener-worker-conversation' });
+    await runtime.store.setConversationSide(adminId, conversation.id, 'seller');
     const unsubscribe = runtime.messages.realtime.subscribe(conversation.id, (event) => {
       const message = event.payload.message as { direction?: string; source?: string } | undefined;
       events.push({ type: event.type, direction: message?.direction, source: message?.source });
@@ -436,7 +446,9 @@ test('xianyu listener drives product and general auto-reply chains without real 
     await runtime.store.upsertCredential({ adminId, accountId: account.id, platform: 'xianyu', cookieHeader: 'unb=seller-1', accessToken: 'access-token', deviceId: 'device-1' });
     const product = await runtime.store.createProduct({ adminId, accountId: account.id, externalProductRef: 'item-1', title: '资料包', description: '数字资料', priceMinor: 1_999, status: 'draft' });
     const productConversation = await runtime.store.createConversation({ adminId, accountId: account.id, buyerRef: 'buyer-1', buyerDisplayName: '一只橘喵喵亮晶晶', itemRef: 'item-1', itemTitle: '资料包', externalConversationRef: 'conv-product' });
+    await runtime.store.setConversationSide(adminId, productConversation.id, 'seller');
     const blockedConversation = await runtime.store.createConversation({ adminId, accountId: account.id, buyerRef: 'buyer-3', buyerDisplayName: '其他买家', externalConversationRef: 'conv-blocked' });
+    await runtime.store.setConversationSide(adminId, blockedConversation.id, 'seller');
     const order = await runtime.store.createOrder({ adminId, order: { orderNo: 'ORDER-AUTO-1', accountId: account.id, buyerId: 'buyer-1', buyerName: '一只橘喵喵亮晶晶', conversationId: productConversation.id, itemId: 'item-1', itemTitle: '资料包', amountMinor: 1_999, paymentStatus: 'paid', orderStatus: 'open', deliveryStatus: 'pending', afterSalesStatus: 'none', deliveryType: 'manual' } });
     await runtime.store.createOrder({ adminId, order: { orderNo: 'ORDER-AUTO-OTHER-PAID', accountId: account.id, buyerId: 'buyer-other', itemId: 'item-1', itemTitle: '资料包', amountMinor: 1_999, paymentStatus: 'paid', orderStatus: 'open', deliveryStatus: 'pending', afterSalesStatus: 'none', deliveryType: 'manual' } });
 
@@ -543,6 +555,7 @@ test('real push handles a GitHub skill question through the Responses search pat
     const account = await runtime.store.createAccount({ adminId, platform: 'xianyu', sellerRef: 'buyer-agent-e2e-seller', displayName: '测试店铺' });
     const product = await runtime.store.createProduct({ adminId, accountId: account.id, externalProductRef: 'buyer-agent-item-1', title: '数字资料包', description: '数字资料内容', priceMinor: 1_999, status: 'published' });
     const conversation = await runtime.store.createConversation({ adminId, accountId: account.id, buyerRef: 'buyer-agent-buyer-1', buyerDisplayName: '买家', itemRef: product.externalProductRef, itemTitle: product.title, externalConversationRef: 'buyer-agent-conversation-1' });
+    await runtime.store.setConversationSide(adminId, conversation.id, 'seller');
     const socket = new FakeSocket();
     const results: any[] = [];
     client = new XianyuImClient({ accountId: account.id, credential: { cookieHeader: 'unb=buyer-agent-e2e-seller', accessToken: 'access-token', deviceId: 'device-1' }, heartbeatIntervalMs: 60_000, webSocketFactory: () => socket, onEvent: async (event) => { results.push(await runtime.xianyuIm.handleExternalEvent(adminId, event)); } });
@@ -600,6 +613,7 @@ test('persisted Agent settings apply to the next buyer push without restart', as
     const account = await runtime.store.createAccount({ adminId, platform: 'xianyu', sellerRef: 'settings-agent-seller', displayName: '设置测试店铺' });
     const product = await runtime.store.createProduct({ adminId, accountId: account.id, externalProductRef: 'settings-agent-item', title: '设置测试商品', description: '设置测试商品描述', priceMinor: 3_000, status: 'published' });
     const conversation = await runtime.store.createConversation({ adminId, accountId: account.id, buyerRef: 'settings-agent-buyer', buyerDisplayName: '设置买家', itemRef: product.externalProductRef, itemTitle: product.title, externalConversationRef: 'settings-agent-conversation' });
+    await runtime.store.setConversationSide(adminId, conversation.id, 'seller');
     const socket = new FakeSocket();
     const results: any[] = [];
     client = new XianyuImClient({ accountId: account.id, credential: { cookieHeader: 'unb=settings-agent-seller', accessToken: 'settings-access', deviceId: 'settings-device' }, heartbeatIntervalMs: 60_000, webSocketFactory: () => socket, onEvent: async (event) => { results.push(await runtime.xianyuIm.handleExternalEvent(adminId, event)); } });

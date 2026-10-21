@@ -28,6 +28,8 @@ async function bootRuntime(label: string, sendDelaySeconds = 1) {
   const boot = await runtime.auth.bootstrap({ email: `${label}@example.com`, password: 'password-123', displayName: label });
   const account = await runtime.store.createAccount({ adminId: boot.admin.id, platform: 'xianyu', sellerRef: `${label}-seller` });
   const conversation = await runtime.store.createConversation({ adminId: boot.admin.id, accountId: account.id, buyerRef: `${label}-buyer`, buyerDisplayName: '买家', externalConversationRef: `${label}-conversation` });
+  // The seller-side gate only lets the agent answer buyers of the account's own items.
+  await runtime.store.setConversationSide(boot.admin.id, conversation.id, 'seller');
   return { runtime, adminId: boot.admin.id, account, conversation };
 }
 

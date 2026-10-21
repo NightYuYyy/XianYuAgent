@@ -16,6 +16,8 @@ export interface ConversationVM {
   lastMessagePreview?: string;
   lastMessageAt?: string;
   handlingMode: 'ai' | 'human';
+  /** 'buyer' means the account is asking about someone else's item; the agent never replies there. */
+  side: 'seller' | 'buyer' | 'unknown';
   version: number;
   createdAt: string;
   updatedAt: string;
@@ -57,7 +59,7 @@ export interface RealtimeEventVM {
 type EventListener = (event: RealtimeEventVM) => void;
 
 function toConversationVM(conversation: ConversationRecord): ConversationVM {
-  return { conversationId: conversation.id, accountId: conversation.accountId, buyerRef: conversation.buyerRef, buyerDisplayName: conversation.buyerDisplayName, buyerAvatarUrl: conversation.buyerAvatarUrl, itemRef: conversation.itemRef, itemTitle: conversation.itemTitle, itemImageUrl: conversation.itemImageUrl, unreadCount: conversation.unreadCount, lastMessagePreview: conversation.lastMessagePreview, lastMessageAt: conversation.lastMessageAt, handlingMode: conversation.handlingMode, version: conversation.version, createdAt: conversation.createdAt, updatedAt: conversation.updatedAt };
+  return { conversationId: conversation.id, accountId: conversation.accountId, buyerRef: conversation.buyerRef, buyerDisplayName: conversation.buyerDisplayName, buyerAvatarUrl: conversation.buyerAvatarUrl, itemRef: conversation.itemRef, itemTitle: conversation.itemTitle, itemImageUrl: conversation.itemImageUrl, unreadCount: conversation.unreadCount, lastMessagePreview: conversation.lastMessagePreview, lastMessageAt: conversation.lastMessageAt, handlingMode: conversation.handlingMode, side: conversation.side, version: conversation.version, createdAt: conversation.createdAt, updatedAt: conversation.updatedAt };
 }
 
 function toMessageVM(message: MessageRecord): MessageVM {
