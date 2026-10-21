@@ -29,7 +29,10 @@ const ADJUST_PRICE_API = 'mtop.taobao.idle.trade.user.adjust.price';
 const CLOSE_BY_SELLER_API = 'mtop.taobao.idle.trade.merchant.close.by.seller';
 const ITEM_BATCH_OFFLINE_API = 'mtop.alibaba.idle.seller.pc.item.batch.offline';
 const ITEM_DELETE_API = 'mtop.alibaba.idle.seller.pc.item.delete';
-const SELLER_ITEM_MANAGE_REFERER = 'https://www.goofish.com/personal?spm=a21ybx.home.sidebar.1';
+const SELLER_ITEM_MANAGE_REFERER = 'https://seller.goofish.com/?site=COMMONPRO';
+// The seller workbench (seller.goofish.com) rejects item mutations unless the request carries the workbench site marker.
+const SELLER_WORKBENCH_PARAMS = { needLoginPC: 'true', showErrorToast: 'true', spm_cnt: 'a21107h.42826273.0.0' };
+const SELLER_WORKBENCH_HEADERS = { idle_site_biz_code: 'COMMONPRO', idle_user_group_member_id: '' };
 /** Preset wording on the seller workbench; the platform rejects free-form reasons. */
 export const CLOSE_BY_SELLER_REASON = '其他原因';
 const ORDER_DETAIL_API = 'mtop.idle.web.trade.order.detail';
@@ -93,7 +96,7 @@ export interface XianyuItemDetailOptions {
   referer?: string;
 }
 
-interface MtopRequestOptions { referer?: string; }
+interface MtopRequestOptions { referer?: string; headers?: Record<string, string>; }
 
 export interface XianyuChatImageUploadResult {
   success: boolean;
@@ -417,7 +420,7 @@ export class XianyuMtopClient {
   async offlineItems(adminId: string, accountId: string, itemIds: string[]): Promise<XianyuExternalMutationResult> {
     const ids = [...new Set(itemIds.map((id) => String(id ?? '').trim()).filter(Boolean))];
     if (ids.length === 0) return { status: 'failed', errorCode: 'ITEM_ID_MISSING', message: 'itemIds is required', cookieHeader: '' };
-    const result = await this.call(adminId, accountId, ITEM_BATCH_OFFLINE_API, '1.0', { itemIds: ids.join(',') }, { spm_cnt: 'a21ybx.item.0.0' }, { referer: SELLER_ITEM_MANAGE_REFERER });
+    const result = await this.call(adminId, accountId, ITEM_BATCH_OFFLINE_API, '1.0', { itemIds: ids.join(',') }, SELLER_WORKBENCH_PARAMS, { referer: SELLER_ITEM_MANAGE_REFERER, headers: SELLER_WORKBENCH_HEADERS });
     const classified = classifyMutationResult(result, ids.join(','));
     const inner = record(record(result.response?.data).data);
     const rawResults = Array.isArray(inner.results) ? inner.results : [];
@@ -432,7 +435,7 @@ export class XianyuMtopClient {
   async deleteItem(adminId: string, accountId: string, itemId: string): Promise<XianyuExternalMutationResult> {
     const normalized = String(itemId ?? '').trim();
     if (!normalized) return { status: 'failed', errorCode: 'ITEM_ID_MISSING', message: 'itemId is required', cookieHeader: '' };
-    const result = await this.call(adminId, accountId, ITEM_DELETE_API, '1.0', { itemId: normalized, draftId: null }, { spm_cnt: 'a21ybx.item.0.0' }, { referer: SELLER_ITEM_MANAGE_REFERER });
+    const result = await this.call(adminId, accountId, ITEM_DELETE_API, '1.0', { itemId: normalized, draftId: null }, SELLER_WORKBENCH_PARAMS, { referer: SELLER_ITEM_MANAGE_REFERER, headers: SELLER_WORKBENCH_HEADERS });
     return classifyMutationResult(result, normalized);
   }
 
@@ -592,6 +595,7 @@ export class XianyuMtopClient {
           'sec-ch-ua-mobile': '?0',
           'sec-ch-ua-platform': xianyuSecChUaPlatform(),
           'user-agent': USER_AGENT,
+          ...(requestOptions.headers ?? {}),
           cookie: requestCookieHeader,
         };
         const response = await fetchForAccount(`${requestUrl}?${params.toString()}`, {
