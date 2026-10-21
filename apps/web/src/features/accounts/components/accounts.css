@@ -180,3 +180,10 @@
   .accounts-domain { height: 100%; }
   .accounts-domain-panel { min-height: 0; }
 }
+
+/* account proxy modal */
+.account-proxy-modal { width: min(480px, calc(100vw - 32px)); }
+.account-proxy-body { display: grid; gap: 12px; padding: 4px 0 0; }
+.account-proxy-body .field { display: grid; gap: 6px; }
+.account-proxy-body .field input { width: 100%; box-sizing: border-box; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.account-proxy-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-muted, #6b7280); }
