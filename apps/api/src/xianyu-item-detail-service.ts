@@ -141,7 +141,7 @@ function detailView(product: ProductRecord, detail: StoredDetail, cached: boolea
   return { ...detail.summary, product: detailProduct, itemId: detail.summary.itemId ?? product.externalProductRef ?? '', summary: detail.summary, rawResponse: detail.rawResponse, imageUrls: detail.imageUrls, images, assets, syncedAt: detail.syncedAt, cached, assetUploadErrors };
 }
 
-async function downloadImage(sourceUrl: string): Promise<{ body: Buffer; contentType: string; checksum: string }> {
+export async function downloadImage(sourceUrl: string): Promise<{ body: Buffer; contentType: string; checksum: string }> {
   const parsed = new URL(sourceUrl);
   if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('IMAGE_URL_PROTOCOL_UNSUPPORTED');
   assertSafeRemoteImageHost(parsed.hostname);

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createMockProductsApi, type ProductsApi } from './api';
 import type { ProductDetailState, ProductDraftInput, ProductDraftPatch, ProductFilters, ProductMutationError, ProductsLoadError, ProductsQueryState, ProductVM, XianyuDetailState } from './types';
 import type { ProductPublishFormValues } from './product-publish';
-import type { ProductListingResultVM, ProductPublishPreviewVM } from './api';
+import type { ProductListingResultVM, ProductPublishPreviewVM, AutoRelistJobVM } from './api';
 import { yuanToMinor } from './product-publish';
 
 const defaultProductsApi = createMockProductsApi();
@@ -76,6 +76,8 @@ export interface ProductsController {
   optimizeDescription: (input: { accountId: string; title: string; description: string }) => Promise<string>;
   syncFromXianyu: (accountId: string) => Promise<boolean>;
   batchListing: (action: 'offline' | 'delete', input: { accountId: string; productIds: string[] }) => Promise<ProductListingResultVM | null>;
+  batchAutoRelist: (input: { accountId: string; productIds: string[]; enabled: boolean; delaySeconds?: number }) => Promise<{ enabled: boolean; products: ProductVM[] } | null>;
+  relistNow: (input: { accountId: string; productIds: string[] }) => Promise<{ jobs: AutoRelistJobVM[] } | null>;
   syncError: ProductMutationError | null;
   clearMutation: () => void;
   state: ProductsQueryState;
@@ -306,7 +308,36 @@ export function useProductsController(options: { api?: ProductsApi; initialFilte
       return null;
     }
   }, [productsApi, reload]);
+  const batchAutoRelist = useCallback(async (input: { accountId: string; productIds: string[]; enabled: boolean; delaySeconds?: number }) => {
+    setSyncError(null);
+    setMutation({ phase: 'saving', error: null });
+    try {
+      const result = await productsApi.batchAutoRelist(input);
+      setMutation({ phase: 'success', error: null });
+      await reload();
+      return result;
+    } catch (error) {
+      const normalized = toProductsMutationError(error);
+      setSyncError(normalized);
+      setMutation({ phase: 'error', error: normalized });
+      return null;
+    }
+  }, [productsApi, reload]);
+  const relistNow = useCallback(async (input: { accountId: string; productIds: string[] }) => {
+    setSyncError(null);
+    setMutation({ phase: 'saving', error: null });
+    try {
+      const result = await productsApi.relistNow(input);
+      setMutation({ phase: 'success', error: null });
+      return result;
+    } catch (error) {
+      const normalized = toProductsMutationError(error);
+      setSyncError(normalized);
+      setMutation({ phase: 'error', error: normalized });
+      return null;
+    }
+  }, [productsApi]);
   const clearMutation = useCallback(() => setMutation({ phase: 'idle', error: null }), []);
 
-  return { filters, setFilters, setKeyword, reload, openProduct, closeProduct, openXianyuDetail, syncXianyuDetail, closeXianyuDetail, createDraft, updateDraft, updateKnowledgeBase, generateKnowledgeBaseFromConversations, batchListing, optimizeKnowledgeBase, publishProduct, previewProduct, optimizeDescription, syncFromXianyu, syncError, clearMutation, state, detail, xianyuDetail, mutation };
+  return { filters, setFilters, setKeyword, reload, openProduct, closeProduct, openXianyuDetail, syncXianyuDetail, closeXianyuDetail, createDraft, updateDraft, updateKnowledgeBase, generateKnowledgeBaseFromConversations, batchListing, batchAutoRelist, relistNow, optimizeKnowledgeBase, publishProduct, previewProduct, optimizeDescription, syncFromXianyu, syncError, clearMutation, state, detail, xianyuDetail, mutation };
 }

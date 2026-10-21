@@ -93,4 +93,14 @@ describe('ProductTable', () => {
     expect(html).toContain('正在读取规则');
     expect(css).toContain('min-height: 42px');
   });
+
+  it('flags auto-relist products and retired links with a badge', () => {
+    const render = (item: ProductVM) => renderToStaticMarkup(createElement(ProductTable, {
+      products: [item], page: 1, totalPages: 1, total: 1, sortBy: 'xianyuOrder', sortOrder: 'asc',
+      onSortChange: vi.fn(), onPageChange: vi.fn(), onOpen: vi.fn(), onOpenXianyuDetail: vi.fn(), onOpenKnowledgeBase: vi.fn(),
+    }));
+    expect(render({ ...product, attributesJson: { autoRelist: { enabled: true, delaySeconds: 30 } } })).toContain('自动续售');
+    expect(render({ ...product, attributesJson: { autoRelist: { enabled: true }, relist: { state: 'relisted', newExternalProductRef: 'item-2' } } })).toContain('已续售');
+    expect(render(product)).not.toContain('products-listing-badge');
+  });
 });

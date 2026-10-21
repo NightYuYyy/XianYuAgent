@@ -1,4 +1,4 @@
-import type { AccountListQuery, AccountListResult, AccountRecord, AccountScopeRecord, AdminRecord, AuditEventRecord, AutoReplyActivitySummary, AutoReplyAgentConfig, AutoReplyAgentConfigPatch, AutoReplyAgentConfigRecord, AutoReplyOutboxRecord, AutoReplyRepairPolicyBundle, AutoReplyRunDetailRecord, AutoReplyRunEventRecord, AutoReplyRunListItem, AutoReplyRunListQuery, AutoReplyRunListResult, AutoReplyRunRecord, AutoReplyRunUpdate, AutoReplyDecision, AutoReplyRunStage, AutoReplyRunStatus, AutoReplyConversationContext, AutoReplyConversationListQuery, AutoReplyConversationListResult, AutoReplyMessageContext, AutoReplyMessageListQuery, AutoReplyMessageListResult, AutoReplyOrderContext, AutoReplyOrderListQuery, AutoReplyOrderListResult, AutoReplyProductContext, AutoReplyProductListQuery, AutoReplyProductListResult, AutoReplyProductLookup, ConversationEventRecord, ConversationListQuery, ConversationListResult, ConversationRecord, CouponAssetRecord, CouponBatchListQuery, CouponBatchListResult, CouponBatchMetadata, CouponBatchRecord, CouponBatchStatus, CouponBindingRecord, CouponItemRecord, CouponReservationItemRecord, CouponReservationPurpose, CouponReservationRecord, CredentialRecord, CredentialRefRecord, CredentialRefStatus, DeliveryRecord, DeliveryRecordStatus, DeliveryStatus, IdempotencyRecord, InboundInboxRecord, InboundQuarantineRecord, LoginSessionRecord, MessageListQuery, MessageListResult, MessageRecord, ModelProviderRoutingRecord, ModelProviderRoutingMode, OrderListQuery, OrderListResult, OrderRecord, OrderSource, OrderUpsertResult, ProductAutomationBatchResult, ProductAutomationConfig, ProductAutomationConfigRecord, ProductKnowledgeBaseMessageRecord, ProductListQuery, ProductListResult, ProductPatch, ProductRecord, ProductStatus, SessionRecord, Store, XianyuItemDetailPersistenceInput, XianyuOrderItem, XianyuProductItem, ProductUpsertResult, AutomationExecutionLedgerRecord } from './domain.js';
+import type { AccountListQuery, AccountListResult, AccountRecord, AccountScopeRecord, AdminRecord, AuditEventRecord, AutoReplyActivitySummary, AutoReplyAgentConfig, AutoReplyAgentConfigPatch, AutoReplyAgentConfigRecord, AutoReplyOutboxRecord, AutoReplyRepairPolicyBundle, AutoReplyRunDetailRecord, AutoReplyRunEventRecord, AutoReplyRunListItem, AutoReplyRunListQuery, AutoReplyRunListResult, AutoReplyRunRecord, AutoReplyRunUpdate, AutoReplyDecision, AutoReplyRunStage, AutoReplyRunStatus, AutoReplyConversationContext, AutoReplyConversationListQuery, AutoReplyConversationListResult, AutoReplyMessageContext, AutoReplyMessageListQuery, AutoReplyMessageListResult, AutoReplyOrderContext, AutoReplyOrderListQuery, AutoReplyOrderListResult, AutoReplyProductContext, AutoReplyProductListQuery, AutoReplyProductListResult, AutoReplyProductLookup, ConversationEventRecord, ConversationListQuery, ConversationListResult, ConversationRecord, CouponAssetRecord, CouponBatchListQuery, CouponBatchListResult, CouponBatchMetadata, CouponBatchRecord, CouponBatchStatus, CouponBindingRecord, CouponItemRecord, CouponReservationItemRecord, CouponReservationPurpose, CouponReservationRecord, CredentialRecord, CredentialRefRecord, CredentialRefStatus, DeliveryRecord, DeliveryRecordStatus, DeliveryStatus, IdempotencyRecord, InboundInboxRecord, InboundQuarantineRecord, LoginSessionRecord, MessageListQuery, MessageListResult, MessageRecord, ModelProviderRoutingRecord, ModelProviderRoutingMode, OrderListQuery, OrderListResult, OrderRecord, OrderSource, OrderUpsertResult, ProductAutomationBatchResult, ProductAutomationConfig, ProductAutomationConfigRecord, ProductKnowledgeBaseMessageRecord, ProductListQuery, ProductListResult, ProductPatch, ProductRecord, ProductStatus, SessionRecord, Store, XianyuItemDetailPersistenceInput, XianyuOrderItem, XianyuProductItem, ProductUpsertResult, AutomationExecutionLedgerRecord, AutoRelistJobRecord, AutoRelistJobSource, AutoRelistJobStatus } from './domain.js';
 import { autoReplyStageForStatus } from './domain.js';
 import { projectAutoReplyRun } from './auto-reply-activity-projection.js';
 import { createId, digestJson } from './security.js';
@@ -105,6 +105,7 @@ function cloneRepairPolicy(bundle: AutoReplyRepairPolicyBundle): AutoReplyRepair
 export class MemoryStore implements Store {
   readonly kind = 'memory' as const;
   private readonly admins = new Map<string, AdminRecord>();
+  private readonly autoRelistJobs = new Map<string, AutoRelistJobRecord>();
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly accounts = new Map<string, AccountRecord>();
   private readonly loginSessions = new Map<string, LoginSessionRecord>();
@@ -174,6 +175,53 @@ export class MemoryStore implements Store {
   async health(): Promise<{ kind: string; reachable: boolean }> { return { kind: this.kind, reachable: true }; }
   async countAdmins(): Promise<number> { return this.admins.size; }
   async listAdminIds(): Promise<string[]> { return [...this.admins.keys()]; }
+  async enqueueAutoRelistJob(input: { adminId: string; accountId: string; productId: string; orderNo?: string; source: AutoRelistJobSource; dueAt: string; maxAttempts?: number }): Promise<AutoRelistJobRecord> {
+    if (input.orderNo) {
+      const open = [...this.autoRelistJobs.values()].find((job) => job.productId === input.productId && job.orderNo === input.orderNo && (job.status === 'pending' || job.status === 'running'));
+      if (open) return { ...open };
+    }
+    const now = new Date().toISOString();
+    const job: AutoRelistJobRecord = { id: createId(), adminId: input.adminId, accountId: input.accountId, productId: input.productId, orderNo: input.orderNo, source: input.source, status: 'pending', attemptCount: 0, maxAttempts: input.maxAttempts ?? 3, dueAt: input.dueAt, createdAt: now, updatedAt: now };
+    this.autoRelistJobs.set(job.id, job);
+    return { ...job };
+  }
+  async claimAutoRelistJobs(input: { workerId: string; limit: number; leaseMs: number }): Promise<AutoRelistJobRecord[]> {
+    const now = Date.now();
+    const claimed: AutoRelistJobRecord[] = [];
+    for (const job of [...this.autoRelistJobs.values()].sort((a, b) => a.dueAt.localeCompare(b.dueAt))) {
+      if (claimed.length >= input.limit) break;
+      const due = job.status === 'pending' && Date.parse(job.dueAt) <= now;
+      const expired = job.status === 'running' && Date.parse(job.leaseUntil ?? '') <= now;
+      if (!due && !expired) continue;
+      job.status = 'running';
+      job.attemptCount += 1;
+      job.ownerToken = `${input.workerId}:${createId()}`;
+      job.leaseUntil = new Date(now + input.leaseMs).toISOString();
+      job.updatedAt = new Date(now).toISOString();
+      claimed.push({ ...job });
+    }
+    return claimed;
+  }
+  async finishAutoRelistJob(input: { id: string; ownerToken: string; status: Exclude<AutoRelistJobStatus, 'running'>; nextAttemptAt?: string; lastError?: string; newProductId?: string; newExternalProductRef?: string }): Promise<boolean> {
+    const job = this.autoRelistJobs.get(input.id);
+    if (!job || job.status !== 'running' || job.ownerToken !== input.ownerToken) return false;
+    job.status = input.status;
+    if (input.nextAttemptAt) job.dueAt = input.nextAttemptAt;
+    job.lastError = input.lastError;
+    if (input.newProductId) job.newProductId = input.newProductId;
+    if (input.newExternalProductRef) job.newExternalProductRef = input.newExternalProductRef;
+    job.ownerToken = undefined;
+    job.leaseUntil = undefined;
+    job.updatedAt = new Date().toISOString();
+    return true;
+  }
+  async listAutoRelistJobs(adminId: string, query: { accountId?: string; productId?: string; limit?: number }): Promise<AutoRelistJobRecord[]> {
+    return [...this.autoRelistJobs.values()]
+      .filter((job) => job.adminId === adminId && (!query.accountId || job.accountId === query.accountId) && (!query.productId || job.productId === query.productId || job.newProductId === query.productId))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, Math.max(1, Math.min(200, query.limit ?? 50)))
+      .map((job) => ({ ...job }));
+  }
   async findAdminById(id: string): Promise<AdminRecord | undefined> { return this.admins.get(id); }
   async findAdminByEmail(email: string): Promise<AdminRecord | undefined> { return [...this.admins.values()].find((admin) => admin.email === email.toLowerCase()); }
   async createAdmin(input: { email: string; passwordHash: string; displayName: string }): Promise<AdminRecord> {

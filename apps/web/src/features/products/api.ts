@@ -22,6 +22,25 @@ export interface ProductsApi {
   optimizeDescription(input: { accountId: string; title: string; description: string }, options?: { idempotencyKey?: string }): Promise<{ description: string; provider: string; model: string }>;
   syncFromXianyu(accountId: string, options?: { pageSize?: number; maxPages?: number; idempotencyKey?: string }): Promise<ProductSyncResultVM>;
   batchListing(action: 'offline' | 'delete', input: { accountId: string; productIds: string[] }, options?: { idempotencyKey?: string }): Promise<ProductListingResultVM>;
+  batchAutoRelist(input: { accountId: string; productIds: string[]; enabled: boolean; delaySeconds?: number }, options?: { idempotencyKey?: string }): Promise<{ enabled: boolean; products: ProductVM[] }>;
+  relistNow(input: { accountId: string; productIds: string[] }, options?: { idempotencyKey?: string }): Promise<{ jobs: AutoRelistJobVM[] }>;
+  listRelistJobs(input: { accountId: string; productId?: string; limit?: number }): Promise<AutoRelistJobVM[]>;
+}
+
+export interface AutoRelistJobVM {
+  id: string;
+  productId: string;
+  orderNo?: string;
+  source: 'order' | 'manual';
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped';
+  attemptCount: number;
+  maxAttempts: number;
+  dueAt: string;
+  newProductId?: string;
+  newExternalProductRef?: string;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ProductListingResultVM {
@@ -517,6 +536,25 @@ export function createProductsApi(transport: ProductsApiTransport): ProductsApi 
       const result = unwrapEnvelope(payload);
       return { action: result.action, succeeded: result.succeeded, failed: result.failed, items: result.items ?? [] };
     },
+    async batchAutoRelist(input, options = {}) {
+      const post = requireTransportMethod(transport, 'post');
+      const payload = await post<{ enabled: boolean; products: ProductVM[] } | ApiEnvelope<{ enabled: boolean; products: ProductVM[] }>>('/api/v1/products/batch/auto-relist', { accountId: input.accountId, productIds: input.productIds, enabled: input.enabled, ...(input.delaySeconds === undefined ? {} : { delaySeconds: input.delaySeconds }) }, { headers: { 'Idempotency-Key': options.idempotencyKey ?? idempotencyKey('auto-relist') } });
+      const result = unwrapEnvelope(payload);
+      return { enabled: result.enabled, products: result.products ?? [] };
+    },
+    async relistNow(input, options = {}) {
+      const post = requireTransportMethod(transport, 'post');
+      const payload = await post<{ jobs: AutoRelistJobVM[] } | ApiEnvelope<{ jobs: AutoRelistJobVM[] }>>('/api/v1/products/batch/relist-now', { accountId: input.accountId, productIds: input.productIds }, { headers: { 'Idempotency-Key': options.idempotencyKey ?? idempotencyKey('relist-now') } });
+      const result = unwrapEnvelope(payload);
+      return { jobs: result.jobs ?? [] };
+    },
+    async listRelistJobs(input) {
+      const params = new URLSearchParams({ accountId: input.accountId });
+      if (input.productId) params.set('productId', input.productId);
+      if (input.limit) params.set('limit', String(input.limit));
+      const payload = await transport.get<{ items: AutoRelistJobVM[] } | ApiEnvelope<{ items: AutoRelistJobVM[] }>>(`/api/v1/products/relist-jobs?${params.toString()}`);
+      return unwrapEnvelope(payload).items ?? [];
+    },
     async syncFromXianyu(accountId, options = {}) {
       const post = requireTransportMethod(transport, 'post');
       const payload = await post<{ syncRunId: string; accountId: string; fetchedCount: number; createdCount: number; updatedCount: number; skippedLocalDraftCount: number; hasMore: boolean; nextPageNumber?: number; items: ProductPayload[] } | ApiEnvelope<{ syncRunId: string; accountId: string; fetchedCount: number; createdCount: number; updatedCount: number; skippedLocalDraftCount: number; hasMore: boolean; nextPageNumber?: number; items: ProductPayload[] }>>('/api/v1/products/sync', {
@@ -684,6 +722,17 @@ export function createMockProductsApi(seed: ProductVM[] = [
     },
     async batchListing(action, input) {
       return { action, succeeded: input.productIds.length, failed: 0, items: input.productIds.map((productId) => ({ productId, title: productId, status: 'succeeded' as const })) };
+    },
+    async batchAutoRelist(input) {
+      const products = seed.filter((item) => input.productIds.includes(item.id)).map((item) => ({ ...item, attributesJson: { ...item.attributesJson, autoRelist: { enabled: input.enabled, delaySeconds: input.delaySeconds ?? 60 } } }));
+      return { enabled: input.enabled, products };
+    },
+    async relistNow(input) {
+      const now = new Date().toISOString();
+      return { jobs: input.productIds.map((productId) => ({ id: `mock-relist-${productId}`, productId, source: 'manual' as const, status: 'pending' as const, attemptCount: 0, maxAttempts: 3, dueAt: now, createdAt: now, updatedAt: now })) };
+    },
+    async listRelistJobs() {
+      return [];
     },
     async syncFromXianyu(accountId) {
       const items = seed.filter((item) => item.accountId === accountId);

@@ -299,6 +299,30 @@ export interface ProductAutomationConfigRecord {
   updatedAt: string;
 }
 
+export type AutoRelistJobStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped';
+export type AutoRelistJobSource = 'order' | 'manual';
+
+/** 自动续售任务：成交（或手动触发）后重新发布一条新链接，见 auto-relist.ts。 */
+export interface AutoRelistJobRecord {
+  id: string;
+  adminId: string;
+  accountId: string;
+  productId: string;
+  orderNo?: string;
+  source: AutoRelistJobSource;
+  status: AutoRelistJobStatus;
+  attemptCount: number;
+  maxAttempts: number;
+  dueAt: string;
+  leaseUntil?: string;
+  ownerToken?: string;
+  newProductId?: string;
+  newExternalProductRef?: string;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ProductAutomationBatchResult {
   items: ProductAutomationConfigRecord[];
   updatedProductIds: string[];
@@ -1559,6 +1583,10 @@ export interface Store {
   updateProductAutomation(input: { adminId: string; productId: string; expectedConfigVersion: number; config: ProductAutomationConfig; configDigest: string; syncCouponBindings?: boolean }): Promise<ProductAutomationConfigRecord | undefined>;
   updateProductAutomationsBatch(input: { adminId: string; productIds: string[]; expectedConfigVersions: Record<string, number>; config?: ProductAutomationConfig; configDigest?: string; configByProductId?: Record<string, ProductAutomationConfig>; configDigests?: Record<string, string>; syncCouponBindingsByProduct?: Record<string, boolean> }): Promise<ProductAutomationBatchResult>;
   persistXianyuItemDetail(input: XianyuItemDetailPersistenceInput): Promise<ProductRecord | undefined>;
+  enqueueAutoRelistJob(input: { adminId: string; accountId: string; productId: string; orderNo?: string; source: AutoRelistJobSource; dueAt: string; maxAttempts?: number }): Promise<AutoRelistJobRecord>;
+  claimAutoRelistJobs(input: { workerId: string; limit: number; leaseMs: number }): Promise<AutoRelistJobRecord[]>;
+  finishAutoRelistJob(input: { id: string; ownerToken: string; status: Exclude<AutoRelistJobStatus, 'running'>; nextAttemptAt?: string; lastError?: string; newProductId?: string; newExternalProductRef?: string }): Promise<boolean>;
+  listAutoRelistJobs(adminId: string, query: { accountId?: string; productId?: string; limit?: number }): Promise<AutoRelistJobRecord[]>;
   listOrders(adminId: string, query: OrderListQuery): Promise<OrderListResult>;
   listAutoReplyOrders(adminId: string, query: AutoReplyOrderListQuery): Promise<AutoReplyOrderListResult>;
   getOrder(adminId: string, orderNo: string, accountId?: string): Promise<OrderRecord | undefined>;

@@ -16,6 +16,7 @@ import { XianyuRemoteSliderSolver } from './xianyu-remote-slider.js';
 import { configureNotifier, createNotifierFromEnv, getNotifier, notify, NOTIFICATION_KINDS } from './notifier.js';
 import { AccountProxyResolver, effectiveProxyUrl, normalizeProxyUrl } from './xianyu-proxy.js';
 import { ProductPolishService } from './product-polish.js';
+import { AutoRelistService } from './auto-relist.js';
 import { createOrderRefundHandlerFromEnv } from './order-refund.js';
 import { ProductListingService } from './product-listing.js';
 import { KeywordFirstAutoReplyGenerator, type KeywordRulesLoader } from './auto-reply-keyword.js';
@@ -63,6 +64,7 @@ export interface AppRuntime {
   store: Store;
   accountProxy: AccountProxyResolver;
   productPolish: ProductPolishService;
+  autoRelist: AutoRelistService;
   auth: AuthService;
   accounts: AccountService;
   coupons: CouponService;
@@ -456,8 +458,13 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
       return auditId;
     },
   });
+  const autoRelist = new AutoRelistService(store, productPublisher, productAutomation, xianyuItemDetail, productAudit);
   const paymentEventWorker = new PaymentEventWorker(store, xianyu, (input) => productAutomationWorker.processOrderRefresh(input), {
     workerId: `payment:${process.pid}:${createId()}`,
+    onOrderSettled: async ({ adminId, accountId, order }) => {
+      if (!order.productId) return;
+      await autoRelist.scheduleForOrder({ adminId, accountId, productId: order.productId, orderNo: order.orderNo });
+    },
     resolveDelaySeconds: async (adminId, order) => {
       if (!order.productId) return 0;
       const rule = (await productAutomation.get(adminId, order.productId)).config.paidAutoDelivery;
@@ -526,7 +533,7 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
       intervalMs: positiveEnvNumber(process.env.PRODUCT_POLISH_INTERVAL_HOURS, 24) * 3_600_000,
       maxItemsPerRun: positiveEnvNumber(process.env.PRODUCT_POLISH_MAX_ITEMS_PER_RUN, 200),
     }),
-    config, store, auth, accounts, coupons, orders, orderDelivery, products, productPublisher, productListing, productKnowledgeBase, productAutomation, productAutomationTrigger, productAutomationWorker, paymentEventWorker, productSync, credentials, apiKeyCredentials, openaiSettings, modelProviderRuntime, dashboard, messages, autoReply, autoReplyRepair, autoReplyAgentSettings, autoReplyActivity, redisRealtime, workspace, piSkills, workspaceCommands, workspaceRuntime, qrLogin, xianyu, xianyuItemDetail, objectStorage, xianyuIm,
+    config, store, auth, accounts, coupons, orders, orderDelivery, products, productPublisher, productListing, autoRelist, productKnowledgeBase, productAutomation, productAutomationTrigger, productAutomationWorker, paymentEventWorker, productSync, credentials, apiKeyCredentials, openaiSettings, modelProviderRuntime, dashboard, messages, autoReply, autoReplyRepair, autoReplyAgentSettings, autoReplyActivity, redisRealtime, workspace, piSkills, workspaceCommands, workspaceRuntime, qrLogin, xianyu, xianyuItemDetail, objectStorage, xianyuIm,
     server,
     async listen() {
       await new Promise<void>((resolve) => runtime.server.listen(config.port, config.host, resolve));
@@ -1679,6 +1686,28 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
         ? await runtime.productKnowledgeBase.optimize(input)
         : await runtime.productKnowledgeBase.appendFromConversations(input);
       return success(ctx, { ...result, product: toProductView(result.product) });
+    });
+  }
+  if (ctx.path === '/api/v1/products/relist-jobs' && ctx.method === 'GET') {
+    const accountId = optionalString(ctx.query.accountId);
+    const productId = optionalString(ctx.query.productId);
+    const limit = ctx.query.limit === undefined ? undefined : Number(ctx.query.limit);
+    const jobs = await runtime.autoRelist.listJobs(authContext.admin.id, { accountId, productId, limit: Number.isFinite(limit) ? limit : undefined });
+    return { statusCode: 200, body: success(ctx, { items: jobs }).body };
+  }
+  const productRelistMatch = ctx.path.match(/^\/api\/v1\/products\/batch\/(auto-relist|relist-now)$/);
+  if (productRelistMatch && ctx.method === 'POST') {
+    const accountId = String(ctx.body.accountId ?? '').trim();
+    const productIds = Array.isArray(ctx.body.productIds) ? ctx.body.productIds.map((value: unknown) => String(value ?? '')) : [];
+    return mutation(runtime, ctx, authContext, accountId, async () => {
+      if (productRelistMatch[1] === 'auto-relist') {
+        const enabled = ctx.body.enabled === true;
+        const delaySeconds = typeof ctx.body.delaySeconds === 'number' ? ctx.body.delaySeconds : undefined;
+        const result = await runtime.autoRelist.setAutoRelist({ adminId: authContext.admin.id, accountId, productIds, enabled, delaySeconds, requestId: ctx.requestId, traceId: ctx.traceId });
+        return success(ctx, { enabled, products: result.products.map(toProductView) });
+      }
+      const result = await runtime.autoRelist.relistNow({ adminId: authContext.admin.id, accountId, productIds, requestId: ctx.requestId, traceId: ctx.traceId });
+      return success(ctx, { jobs: result.jobs });
     });
   }
   const productBatchListingMatch = ctx.path.match(/^\/api\/v1\/products\/batch\/(offline|delete)$/);

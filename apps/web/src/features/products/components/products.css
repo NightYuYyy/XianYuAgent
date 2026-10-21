@@ -308,3 +308,5 @@ body .app-viewport .products-domain .ui-placeholder-cell.products-placeholder { 
 .products-listing-badge{display:inline-block;margin-left:6px;padding:0 6px;border-radius:999px;font-size:10px;font-style:normal;font-weight:600;line-height:16px;vertical-align:middle}
 .products-listing-badge.is-offline{background:#FEF3C7;color:#92400E}
 .products-listing-badge.is-deleted{background:#FEE2E2;color:#991B1B}
+.products-listing-badge.is-auto-relist{background:#DBEAFE;color:#1D4ED8}
+.products-listing-badge.is-relisted{background:#E2E8F0;color:#475569}

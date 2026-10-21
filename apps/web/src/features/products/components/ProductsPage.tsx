@@ -71,6 +71,33 @@ export function ProductsPage({ api: providedApi, automationApi: providedAutomati
 
   const products = controller.state.data?.items ?? [];
   const pageData = controller.state.data;
+  const selectedProducts = products.filter((product) => selectedProductIds.includes(product.id));
+  const selectedAllAutoRelist = selectedProducts.length > 0 && selectedProducts.every((product) => (product.attributesJson?.autoRelist as { enabled?: boolean } | undefined)?.enabled === true);
+  async function runBatchAutoRelist() {
+    if (!currentAccountId || selectedProductIds.length === 0) return;
+    const enabled = !selectedAllAutoRelist;
+    let delaySeconds: number | undefined;
+    if (enabled) {
+      const answer = window.prompt('成交付款后等多少秒再重新发布？（给闲鱼留出订单落定的时间，建议 60）', '60');
+      if (answer === null) return;
+      const parsed = Number(answer);
+      if (!Number.isFinite(parsed) || parsed < 0) { setSyncToast('延迟秒数必须是不小于 0 的数字'); return; }
+      delaySeconds = Math.trunc(parsed);
+    }
+    const result = await controller.batchAutoRelist({ accountId: currentAccountId, productIds: selectedProductIds, enabled, delaySeconds });
+    if (!result) return;
+    setSelectedProductIds([]);
+    setSyncToast(enabled ? `已为 ${result.products.length} 个商品开启自动续售：成交付款后 ${delaySeconds ?? 60} 秒自动重新发布，并把自动发货等配置搬到新链接` : `已为 ${result.products.length} 个商品关闭自动续售`);
+  }
+  async function runRelistNow() {
+    if (!currentAccountId || selectedProductIds.length === 0) return;
+    const confirmed = window.confirm(`现在就把所选的 ${selectedProductIds.length} 个商品各重新发布一条新链接？原链接不会下架，自动发货等配置会复制到新链接。`);
+    if (!confirmed) return;
+    const result = await controller.relistNow({ accountId: currentAccountId, productIds: selectedProductIds });
+    if (!result) return;
+    setSelectedProductIds([]);
+    setSyncToast(`已排队 ${result.jobs.length} 个续售任务，后台会在一分钟内开始发布，完成后同步闲鱼即可看到新链接`);
+  }
   async function runBatchListing(action: 'offline' | 'delete') {
     if (!currentAccountId || selectedProductIds.length === 0) return;
     const verb = action === 'offline' ? '下架' : '删除';
@@ -149,7 +176,7 @@ export function ProductsPage({ api: providedApi, automationApi: providedAutomati
   return (
     <section className="page-stack products-domain" data-products-domain>
       <article className="card panel products-panel">
-        <ProductToolbar currentAccount={currentAccount} contextLoading={accountsLoading} contextError={accountsError} contextMissing={contextMissing} filters={controller.filters} phase={controller.state.phase} syncing={controller.mutation.phase === 'saving'} selectedCount={selectedProductIds.length} onKeywordChange={controller.setKeyword} onStatusChange={(status) => controller.setFilters((previous) => ({ ...previous, status, page: 1 }))} onRefresh={controller.reload} onSync={() => { if (currentAccountId) void controller.syncFromXianyu(currentAccountId); }} onCreate={() => { if (!currentAccountId) return; openProductEditor({ mode: 'create' }); }} onChooseAccount={() => { window.history.pushState({}, '', buildAccountsReauthorizePath()); window.dispatchEvent(new PopStateEvent('popstate')); }} onBatchConfigure={openBatchAutomation} onBatchOffline={() => void runBatchListing('offline')} onBatchDelete={() => void runBatchListing('delete')} />
+        <ProductToolbar currentAccount={currentAccount} contextLoading={accountsLoading} contextError={accountsError} contextMissing={contextMissing} filters={controller.filters} phase={controller.state.phase} syncing={controller.mutation.phase === 'saving'} selectedCount={selectedProductIds.length} onKeywordChange={controller.setKeyword} onStatusChange={(status) => controller.setFilters((previous) => ({ ...previous, status, page: 1 }))} onRefresh={controller.reload} onSync={() => { if (currentAccountId) void controller.syncFromXianyu(currentAccountId); }} onCreate={() => { if (!currentAccountId) return; openProductEditor({ mode: 'create' }); }} onChooseAccount={() => { window.history.pushState({}, '', buildAccountsReauthorizePath()); window.dispatchEvent(new PopStateEvent('popstate')); }} onBatchConfigure={openBatchAutomation} onBatchOffline={() => void runBatchListing('offline')} onBatchDelete={() => void runBatchListing('delete')} autoRelistLabel={selectedAllAutoRelist ? '关闭自动续售' : '开启自动续售'} onBatchAutoRelist={() => void runBatchAutoRelist()} onRelistNow={() => void runRelistNow()} />
         {controller.mutation.error && <div className="products-inline-error" role="alert">{controller.mutation.error.message}</div>}
         {controller.state.phase === 'success' && pageData && <ProductTable products={products} page={pageData.page} totalPages={pageData.totalPages} total={pageData.total} sortBy={controller.filters.sortBy ?? 'xianyuOrder'} sortOrder={controller.filters.sortOrder ?? 'asc'} onSortChange={(sortBy, sortOrder) => controller.setFilters((previous) => ({ ...previous, sortBy, sortOrder, page: 1 }))} onPageChange={(page) => controller.setFilters((previous) => ({ ...previous, page }))} onOpen={openProduct} onOpenXianyuDetail={openXianyuDetail} onOpenKnowledgeBase={openKnowledgeBase} selectedIds={selectedProductIds} onToggleSelected={(productId) => setSelectedProductIds((previous) => previous.includes(productId) ? previous.filter((id) => id !== productId) : [...previous, productId])} onToggleAll={(checked) => setSelectedProductIds(checked ? products.map((product) => product.id) : [])} onOpenAutomation={(productId) => { setAutomationNotice(null); openAutomation(productId); }} automationSummary={(product) => automationSummaries[product.id] ?? { label: '读取中...', detail: '正在读取规则', tone: 'muted' }} />}
         <ProductListStateView phase={controller.state.phase} error={controller.state.error} onRetry={controller.reload} accountSelectionRequired={contextMissing} />

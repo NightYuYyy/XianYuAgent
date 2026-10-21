@@ -1,6 +1,6 @@
 import { Pool, type PoolClient } from 'pg';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
-import type { AccountListQuery, AccountListResult, AccountRecord, AccountScopeRecord, AgentSessionRecord, AdminRecord, AuditEventRecord, AutoReplyActivitySummary, AutoReplyAgentConfig, AutoReplyAgentConfigPatch, AutoReplyAgentConfigRecord, AutoReplyOutboxRecord, AutoReplyRepairPolicyBundle, AutoReplyRunDetailRecord, AutoReplyRunEventRecord, AutoReplyRunListItem, AutoReplyRunListQuery, AutoReplyRunListResult, AutoReplyRunRecord, AutoReplyRunUpdate, AutoReplyDecision, AutoReplyRunStage, AutoReplyRunStatus, AutoReplyConversationContext, AutoReplyConversationListQuery, AutoReplyConversationListResult, AutoReplyMessageContext, AutoReplyMessageListQuery, AutoReplyMessageListResult, AutoReplyOrderContext, AutoReplyOrderListQuery, AutoReplyOrderListResult, AutoReplyProductContext, AutoReplyProductListQuery, AutoReplyProductListResult, AutoReplyProductLookup, ConversationEventRecord, ConversationListQuery, ConversationListResult, ConversationRecord, CouponAssetRecord, CouponBatchListQuery, CouponBatchListResult, CouponBatchMetadata, CouponBatchRecord, CouponBatchStatus, CouponBindingRecord, CouponItemRecord, CouponReservationPurpose, CouponReservationRecord, CredentialRecord, CredentialRefRecord, CredentialRefStatus, DeliveryRecord, DeliveryRecordStatus, IdempotencyRecord, InboundInboxRecord, InboundQuarantineRecord, LoginSessionRecord, MessageListQuery, MessageListResult, MessageRecord, ModelProviderRoutingRecord, ModelProviderRoutingMode, OrderListQuery, OrderListResult, OrderRecord, OrderSource, OrderUpsertResult, ProductAssetRecord, ProductAutomationBatchResult, ProductAutomationConfig, ProductAutomationConfigRecord, ProductKnowledgeBaseMessageRecord, ProductListQuery, ProductListResult, ProductPatch, ProductRecord, ProductSkuRecord, ProductStatus, RunEventRecord, RunRecord, RunStatus, SessionRecord, StepRecord, StepStatus, Store, WorkspaceConfirmationRecord, WorkspaceMessageRecord, WorkspaceMessageType, XianyuItemDetailPersistenceInput, XianyuOrderItem, XianyuProductItem, ProductUpsertResult, AutomationExecutionLedgerRecord } from './domain.js';
+import type { AccountListQuery, AccountListResult, AccountRecord, AccountScopeRecord, AgentSessionRecord, AdminRecord, AuditEventRecord, AutoReplyActivitySummary, AutoReplyAgentConfig, AutoReplyAgentConfigPatch, AutoReplyAgentConfigRecord, AutoReplyOutboxRecord, AutoReplyRepairPolicyBundle, AutoReplyRunDetailRecord, AutoReplyRunEventRecord, AutoReplyRunListItem, AutoReplyRunListQuery, AutoReplyRunListResult, AutoReplyRunRecord, AutoReplyRunUpdate, AutoReplyDecision, AutoReplyRunStage, AutoReplyRunStatus, AutoReplyConversationContext, AutoReplyConversationListQuery, AutoReplyConversationListResult, AutoReplyMessageContext, AutoReplyMessageListQuery, AutoReplyMessageListResult, AutoReplyOrderContext, AutoReplyOrderListQuery, AutoReplyOrderListResult, AutoReplyProductContext, AutoReplyProductListQuery, AutoReplyProductListResult, AutoReplyProductLookup, ConversationEventRecord, ConversationListQuery, ConversationListResult, ConversationRecord, CouponAssetRecord, CouponBatchListQuery, CouponBatchListResult, CouponBatchMetadata, CouponBatchRecord, CouponBatchStatus, CouponBindingRecord, CouponItemRecord, CouponReservationPurpose, CouponReservationRecord, CredentialRecord, CredentialRefRecord, CredentialRefStatus, DeliveryRecord, DeliveryRecordStatus, IdempotencyRecord, InboundInboxRecord, InboundQuarantineRecord, LoginSessionRecord, MessageListQuery, MessageListResult, MessageRecord, ModelProviderRoutingRecord, ModelProviderRoutingMode, OrderListQuery, OrderListResult, OrderRecord, OrderSource, OrderUpsertResult, ProductAssetRecord, ProductAutomationBatchResult, ProductAutomationConfig, ProductAutomationConfigRecord, ProductKnowledgeBaseMessageRecord, ProductListQuery, ProductListResult, ProductPatch, ProductRecord, ProductSkuRecord, ProductStatus, RunEventRecord, RunRecord, RunStatus, SessionRecord, StepRecord, StepStatus, Store, WorkspaceConfirmationRecord, WorkspaceMessageRecord, WorkspaceMessageType, XianyuItemDetailPersistenceInput, XianyuOrderItem, XianyuProductItem, ProductUpsertResult, AutomationExecutionLedgerRecord, AutoRelistJobRecord, AutoRelistJobSource, AutoRelistJobStatus } from './domain.js';
 import { autoReplyStageForStatus } from './domain.js';
 import { projectAutoReplyRun } from './auto-reply-activity-projection.js';
 import { createId, digestJson } from './security.js';
@@ -637,6 +637,50 @@ export class PostgresStore implements Store {
       lease_until=now()+($3::int * interval '1 millisecond'),updated_at=now()
       from due where j.id=due.id returning j.*`, [input.limit, ownerToken, input.leaseMs, input.accountId ?? null]);
     return result.rows.map((row) => this.toPaymentEventJob(row));
+  }
+  async enqueueAutoRelistJob(input: { adminId: string; accountId: string; productId: string; orderNo?: string; source: AutoRelistJobSource; dueAt: string; maxAttempts?: number }): Promise<AutoRelistJobRecord> {
+    const id = createId();
+    const inserted = await this.pool.query(`insert into products.auto_relist_jobs (id,admin_id,account_id,product_id,order_no,source,status,attempt_count,max_attempts,due_at)
+      values ($1,$2,$3,$4,$5,$6,'pending',0,$7,$8) on conflict do nothing returning *`, [id, input.adminId, input.accountId, input.productId, input.orderNo ?? null, input.source, input.maxAttempts ?? 3, input.dueAt]);
+    if (inserted.rows[0]) return this.toAutoRelistJob(inserted.rows[0]);
+    const existing = await this.pool.query(`select * from products.auto_relist_jobs where product_id=$1 and order_no=$2 and status in ('pending','running') order by created_at desc limit 1`, [input.productId, input.orderNo ?? null]);
+    if (!existing.rows[0]) throw new Error('AUTO_RELIST_ENQUEUE_FAILED');
+    return this.toAutoRelistJob(existing.rows[0]);
+  }
+  async claimAutoRelistJobs(input: { workerId: string; limit: number; leaseMs: number }): Promise<AutoRelistJobRecord[]> {
+    const ownerToken = `${input.workerId}:${createId()}`;
+    const result = await this.pool.query(`with due as (
+      select id from products.auto_relist_jobs
+      where (status='pending' and due_at<=now()) or (status='running' and lease_until<=now())
+      order by due_at for update skip locked limit $1
+    ) update products.auto_relist_jobs j set status='running',attempt_count=j.attempt_count+1,owner_token=$2,
+      lease_until=now()+($3::int * interval '1 millisecond'),updated_at=now()
+      from due where j.id=due.id returning j.*`, [input.limit, ownerToken, input.leaseMs]);
+    return result.rows.map((row) => this.toAutoRelistJob(row));
+  }
+  async finishAutoRelistJob(input: { id: string; ownerToken: string; status: Exclude<AutoRelistJobStatus, 'running'>; nextAttemptAt?: string; lastError?: string; newProductId?: string; newExternalProductRef?: string }): Promise<boolean> {
+    const result = await this.pool.query(`update products.auto_relist_jobs set status=$3,due_at=coalesce($4,due_at),last_error=$5,new_product_id=coalesce($6,new_product_id),new_external_product_ref=coalesce($7,new_external_product_ref),owner_token=null,lease_until=null,updated_at=now()
+      where id=$1 and owner_token=$2 and status='running'`, [input.id, input.ownerToken, input.status, input.nextAttemptAt ?? null, input.lastError ?? null, input.newProductId ?? null, input.newExternalProductRef ?? null]);
+    return (result.rowCount ?? 0) > 0;
+  }
+  async listAutoRelistJobs(adminId: string, query: { accountId?: string; productId?: string; limit?: number }): Promise<AutoRelistJobRecord[]> {
+    const params: unknown[] = [adminId, Math.max(1, Math.min(200, query.limit ?? 50))];
+    const clauses = ['j.admin_id=$1'];
+    if (query.accountId) { params.push(query.accountId); clauses.push(`j.account_id=$${params.length}`); }
+    if (query.productId) { params.push(query.productId); clauses.push(`(j.product_id=$${params.length} or j.new_product_id=$${params.length})`); }
+    const result = await this.pool.query(`select j.* from products.auto_relist_jobs j where ${clauses.join(' and ')} order by j.created_at desc limit $2`, params);
+    return result.rows.map((row) => this.toAutoRelistJob(row));
+  }
+  private toAutoRelistJob(row: Row): AutoRelistJobRecord {
+    const iso = (value: unknown) => value ? new Date(String(value)).toISOString() : undefined;
+    return {
+      id: String(row.id), adminId: String(row.admin_id), accountId: String(row.account_id), productId: String(row.product_id),
+      orderNo: row.order_no ? String(row.order_no) : undefined, source: row.source === 'manual' ? 'manual' : 'order', status: String(row.status) as AutoRelistJobStatus,
+      attemptCount: Number(row.attempt_count ?? 0), maxAttempts: Number(row.max_attempts ?? 3), dueAt: iso(row.due_at) ?? new Date().toISOString(),
+      leaseUntil: iso(row.lease_until), ownerToken: row.owner_token ? String(row.owner_token) : undefined,
+      newProductId: row.new_product_id ? String(row.new_product_id) : undefined, newExternalProductRef: row.new_external_product_ref ? String(row.new_external_product_ref) : undefined,
+      lastError: row.last_error ? String(row.last_error) : undefined, createdAt: iso(row.created_at) ?? new Date().toISOString(), updatedAt: iso(row.updated_at) ?? new Date().toISOString(),
+    };
   }
   async isDeliveryCutoverActive(): Promise<boolean> {
     const result = await this.pool.query('select active from orders.delivery_cutover_gate where id=true');

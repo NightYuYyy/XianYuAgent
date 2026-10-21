@@ -18,7 +18,7 @@ export class PaymentEventWorker {
     private readonly store: Store,
     private readonly mtop: Pick<XianyuMtopClient, 'fetchOrderCandidates'>,
     private readonly processOrder: ProcessOrder,
-    private readonly options: { workerId: string; pollMs?: number; reconcileMs?: number; resolveDelaySeconds?: (adminId: string, order: OrderRecord) => Promise<number>; onError?: (error: unknown) => void },
+    private readonly options: { workerId: string; pollMs?: number; reconcileMs?: number; resolveDelaySeconds?: (adminId: string, order: OrderRecord) => Promise<number>; onOrderSettled?: (input: { adminId: string; accountId: string; order: OrderRecord }) => Promise<void>; onError?: (error: unknown) => void },
   ) {}
 
   start(): void {
@@ -194,6 +194,10 @@ export class PaymentEventWorker {
       const needsHuman = paid.status === 'manual_review' || paid.status === 'blocked';
       await this.store.finishPaymentEvent({ id: job.id, ownerToken: job.ownerToken!, status: needsHuman ? 'manual_review' : 'completed', orderNo: item.orderNo, lastError: paid.reason });
       const order = upsert.order;
+      if (!needsHuman && this.options.onOrderSettled) {
+        // 付款已经处理完（自动发货成功或该商品没配自动发货）：交给自动续售等后续动作，失败不影响付款流程。
+        await this.options.onOrderSettled({ adminId: job.adminId, accountId: job.accountId, order }).catch((error) => this.options.onError?.(error));
+      }
       const amount = `¥${(order.amountMinor / 100).toFixed(2)}`;
       const summary = `商品：${order.itemTitle}${order.skuSpec ? `（${order.skuSpec}）` : ''}\n金额：${amount}\n买家：${order.buyerNickname || order.buyerName}\n订单：${order.orderNo}`;
       notify(needsHuman

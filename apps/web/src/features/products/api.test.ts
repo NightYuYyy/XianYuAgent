@@ -235,3 +235,27 @@ describe('products canonical API adapter', () => {
     expect(detail).toMatchObject({ productId: 'product-2', itemId: 'item-2', title: '已保存商品', browseCount: 18, wantCount: 2, detailSyncedAt: '2026-09-22T02:00:00.000Z', images: [{ storageKey: 'products/2/hero.webp', url: 'https://cdn.example/hero.webp', width: 800, height: 600 }] });
   });
 });
+
+describe('products API auto relist', () => {
+  it('posts the toggle and the immediate relist with idempotency keys and reads the job history', async () => {
+    const calls: Array<{ method: string; path: string; body?: unknown; key?: string }> = [];
+    const api = createProductsApi({
+      get: async <T>(path: string) => { calls.push({ method: 'get', path }); return { success: true, data: { items: [{ id: 'job-1', productId: 'p-1', source: 'order', status: 'succeeded', attemptCount: 1, maxAttempts: 3, dueAt: 'd', createdAt: 'c', updatedAt: 'u' }] } } as T; },
+      post: async <T>(path: string, body?: unknown, init?: RequestInit) => {
+        calls.push({ method: 'post', path, body, key: (init?.headers as Record<string, string> | undefined)?.['Idempotency-Key'] });
+        if (path.endsWith('/auto-relist')) return { success: true, data: { enabled: true, products: [{ id: 'p-1' }] } } as T;
+        return { success: true, data: { jobs: [{ id: 'job-2', productId: 'p-1', source: 'manual', status: 'pending', attemptCount: 0, maxAttempts: 3, dueAt: 'd', createdAt: 'c', updatedAt: 'u' }] } } as T;
+      },
+    });
+    const toggled = await api.batchAutoRelist({ accountId: 'a-1', productIds: ['p-1'], enabled: true, delaySeconds: 30 });
+    expect(toggled.enabled).toBe(true);
+    expect(calls[0]).toMatchObject({ method: 'post', path: '/api/v1/products/batch/auto-relist', body: { accountId: 'a-1', productIds: ['p-1'], enabled: true, delaySeconds: 30 } });
+    expect(calls[0]?.key).toBeTruthy();
+    const queued = await api.relistNow({ accountId: 'a-1', productIds: ['p-1'] });
+    expect(queued.jobs[0]?.status).toBe('pending');
+    expect(calls[1]).toMatchObject({ method: 'post', path: '/api/v1/products/batch/relist-now' });
+    const history = await api.listRelistJobs({ accountId: 'a-1', productId: 'p-1' });
+    expect(history[0]?.status).toBe('succeeded');
+    expect(calls[2]).toMatchObject({ method: 'get', path: '/api/v1/products/relist-jobs?accountId=a-1&productId=p-1' });
+  });
+});
