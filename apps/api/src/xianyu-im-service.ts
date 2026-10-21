@@ -13,6 +13,7 @@ import type { ProductAutomationImEventResult, ProductAutomationTrigger } from '.
 import { InboundInboxWorker } from './inbound-inbox-worker.js';
 import { cookieHeaderFromSnapshot, cookieSnapshotFromMetadata, dropStaleCaptchaChallengeCookies, metadataWithCookieSnapshot, type XianyuCookieSnapshot } from './xianyu-cookie-jar.js';
 import type { XianyuVerificationBrowser, XianyuVerificationBrowserResult } from './xianyu-verification-browser.js';
+import { autoReplyAllowedForSide, ConversationSideResolver, type ConversationSide } from './conversation-side.js';
 
 interface ExternalPage {
   hasMore: boolean;
@@ -28,6 +29,7 @@ export class XianyuImService {
   private readonly recoveryRetryAfter = new Map<string, number>();
   private readonly credentialRefreshTimers = new Map<string, ReturnType<typeof setInterval>>();
   private readonly transportHeartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
+  private readonly conversationSide: ConversationSideResolver;
   private readonly credentialRefreshInFlight = new Map<string, Promise<void>>();
   private readonly identityCache = new Map<string, { buyerDisplayName?: string; buyerAvatarUrl?: string }>();
   private readonly inboundInboxWorker: InboundInboxWorker;
@@ -43,6 +45,7 @@ export class XianyuImService {
     private readonly verificationBrowser?: XianyuVerificationBrowser,
     private readonly refreshOrdersForTrustedOrderEvent?: (input: { adminId: string; accountId: string; event: XianyuImMessageEvent }) => Promise<void>,
   ) {
+    this.conversationSide = new ConversationSideResolver(store, mtop as Partial<import('./conversation-side.js').ConversationSideItemDetailClient>);
     this.inboundInboxWorker = new InboundInboxWorker(store, this, {
       workerId: `listener-fallback:${process.pid}:${randomUUID()}`,
       batchSize: 10,
@@ -814,6 +817,13 @@ export class XianyuImService {
     });
     const automation = this.productAutomation ? await this.productAutomation.onImEvent(adminId, effectiveEvent) : undefined;
     if (effectiveEvent.direction !== 'inbound' || !['text', 'image'].includes(effectiveEvent.bodyType) || !this.autoReply) return { created: imported.created, ...(automation ? { automation } : {}) };
+    // Only answer buyers of the account's own listings. When the account is the
+    // one asking about someone else's item, the agent must stay silent.
+    const side = await this.ensureConversationSide(adminId, conversation);
+    if (!autoReplyAllowedForSide(side)) {
+      console.info(JSON.stringify({ component: 'xianyu-im-listener', event: 'auto_reply_skipped_conversation_side', accountId: effectiveEvent.accountId, conversationId: conversation.id, itemRef: conversation.itemRef, side }));
+      return { created: imported.created, ...(automation ? { automation } : {}) };
+    }
     if (options.deferAutoReply) {
       await this.store.enqueueInboundInbox({ adminId, accountId: effectiveEvent.accountId, conversationId: conversation.id, inboundMessageId: imported.message.messageId, externalConversationRef: effectiveEvent.externalConversationRef, externalMessageRef: effectiveEvent.externalMessageRef, sourceEventId: effectiveEvent.sourceEventId ?? effectiveEvent.externalMessageRef, sourceSequence: effectiveEvent.sourceSequence });
       return { created: imported.created, ...(automation ? { automation } : {}) };
@@ -828,7 +838,25 @@ export class XianyuImService {
     if (!conversation) throw new Error('CONVERSATION_NOT_FOUND');
     const inbound = await this.store.findMessageByExternalRef(record.adminId, record.conversationId, record.externalMessageRef);
     if (!inbound) throw new Error('INBOUND_MESSAGE_NOT_FOUND');
+    const side = await this.ensureConversationSide(record.adminId, conversation);
+    if (!autoReplyAllowedForSide(side)) {
+      console.info(JSON.stringify({ component: 'xianyu-im-listener', event: 'auto_reply_skipped_conversation_side', accountId: conversation.accountId, conversationId: conversation.id, itemRef: conversation.itemRef, side, source: 'inbox' }));
+      return undefined;
+    }
     return this.autoReply.processInbound({ adminId: record.adminId, conversationId: record.conversationId, inboundMessageId: inbound.id, senderName: conversation.buyerDisplayName, requestId: `xianyu:auto-reply:${record.externalMessageRef}`, traceId: `xianyu:auto-reply:${record.externalMessageRef}`, sourceEventId: record.sourceEventId ?? record.externalMessageRef, sourceSequence: record.sourceSequence });
+  }
+
+  /** Resolve and persist which side of the chat the account is on; 'unknown' is re-tried on the next inbound message. */
+  private async ensureConversationSide(adminId: string, conversation: ConversationRecord): Promise<ConversationSide> {
+    if (conversation.side === 'seller' || conversation.side === 'buyer') return conversation.side;
+    const side = await this.conversationSide.resolve({ adminId, accountId: conversation.accountId, itemRef: conversation.itemRef });
+    if (side !== 'unknown') {
+      await this.store.setConversationSide(adminId, conversation.id, side).catch((error) => {
+        console.error(JSON.stringify({ component: 'xianyu-im-listener', event: 'conversation_side_persist_failed', conversationId: conversation.id, errorCode: recoveryErrorCode(error) }));
+      });
+      conversation.side = side;
+    }
+    return side;
   }
 
   private async classifySystemCandidate(

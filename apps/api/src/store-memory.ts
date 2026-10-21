@@ -1285,10 +1285,18 @@ export class MemoryStore implements Store {
     return { message: { ...message, riskFlags: [...message.riskFlags] }, event: { ...event, payload: { ...event.payload } } };
   }
 
+  async setConversationSide(adminId: string, conversationId: string, side: ConversationRecord['side']): Promise<ConversationRecord | undefined> {
+    const existing = await this.getConversation(adminId, conversationId);
+    if (!existing) return undefined;
+    const current = this.conversations.get(existing.id);
+    if (!current) return undefined;
+    current.side = side;
+    return { ...current };
+  }
   async createConversation(input: { adminId: string; accountId: string; buyerRef: string; buyerDisplayName?: string; buyerAvatarUrl?: string; itemRef?: string; itemTitle?: string; itemImageUrl?: string; externalConversationRef?: string }): Promise<ConversationRecord> {
     if (!(await this.hasAccountScope(input.adminId, input.accountId))) throw new Error('ACCOUNT_SCOPE_FORBIDDEN');
     const now = new Date().toISOString();
-    const conversation: ConversationRecord = { id: createId(), accountId: input.accountId, externalConversationRef: input.externalConversationRef, buyerRef: input.buyerRef, buyerDisplayName: input.buyerDisplayName, buyerAvatarUrl: input.buyerAvatarUrl, itemRef: input.itemRef, itemTitle: input.itemTitle, itemImageUrl: input.itemImageUrl, unreadCount: 0, handlingMode: 'ai', version: 1, createdAt: now, updatedAt: now };
+    const conversation: ConversationRecord = { id: createId(), accountId: input.accountId, externalConversationRef: input.externalConversationRef, buyerRef: input.buyerRef, buyerDisplayName: input.buyerDisplayName, buyerAvatarUrl: input.buyerAvatarUrl, itemRef: input.itemRef, itemTitle: input.itemTitle, itemImageUrl: input.itemImageUrl, unreadCount: 0, handlingMode: 'ai', side: 'unknown', version: 1, createdAt: now, updatedAt: now };
     this.conversations.set(conversation.id, conversation);
     this.conversationEvents.set(conversation.id, []);
     this.conversationCursors.set(conversation.id, 0);

@@ -17,6 +17,8 @@ export interface ConversationVM {
   lastMessagePreview?: string;
   lastMessageAt?: string;
   handlingMode: 'ai' | 'human';
+  /** 'buyer' means the account is asking about someone else's item; the agent never replies there. */
+  side?: 'seller' | 'buyer' | 'unknown';
   version: number;
   createdAt: string;
   updatedAt: string;

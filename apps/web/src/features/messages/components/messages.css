@@ -826,3 +826,4 @@
     animation: none;
   }
 }
+.messages-conversation-side{display:inline-block;margin-left:6px;padding:0 6px;border-radius:999px;background:#FEF3C7;color:#92400E;font-size:10px;font-style:normal;font-weight:600;line-height:16px;vertical-align:middle}

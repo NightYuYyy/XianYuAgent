@@ -16,6 +16,8 @@ export type CouponBindingStatus = 'active' | 'inactive';
 export type CouponReservationPurpose = 'delivery' | 'gift';
 export type CouponReservationStatus = 'reserved' | 'committed' | 'released' | 'expired' | 'quarantined';
 export type ConversationHandlingMode = 'ai' | 'human';
+/** Which side of a chat the connected account is on; only 'seller' conversations may be auto-replied. */
+export type ConversationSide = 'seller' | 'buyer' | 'unknown';
 export type MessageDirection = 'inbound' | 'outbound';
 export type MessageSenderRole = 'buyer' | 'agent' | 'system';
 export type MessageBodyType = 'text' | 'image' | 'system';
@@ -670,6 +672,7 @@ export interface ConversationRecord {
   lastMessagePreview?: string;
   lastMessageAt?: string;
   handlingMode: ConversationHandlingMode;
+  side: ConversationSide;
   version: number;
   createdAt: string;
   updatedAt: string;
@@ -1592,6 +1595,7 @@ export interface Store {
   markConversationRead(adminId: string, conversationId: string): Promise<ConversationRecord | undefined>;
   findConversationByExternalRef(adminId: string, accountId: string, externalConversationRef: string): Promise<ConversationRecord | undefined>;
   upsertExternalConversation(input: { adminId: string; accountId: string; externalConversationRef: string; buyerRef: string; buyerDisplayName?: string; buyerAvatarUrl?: string; itemRef?: string; itemTitle?: string; itemImageUrl?: string; unreadCount?: number; lastMessagePreview?: string; lastMessageAt?: string }): Promise<ConversationRecord>;
+  setConversationSide(adminId: string, conversationId: string, side: ConversationSide): Promise<ConversationRecord | undefined>;
   listMessages(adminId: string, conversationId: string, query: MessageListQuery): Promise<MessageListResult>;
   listProductKnowledgeBaseMessages(adminId: string, productId: string): Promise<ProductKnowledgeBaseMessageRecord[]>;
   listAutoReplyMessages(adminId: string, conversationId: string, query: AutoReplyMessageListQuery): Promise<AutoReplyMessageListResult>;
