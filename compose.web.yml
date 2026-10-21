@@ -1,0 +1,14 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: docker/web/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18083:80"
+    depends_on:
+      - api
+  object-storage:
+    image: bitnamilegacy/minio:2025.7.23-debian-12-r5
+    user: "0:0"
+    command: ["minio", "server", "/data", "--console-address", ":9001"]
