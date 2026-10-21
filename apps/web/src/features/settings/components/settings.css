@@ -91,3 +91,15 @@
   .settings-tabs button:last-child{border-right:0}
   .settings-tabs button.active{background:var(--soft-blue-bg);box-shadow:inset 3px 0 0 var(--link)}
 }
+
+/* keyword quick replies */
+.keyword-rules { display: grid; gap: 12px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border, #e5e7eb); }
+.keyword-rules-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.keyword-rules-head h3 { margin: 0 0 4px; font-size: 15px; }
+.keyword-rules-head p { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-muted, #6b7280); }
+.keyword-rules-empty { margin: 0; font-size: 12px; color: var(--text-muted, #6b7280); }
+.keyword-rule { margin: 0; padding: 12px; border: 1px solid var(--border, #e5e7eb); border-radius: 10px; }
+.keyword-rule-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; align-items: end; }
+.keyword-rule-grid .full { grid-column: 1 / -1; }
+.keyword-rule-actions { display: flex; gap: 8px; justify-content: flex-end; }
+@media (max-width: 720px) { .keyword-rule-grid { grid-template-columns: 1fr; } }

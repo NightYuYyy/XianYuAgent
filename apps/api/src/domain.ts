@@ -1084,6 +1084,19 @@ export interface AutoReplyAgentConfig {
   /** Delay before the first automatic reply is sent. Zero disables the delay. */
   sendDelaySeconds: number;
   sendMode: AutoReplyAgentSendMode;
+  /** Deterministic keyword replies evaluated before the model (see auto-reply-keyword.ts). */
+  keywordRules?: AutoReplyKeywordRule[];
+}
+
+export type AutoReplyKeywordMatchMode = 'contains' | 'exact' | 'regex';
+
+export interface AutoReplyKeywordRule {
+  id: string;
+  keywords: string[];
+  reply: string;
+  matchMode: AutoReplyKeywordMatchMode;
+  productRef?: string;
+  enabled: boolean;
 }
 
 export interface AutoReplyAgentConfigRecord extends AutoReplyAgentConfig {

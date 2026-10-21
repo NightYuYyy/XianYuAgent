@@ -17,6 +17,7 @@ import { configureNotifier, createNotifierFromEnv, getNotifier, notify, NOTIFICA
 import { AccountProxyResolver, effectiveProxyUrl, normalizeProxyUrl } from './xianyu-proxy.js';
 import { ProductPolishService } from './product-polish.js';
 import { createOrderRefundHandlerFromEnv } from './order-refund.js';
+import { KeywordFirstAutoReplyGenerator, type KeywordRulesLoader } from './auto-reply-keyword.js';
 import { XianyuMtopClient } from './xianyu-mtop.js';
 import { metadataWithCookieSnapshot } from './xianyu-cookie-jar.js';
 import { XianyuImService } from './xianyu-im-service.js';
@@ -30,7 +31,7 @@ import { OpenAICompatibleModelClient, PiModelClientError, PiRuntimeAdapter, type
 import { ModelClientService, type ModelClient, type ModelClientRuntimeSnapshot, type ModelProviderRole } from './model-client.js';
 import { ApiKeyCredentialService } from './credential-store.js';
 import { DashboardService, type DashboardRange } from './dashboard.js';
-import { AutoReplyService, type AutoReplyAcknowledgementEvaluator } from './auto-reply.js';
+import { AutoReplyService, TemplateAutoReplyGenerator, type AutoReplyAcknowledgementEvaluator } from './auto-reply.js';
 import { ReliableExternalAutoReplySender } from './auto-reply-outbox.js';
 import { AutoReplyAgentSettingsService, resolveAutoReplyAgentDefaults, secondsToMilliseconds } from './auto-reply-agent-settings.js';
 import { ToolCallingAutoReplyAgent } from './auto-reply-agent.js';
@@ -137,6 +138,11 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
   let xianyu: XianyuMtopClient;
   let xianyuIm!: XianyuImService;
   const accountProxy = new AccountProxyResolver((adminId, accountId) => store.getAccount(adminId, accountId));
+  const keywordRulesLoader: KeywordRulesLoader = async (adminId, accountId) => {
+    if (!adminId) return [];
+    const settings = await store.getAutoReplyAgentConfig(adminId, accountId);
+    return settings?.keywordRules ?? [];
+  };
   if (effectiveProxyUrl(undefined)) console.info(JSON.stringify({ component: 'xianyu-proxy', event: 'default_proxy_configured' }));
   const notifier = configureNotifier(createNotifierFromEnv());
   console.info(JSON.stringify({ component: 'notifier', event: 'configured', ...notifier.status() }));
@@ -294,7 +300,7 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
     maxReplyLength: autoReplyAgentConfig.maxReplyLength,
     replySegmentDelayMs: autoReplyAgentConfig.replySegmentDelayMs,
     sendDelaySeconds: autoReplyAgentConfig.sendDelaySeconds,
-    generator: autoReplyModelClient ? new ToolCallingAutoReplyAgent(store, autoReplyModelClient, autoReplyAgentConfig, { godView: autoReplyGodView }) : undefined,
+    generator: new KeywordFirstAutoReplyGenerator(keywordRulesLoader, autoReplyModelClient ? new ToolCallingAutoReplyAgent(store, autoReplyModelClient, autoReplyAgentConfig, { godView: autoReplyGodView }) : new TemplateAutoReplyGenerator()),
     acknowledgementEvaluator: options.autoReplyAcknowledgementEvaluator,
     godView: autoReplyGodView,
     totalTimeoutMs: autoReplyAgentConfig.totalTimeoutMs,
@@ -318,7 +324,7 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
         maxReplyLength: settings.maxReplyLength,
         replySegmentDelayMs: secondsToMilliseconds(settings.replySegmentDelaySeconds),
         sendDelaySeconds: settings.sendDelaySeconds,
-        generator: runtimeModelClient ? new ToolCallingAutoReplyAgent(store, runtimeModelClient, runtimeConfig, { godView: autoReplyGodView }) : undefined,
+        generator: new KeywordFirstAutoReplyGenerator(keywordRulesLoader, runtimeModelClient ? new ToolCallingAutoReplyAgent(store, runtimeModelClient, runtimeConfig, { godView: autoReplyGodView }) : new TemplateAutoReplyGenerator()),
       };
     },
     sender: new ReliableExternalAutoReplySender(store, messages, async (input) => {
@@ -2210,6 +2216,7 @@ function readAutoReplyAgentPatch(body: Record<string, unknown>): import('./domai
   for (const field of booleanFields) if (typeof body[field] === 'boolean') patch[field] = body[field] as never;
   for (const field of stringFields) if (typeof body[field] === 'string') patch[field] = body[field] as never;
   for (const field of numberFields) if (typeof body[field] === 'number') patch[field] = body[field] as never;
+  if (Array.isArray(body.keywordRules)) patch.keywordRules = body.keywordRules as never;
   return patch;
 }
 

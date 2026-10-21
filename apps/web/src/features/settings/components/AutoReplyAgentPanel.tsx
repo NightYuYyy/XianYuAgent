@@ -5,6 +5,7 @@ import { TextAreaField } from '../../../shared/ui/TextAreaField';
 import { Toast } from '../../../shared/ui/Toast';
 import type { AutoReplyAgentSettingsController } from '../agent-settings-controller';
 import type { AutoReplyAgentConfigVM } from '../types';
+import { KeywordRulesEditor } from './KeywordRulesEditor';
 
 type EditableConfig = Omit<AutoReplyAgentConfigVM, 'accountId' | 'updatedByAdminId' | 'configVersion' | 'configDigest' | 'createdAt' | 'updatedAt' | 'debounceMs'>;
 
@@ -67,6 +68,7 @@ export function AutoReplyAgentPanel({ controller, accountName, accountId }: { co
           <InputField label="自动回复接管等待时间（秒）" type="number" min={0} max={86400} value={draft.sendDelaySeconds} onChange={(event) => setField('sendDelaySeconds', Number(event.target.value))} required />
         </fieldset>
       </div>
+      <KeywordRulesEditor rules={draft.keywordRules ?? []} disabled={!draft.enabled} onChange={(rules) => setField('keywordRules', rules)} />
       <div className="modal-actions"><Button variant="primary" type="submit" disabled={state.phase === 'submitting'}>{state.phase === 'submitting' ? '保存中…' : '保存自动回复 Agent 配置'}</Button></div>
     </form>
     </div>

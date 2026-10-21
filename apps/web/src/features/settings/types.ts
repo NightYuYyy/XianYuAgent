@@ -34,6 +34,15 @@ export interface SettingsState {
 
 export type AutoReplyAgentSendMode = 'simulate' | 'live';
 
+export interface AutoReplyKeywordRuleVM {
+  id: string;
+  keywords: string[];
+  reply: string;
+  matchMode: 'contains' | 'exact' | 'regex';
+  productRef?: string;
+  enabled: boolean;
+}
+
 export interface AutoReplyAgentConfigVM {
   enabled: boolean;
   systemPrompt: string;
@@ -49,6 +58,7 @@ export interface AutoReplyAgentConfigVM {
   debounceMs?: number;
   sendDelaySeconds: number;
   sendMode: AutoReplyAgentSendMode;
+  keywordRules?: AutoReplyKeywordRuleVM[];
   accountId: string;
   updatedByAdminId?: string;
   configVersion: number;
