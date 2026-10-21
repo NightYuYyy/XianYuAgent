@@ -6,7 +6,8 @@ export type XianyuSystemMessageKind =
   | 'trade_success'
   | 'trade_closed'
   | 'refund_success'
-  | 'refund_closed';
+  | 'refund_closed'
+  | 'refund_requested';
 
 export interface XianyuOrderStatusSnapshot {
   itemId?: string;
@@ -32,6 +33,7 @@ export function parseXianyuSystemMessageKind(value: string | undefined): XianyuS
   if (/^(?:已评价|评价完成)[。！!]?$/u.test(statusText)) return 'reviewed';
   if (/^交易成功[。！!]?$/u.test(statusText)) return 'trade_success';
   if (/^交易关闭[。！!]?$/u.test(statusText)) return 'trade_closed';
+  if (/^(?:我|买家)?(?:发起了|已发起|申请了)?退款申请[。！!]?$/u.test(statusText) || /^(?:我|买家)(?:发起了|已发起)退款[。！!]?$/u.test(statusText)) return 'refund_requested';
   if (/^退款成功[。！!]?$/u.test(statusText)) return 'refund_success';
   if (/^退款关闭[。！!]?$/u.test(statusText)) return 'refund_closed';
   return undefined;
@@ -84,6 +86,8 @@ export function matchesXianyuOrderStatus(kind: XianyuSystemMessageKind, order: X
       return afterSalesStatus === 'refunded';
     case 'refund_closed':
       return ['closed', 'rejected'].includes(afterSalesStatus);
+    case 'refund_requested':
+      return ['requested', 'refunding'].includes(afterSalesStatus);
   }
 }
 

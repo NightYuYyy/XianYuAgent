@@ -26,6 +26,9 @@ const SOLD_ORDERS_REFERER = 'https://seller.goofish.com/?site=COMMONPRO#/seller-
 const SELLER_ORDER_MANAGE_REFERER = SOLD_ORDERS_REFERER;
 const CONSIGN_API = 'mtop.taobao.idle.logistic.consign.dummy';
 const ADJUST_PRICE_API = 'mtop.taobao.idle.trade.user.adjust.price';
+const CLOSE_BY_SELLER_API = 'mtop.taobao.idle.trade.merchant.close.by.seller';
+/** Preset wording on the seller workbench; the platform rejects free-form reasons. */
+export const CLOSE_BY_SELLER_REASON = '其他原因';
 const ORDER_DETAIL_API = 'mtop.idle.web.trade.order.detail';
 const DEFAULT_SOLD_ORDER_PAGE_SIZE = 30;
 
@@ -402,6 +405,25 @@ export class XianyuMtopClient {
   }
 
   /**
+   * Close an order from the seller side (seller workbench "关闭订单"). For a paid
+   * order this refunds the buyer; use it when delivery must not happen.
+   */
+  async closeOrderBySeller(adminId: string, accountId: string, orderNo: string): Promise<XianyuExternalMutationResult> {
+    const normalizedOrderNo = String(orderNo ?? '').trim();
+    if (!normalizedOrderNo) return { status: 'failed', errorCode: 'ORDER_NO_MISSING', message: 'orderNo is required', cookieHeader: '' };
+    const result = await this.call(
+      adminId,
+      accountId,
+      CLOSE_BY_SELLER_API,
+      '2.0',
+      { tid: normalizedOrderNo, bizOrderId: normalizedOrderNo, closeReason: CLOSE_BY_SELLER_REASON },
+      { spm_cnt: 'a21107h.44911108.0.0', spm_pre: 'a21107h.44911108.0.0' },
+      { referer: SELLER_ORDER_MANAGE_REFERER },
+    );
+    return classifyMutationResult(result, normalizedOrderNo);
+  }
+
+  /**
    * Adjust the total price of an unpaid order. targetPriceMinor is integer fen.
    * The MTOP endpoint returns ret=SUCCESS even when data.success=false, so the
    * response body is checked before reporting a successful mutation.
@@ -605,7 +627,7 @@ export class XianyuMtopClient {
 }
 
 function isSellerApi(api: string): boolean {
-  return api === SOLD_ORDERS_API || api === CONSIGN_API || api === ADJUST_PRICE_API;
+  return api === SOLD_ORDERS_API || api === CONSIGN_API || api === ADJUST_PRICE_API || api === CLOSE_BY_SELLER_API;
 }
 
 function originForReferer(referer: string): string {

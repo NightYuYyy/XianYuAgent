@@ -8,7 +8,8 @@ const labels = {
   afterSalesStatus: { none: '无售后', requested: '售后申请', refunding: '退款中', refunded: '已退款', rejected: '已驳回', closed: '售后关闭' },
 } as const;
 
-export function OrderDetailDrawer({ order, phase, error, onClose, onRetry }: { order: OrderVM | null; phase: 'idle' | 'loading' | 'success' | 'error' | 'forbidden'; error: { message: string } | null; onClose: () => void; onRetry: () => void }) {
+export function OrderDetailDrawer({ order, phase, error, onClose, onRetry, onCloseOrder, closingOrder = false }: { order: OrderVM | null; phase: 'idle' | 'loading' | 'success' | 'error' | 'forbidden'; error: { message: string } | null; onClose: () => void; onRetry: () => void; onCloseOrder?: (order: OrderVM) => void; closingOrder?: boolean }) {
+  const canCloseOrder = Boolean(onCloseOrder && order && order.orderStatus === 'open' && order.afterSalesStatus === 'none' && order.paymentStatus !== 'closed');
   if (phase === 'idle') return null;
   return <div className="orders-drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <aside className="orders-drawer" role="dialog" aria-modal="true" aria-label="订单详情">
@@ -20,6 +21,7 @@ export function OrderDetailDrawer({ order, phase, error, onClose, onRetry }: { o
         <section><h3>状态矩阵</h3><div className="orders-status-matrix"><StatusCell label="支付状态" value={labels.paymentStatus[order.paymentStatus]} tone={order.paymentStatus === 'paid' ? 'success' : order.paymentStatus === 'unknown' ? 'danger' : 'warn'} /><StatusCell label="订单状态" value={labels.orderStatus[order.orderStatus]} tone={order.orderStatus === 'completed' ? 'success' : order.orderStatus === 'failed' ? 'danger' : 'info'} /><StatusCell label="发货状态" value={labels.deliveryStatus[order.deliveryStatus]} tone={order.deliveryStatus === 'delivered' ? 'success' : order.deliveryStatus === 'failed' ? 'danger' : 'warn'} /><StatusCell label="售后状态" value={labels.afterSalesStatus[order.afterSalesStatus]} tone={order.afterSalesStatus === 'none' ? 'neutral' : 'warn'} /></div></section>
         <section><h3>订单信息</h3><dl className="orders-detail-list"><div><dt>买家</dt><dd>{order.buyerName}<small>{order.buyerId}</small></dd></div><div><dt>商品</dt><dd>{order.itemTitle}<small>{order.itemId}</small></dd></div><div><dt>所属账号</dt><dd>{order.accountName ?? order.accountId}</dd></div><div><dt>会话关联</dt><dd>{order.conversationId ? <a href={`/messages?conversationId=${encodeURIComponent(order.conversationId)}`}>打开聊天会话</a> : '暂无关联会话'}</dd></div></dl></section>
         {order.deliveryFailReason && <section className="orders-risk-note"><span className="orders-risk-dot" /><div><strong>发货异常</strong><p>{order.deliveryFailReason}</p><small>当前为只读订单列表切片，发货、取消和重试将在后续交付切片中接入。</small></div></section>}
+        {canCloseOrder && order && <section className="orders-risk-note"><span className="orders-risk-dot" /><div><strong>卖家关闭订单</strong><p>{order.paymentStatus === 'paid' ? '已付款订单关闭后平台会给买家退款，已发出的卡券不会自动收回。' : '关闭后买家无法继续支付该订单。'}</p><button type="button" className="btn danger" data-testid="order-close" disabled={closingOrder} onClick={() => { if (window.confirm(`确定关闭订单 ${order.orderNo}？此操作不可撤销。`)) onCloseOrder?.(order); }}>{closingOrder ? '关闭中…' : '关闭订单'}</button></div></section>}
         <section><h3>审计摘要</h3><div className="orders-audit-line"><span>配置版本 v{order.configVersion}</span><span>最后更新 {formatOrderDate(order.updatedAt ?? order.createdAt)}</span><span>敏感交付内容未在列表与详情中返回</span></div></section>
       </div>}
     </aside>

@@ -16,6 +16,7 @@ import { XianyuRemoteSliderSolver } from './xianyu-remote-slider.js';
 import { configureNotifier, createNotifierFromEnv, getNotifier, notify, NOTIFICATION_KINDS } from './notifier.js';
 import { AccountProxyResolver, effectiveProxyUrl, normalizeProxyUrl } from './xianyu-proxy.js';
 import { ProductPolishService } from './product-polish.js';
+import { createOrderRefundHandlerFromEnv } from './order-refund.js';
 import { XianyuMtopClient } from './xianyu-mtop.js';
 import { metadataWithCookieSnapshot } from './xianyu-cookie-jar.js';
 import { XianyuImService } from './xianyu-im-service.js';
@@ -415,6 +416,8 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
     await store.recordAudit({ id: auditId, actorType: 'admin', actorId: input.actorId, action: input.action, targetRef: input.targetRef, requestId: input.requestId, traceId: input.traceId, payloadDigest: digestJson(input.payload), accountId: input.accountId, createdAt: new Date().toISOString() });
     return auditId;
   });
+  const refundHandler = createOrderRefundHandlerFromEnv(store);
+  if (refundHandler.webhookEnabled) console.info(JSON.stringify({ component: 'order-refund', event: 'revoke_webhook_configured' }));
   const orders = new OrderService(store, xianyu, async (input) => {
     const auditId = createId();
     await store.recordAudit({ id: auditId, actorType: 'admin', actorId: input.actorId, action: input.action, targetRef: input.targetRef, requestId: input.requestId, traceId: input.traceId, payloadDigest: digestJson(input.payload), accountId: input.accountId, createdAt: new Date().toISOString() });
@@ -499,6 +502,7 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
   }, coupons, autoReplyAgentSettings, workspaceCommands, modelClient);
 
   const server = createServer((request, response) => { void handleRequest(runtime, request, response); });
+  orders.attachRefundHandler(refundHandler);
   const runtime: AppRuntime = {
     accountProxy,
     productPolish: new ProductPolishService(store, xianyu, {
@@ -1410,7 +1414,7 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
     const accountId = optionalString(ctx.body.accountId);
     return mutation(runtime, ctx, authContext, accountId, async () => success(ctx, await orders.refresh({ adminId: authContext.admin.id, accountId, pageSize: ctx.body.pageSize, maxPages: ctx.body.maxPages, requestId: ctx.requestId, traceId: ctx.traceId })));
   }
-  const orderActionMatch = ctx.path.match(/^\/api\/v1\/orders\/([^/]+)\/(delivery-preview|deliver|cancel|retry)$/);
+  const orderActionMatch = ctx.path.match(/^\/api\/v1\/orders\/([^/]+)\/(delivery-preview|deliver|cancel|retry|close)$/);
   if (orderActionMatch) {
     const orderNo = decodeURIComponent(orderActionMatch[1]);
     const action = orderActionMatch[2];
@@ -1428,6 +1432,20 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
     }
     if (action === 'cancel' && ctx.method === 'POST') {
       return mutation(runtime, ctx, authContext, accountId, async () => success(ctx, await runtime.orderDelivery.cancel({ adminId: authContext.admin.id, accountId, orderNo, requestId: ctx.requestId, traceId: ctx.traceId })));
+    }
+    if (action === 'close' && ctx.method === 'POST') {
+      return mutation(runtime, ctx, authContext, accountId, async () => {
+        const existing = await store.getOrder(authContext.admin.id, orderNo, accountId);
+        if (!existing) throw new ServiceError(404, 'NOT_FOUND', 'order not found');
+        const result = await runtime.xianyu.closeOrderBySeller(authContext.admin.id, accountId, orderNo);
+        await store.recordAudit({ id: createId(), actorType: 'admin', actorId: authContext.admin.id, action: 'order.close_by_seller', targetRef: orderNo, requestId: ctx.requestId, traceId: ctx.traceId, payloadDigest: digestJson({ status: result.status, errorCode: result.errorCode }), accountId, createdAt: new Date().toISOString() });
+        if (result.status === 'succeeded') {
+          notify({ kind: 'order_closed', title: '订单已由卖家关闭', body: `商品：${existing.itemTitle}\n买家：${existing.buyerNickname || existing.buyerName}\n订单：${orderNo}`, accountId, accountLabel: existing.accountName, dedupeKey: `order-closed:${orderNo}` });
+          void orders.refresh({ adminId: authContext.admin.id, accountId, requestId: ctx.requestId, traceId: ctx.traceId }).catch(() => undefined);
+        }
+        if (result.status === 'failed') throw new ServiceError(502, result.errorCode ?? 'ORDER_CLOSE_FAILED', result.message ?? '闲鱼关闭订单失败');
+        return success(ctx, { orderNo, status: result.status, errorCode: result.errorCode, message: result.message });
+      });
     }
   }
   const orderDetailMatch = ctx.path.match(/^\/api\/v1\/orders\/([^/]+)$/);

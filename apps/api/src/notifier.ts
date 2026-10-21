@@ -22,6 +22,8 @@ export type NotificationKind =
   | 'account_listener_stopped'
   | 'order_paid'
   | 'order_manual_review'
+  | 'order_refund_requested'
+  | 'order_closed'
   | 'auto_reply_handoff'
   | 'remote_slider_failed'
   | 'system';
@@ -32,6 +34,8 @@ export const NOTIFICATION_KINDS: readonly NotificationKind[] = [
   'account_listener_stopped',
   'order_paid',
   'order_manual_review',
+  'order_refund_requested',
+  'order_closed',
   'auto_reply_handoff',
   'remote_slider_failed',
   'system',

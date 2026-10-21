@@ -28,6 +28,22 @@ export function OrdersPage({ api: providedApi }: { api?: OrdersApi }) {
   const retry = contextLoadFailure ? () => void refreshAccounts() : controller.reload;
   const orders = pageData?.items ?? [];
   const [syncToast, setSyncToast] = useState<string | null>(null);
+  const [actionToast, setActionToast] = useState<{ message: string; tone: 'success' | 'error' } | null>(null);
+  const [closingOrder, setClosingOrder] = useState(false);
+  async function closeOrderBySeller(order: { orderNo: string; accountId: string }) {
+    if (!api.close) return;
+    setClosingOrder(true);
+    try {
+      await api.close(order.orderNo, order.accountId);
+      setActionToast({ message: `订单 ${order.orderNo} 已提交关闭，平台处理后状态会同步。`, tone: 'success' });
+      await controller.openOrder(order.orderNo);
+      await controller.reload();
+    } catch (error) {
+      setActionToast({ message: (error as { message?: string })?.message || '关闭订单失败，请稍后重试。', tone: 'error' });
+    } finally {
+      setClosingOrder(false);
+    }
+  }
   useEffect(() => {
     if (!controller.syncError) return;
     setSyncToast(controller.syncError.message);
@@ -40,7 +56,8 @@ export function OrdersPage({ api: providedApi }: { api?: OrdersApi }) {
       {controller.state.phase === 'success' && pageData && <OrderTable orders={orders} page={pageData.page} totalPages={pageData.totalPages} total={pageData.total} onPageChange={(page) => setFilters((previous) => ({ ...previous, page }))} onOpen={controller.openOrder} />}
       <OrderStateView phase={statePhase} error={stateError} onRetry={retry} accountSelectionRequired={contextMissing} onChooseAccount={() => { window.history.pushState({}, '', '/accounts'); window.dispatchEvent(new PopStateEvent('popstate')); }} />
     </article>
-    <OrderDetailDrawer order={controller.detail.data} phase={controller.detail.phase} error={controller.detail.error} onClose={controller.closeOrder} onRetry={() => controller.detail.orderNo && void controller.openOrder(controller.detail.orderNo)} />
+    <OrderDetailDrawer order={controller.detail.data} phase={controller.detail.phase} error={controller.detail.error} onCloseOrder={api.close ? (order) => { void closeOrderBySeller(order); } : undefined} closingOrder={closingOrder} onClose={controller.closeOrder} onRetry={() => controller.detail.orderNo && void controller.openOrder(controller.detail.orderNo)} />
     {syncToast && <Toast message={syncToast} tone="error" onDismiss={() => setSyncToast(null)} />}
+    {actionToast && <Toast message={actionToast.message} tone={actionToast.tone} onDismiss={() => setActionToast(null)} />}
   </section>;
 }

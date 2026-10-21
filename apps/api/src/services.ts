@@ -1,3 +1,4 @@
+import { isRefundTransition, type OrderRefundHandler } from './order-refund.js';
 import type { AppConfig } from './config.js';
 import type { AccountListQuery, AccountListResult, AccountRecord, AccountScopeRecord, AdminRecord, AuditEventRecord, CouponBatchListQuery, CouponBatchMetadata, CouponBatchRecord, CouponBatchStatus, CouponBindingRecord, CouponItemRecord, CredentialRecord, IdempotencyRecord, LoginSessionRecord, OrderListQuery, OrderListResult, OrderRecord, ProductListQuery, ProductListResult, ProductPatch, ProductRecord, ProductSyncResult, SessionRecord, Store, XianyuProductItem } from './domain.js';
 import { createId, createToken, digestJson, hashPassword, isSessionFresh, sha256, verifyPassword } from './security.js';
@@ -291,6 +292,13 @@ export class OrderService {
     private readonly afterRefresh?: (input: { adminId: string; accountId: string; items: OrderRecord[]; requestId: string; traceId: string }) => Promise<ProductAutomationTriggerBatchResult>,
   ) {}
 
+  private refundHandler?: OrderRefundHandler;
+
+  /** Refund detection is optional so tests and minimal runtimes can construct the service without it. */
+  attachRefundHandler(handler: OrderRefundHandler): void {
+    this.refundHandler = handler;
+  }
+
   async list(adminId: string, query: OrderListQuery): Promise<OrderListResult> {
     if (query.accountId && (!isUuid(query.accountId) || !(await this.store.hasAccountScope(adminId, query.accountId)))) throw new ServiceError(403, 'FORBIDDEN', 'account scope required');
     const page = query.page ?? 1;
@@ -330,12 +338,17 @@ export class OrderService {
     let createdCount = 0;
     let updatedCount = 0;
     const items: OrderRecord[] = [];
+    const refundRequested: OrderRecord[] = [];
     for (const item of fetched.items) {
+      let previous: OrderRecord | undefined;
+      try { previous = await this.store.getOrder(input.adminId, item.orderNo, account.id); } catch { previous = undefined; }
       const result = await this.store.upsertExternalOrder({ adminId: input.adminId, accountId: account.id, accountName: account.displayName, item, syncedAt });
       items.push(result.order);
       if (result.action === 'created') createdCount += 1;
       else updatedCount += 1;
+      if (isRefundTransition(previous, result.order)) refundRequested.push(result.order);
     }
+    for (const refunding of refundRequested) void this.refundHandler?.handleRefundRequested({ adminId: input.adminId, accountId: account.id, order: refunding });
     const orderNos = [...new Set(fetched.items.map((item) => item.orderNo.trim()).filter(Boolean))];
     const deletedCount = fetched.hasMore
       ? 0

@@ -6,6 +6,8 @@ export interface OrdersApi {
   list(filters: OrderFilters): Promise<OrdersPageVM>;
   getDetail(orderNo: string, accountId?: string): Promise<OrderVM>;
   refresh(accountId?: string): Promise<void>;
+  /** Seller-side close (refunds a paid order). */
+  close?(orderNo: string, accountId: string): Promise<void>;
 }
 
 interface OrdersEnvelope {
@@ -127,6 +129,9 @@ export function createOrdersApi(options: { get: <T>(path: string) => Promise<T>;
     },
     async refresh(accountId) {
       await options.post('/api/v1/orders/refresh', accountId ? { accountId } : {}, { headers: { 'Idempotency-Key': `order-refresh-${accountId ?? 'active'}-${Date.now()}` } });
+    },
+    async close(orderNo, accountId) {
+      await options.post(`/api/v1/orders/${encodeURIComponent(orderNo)}/close`, { accountId }, { headers: { 'Idempotency-Key': `order-close-${orderNo}-${Date.now()}` } });
     },
   };
 }

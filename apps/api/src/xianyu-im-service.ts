@@ -884,10 +884,10 @@ export class XianyuImService {
   }
 }
 
-function trustedOrderRefreshKind(event: XianyuImMessageEvent): 'unpaid_order' | 'paid_waiting_shipment' | undefined {
+function trustedOrderRefreshKind(event: XianyuImMessageEvent): 'unpaid_order' | 'paid_waiting_shipment' | 'refund_requested' | undefined {
   if (event.direction !== 'inbound' || event.platformSystemMessage !== true) return undefined;
   const kind = parseXianyuSystemMessageKind(event.bodyText);
-  return kind === 'unpaid_order' || kind === 'paid_waiting_shipment' ? kind : undefined;
+  return kind === 'unpaid_order' || kind === 'paid_waiting_shipment' || kind === 'refund_requested' ? kind : undefined;
 }
 
 function isReadReceiptEvent(event: XianyuImMessageEvent | XianyuImReadReceiptEvent): event is XianyuImReadReceiptEvent {
