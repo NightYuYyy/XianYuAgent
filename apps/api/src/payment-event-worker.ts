@@ -1,3 +1,4 @@
+import { notify } from './notifier.js';
 import type { OrderRecord, PaymentEventJob, Store, XianyuOrderItem } from './domain.js';
 import type { XianyuMtopClient, XianyuOrdersPageResult } from './xianyu-mtop.js';
 import type { ProductAutomationTriggerBatchResult } from './product-automation-trigger.js';
@@ -190,7 +191,14 @@ export class PaymentEventWorker {
       const result = await this.processOrder({ adminId: job.adminId, accountId: job.accountId, items: [upsert.order], requestId, traceId: requestId });
       const paid = result.results.find((entry) => entry.trigger === 'payment_paid');
       if (!paid || paid.status === 'failed' || paid.status === 'unknown' || (paid.status === 'manual_review' && paid.reason?.startsWith('AUTHORITATIVE_ORDER_')) || (paid.status === 'skipped' && paid.reason === 'PRODUCT_LINK_MISSING')) { await this.defer(job, paid?.reason ?? 'AUTOMATION_NOT_RUN', item.orderNo, paid?.reason?.startsWith('AUTHORITATIVE_ORDER_') ?? false); return; }
-      await this.store.finishPaymentEvent({ id: job.id, ownerToken: job.ownerToken!, status: paid.status === 'manual_review' || paid.status === 'blocked' ? 'manual_review' : 'completed', orderNo: item.orderNo, lastError: paid.reason });
+      const needsHuman = paid.status === 'manual_review' || paid.status === 'blocked';
+      await this.store.finishPaymentEvent({ id: job.id, ownerToken: job.ownerToken!, status: needsHuman ? 'manual_review' : 'completed', orderNo: item.orderNo, lastError: paid.reason });
+      const order = upsert.order;
+      const amount = `¥${(order.amountMinor / 100).toFixed(2)}`;
+      const summary = `商品：${order.itemTitle}${order.skuSpec ? `（${order.skuSpec}）` : ''}\n金额：${amount}\n买家：${order.buyerNickname || order.buyerName}\n订单：${order.orderNo}`;
+      notify(needsHuman
+        ? { kind: 'order_manual_review', title: '订单已付款，需要人工处理', body: `${summary}\n原因：${paid.reason ?? paid.status}`, accountId: job.accountId, accountLabel: account.displayName, dedupeKey: `order-review:${order.orderNo}` }
+        : { kind: 'order_paid', title: '新订单已付款', body: `${summary}\n自动化：${paid.status}${paid.reason ? `（${paid.reason}）` : ''}`, accountId: job.accountId, accountLabel: account.displayName, dedupeKey: `order-paid:${order.orderNo}` });
     } catch (error) {
       await this.defer(job, error instanceof Error ? error.message : 'PAYMENT_EVENT_FAILED');
     }

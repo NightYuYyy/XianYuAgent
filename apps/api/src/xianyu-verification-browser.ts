@@ -1,3 +1,4 @@
+import { notify } from './notifier.js';
 import { mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -193,6 +194,7 @@ export class XianyuVerificationBrowser {
         return undefined;
       }
       console.warn(JSON.stringify({ component: 'xianyu-verification', event: 'remote_slider_failed', accountId, reason }));
+      notify({ kind: 'remote_slider_failed', title: '远程过滑块失败', body: `原因：${reason}\n账号可能需要人工验证。`, accountId, dedupeKey: `remote-slider:${accountId ?? 'unknown'}` });
       throw error;
     }
   }

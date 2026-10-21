@@ -1,3 +1,4 @@
+import { notify } from './notifier.js';
 import crypto from 'node:crypto';
 import { WebSocket } from 'ws';
 import { XIANYU_USER_AGENT, xianyuImUserAgent } from './xianyu-browser-identity.js';
@@ -407,6 +408,7 @@ export class XianyuImClient {
           console.warn(JSON.stringify({ component: 'xianyu-im-listener', event: 'failure_callback_failed', accountId: this.accountId, errorCode: eventErrorCode(callbackError) }));
         });
         this.setStatus('failed');
+        notify({ kind: 'account_listener_stopped', title: '消息监听连接失败', body: `原因：${eventErrorCode(error)}\n账号可能已掉线，请检查登录状态。`, accountId: this.accountId, dedupeKey: `listener-failed:${this.accountId}` });
       }
     });
     return socket;

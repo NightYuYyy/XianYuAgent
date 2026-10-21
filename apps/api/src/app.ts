@@ -13,6 +13,7 @@ import { createId, digestJson } from './security.js';
 import { XianyuQrLoginAdapter, type XianyuQrPublicSession } from './xianyu-qr-login.js';
 import { XianyuVerificationBrowser } from './xianyu-verification-browser.js';
 import { XianyuRemoteSliderSolver } from './xianyu-remote-slider.js';
+import { configureNotifier, createNotifierFromEnv, getNotifier, notify, NOTIFICATION_KINDS } from './notifier.js';
 import { XianyuMtopClient } from './xianyu-mtop.js';
 import { metadataWithCookieSnapshot } from './xianyu-cookie-jar.js';
 import { XianyuImService } from './xianyu-im-service.js';
@@ -130,6 +131,8 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
   });
   let xianyu: XianyuMtopClient;
   let xianyuIm!: XianyuImService;
+  const notifier = configureNotifier(createNotifierFromEnv());
+  console.info(JSON.stringify({ component: 'notifier', event: 'configured', ...notifier.status() }));
   const remoteSlider = config.xianyuSliderRemoteUrl && config.xianyuSliderRemoteSecret
     ? new XianyuRemoteSliderSolver({
       url: config.xianyuSliderRemoteUrl,
@@ -559,7 +562,9 @@ async function markXianyuAccountFailure(store: Store, adminId: string, accountId
     if (!account || account.status === 'disabled') return;
     const classification = classifyXianyuFailure(input);
     if (classification.kind === 'verification_required') {
-      await store.recordAccountRisk({ adminId, accountId, code: input.errorCode ?? 'ACCOUNT_VALIDATION_REQUIRED', source: input.source ?? 'xianyu' });
+      const code = input.errorCode ?? 'ACCOUNT_VALIDATION_REQUIRED';
+      await store.recordAccountRisk({ adminId, accountId, code, source: input.source ?? 'xianyu' });
+      notify({ kind: 'account_verification_required', title: '账号需要安全验证', body: `原因：${code}\n请到后台账号页处理，或等待自动过滑块结果。`, accountId, accountLabel: account.displayName, dedupeKey: `risk:${accountId}` });
       return;
     }
     const status = classification.accountStatus!;
@@ -1254,6 +1259,15 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
     });
   }
 
+  if (ctx.path === '/api/v1/notifications/status' && ctx.method === 'GET') {
+    return { statusCode: 200, body: success(ctx, { ...getNotifier().status(), availableKinds: NOTIFICATION_KINDS }).body };
+  }
+  if (ctx.path === '/api/v1/notifications/test' && ctx.method === 'POST') {
+    const title = optionalString(ctx.body.title) ?? '测试通知';
+    const body = optionalString(ctx.body.body) ?? `由 ${authContext.admin.displayName} 从后台触发`;
+    const result = await getNotifier().notify({ kind: 'system', title, body });
+    return { statusCode: 200, body: success(ctx, result).body };
+  }
   if (ctx.path === '/api/v1/accounts/risk-notifications' && ctx.method === 'GET') {
     return { statusCode: 200, body: success(ctx, { items: await store.listRiskNotifications(authContext.admin.id) }).body };
   }

@@ -1,3 +1,4 @@
+import { notify } from './notifier.js';
 import { randomUUID } from 'node:crypto';
 import type { AccountRecord, ConversationRecord, CredentialRecord, InboundInboxRecord, Store } from './domain.js';
 import { ServiceError } from './services.js';
@@ -606,6 +607,7 @@ export class XianyuImService {
       const classification = classifyXianyuFailure({ errorCode: normalizedCode });
       if (classification.kind === 'verification_required') {
         await this.store.recordAccountRisk({ adminId, accountId, code: normalizedCode.slice(0, 120), source });
+        notify({ kind: 'account_verification_required', title: '账号需要安全验证', body: `来源：${source}\n原因：${normalizedCode.slice(0, 120)}`, accountId, accountLabel: account.displayName, dedupeKey: `risk:${accountId}` });
         return;
       }
       const status = classification.accountStatus!;
