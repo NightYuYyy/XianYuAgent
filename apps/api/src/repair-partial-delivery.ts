@@ -1,3 +1,4 @@
+import { effectiveProxyUrl } from './xianyu-proxy.js';
 import { PostgresStore } from './store-postgres.js';
 import { XianyuImClient } from './xianyu-im.js';
 import { confirmPartialDeliveryImage } from './xianyu-im-service.js';

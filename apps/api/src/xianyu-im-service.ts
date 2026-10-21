@@ -1,3 +1,4 @@
+import { effectiveProxyUrl } from './xianyu-proxy.js';
 import { notify } from './notifier.js';
 import { randomUUID } from 'node:crypto';
 import type { AccountRecord, ConversationRecord, CredentialRecord, InboundInboxRecord, Store } from './domain.js';

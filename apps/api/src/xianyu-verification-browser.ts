@@ -1,3 +1,4 @@
+import { patchrightProxyFor } from './xianyu-proxy.js';
 import { notify } from './notifier.js';
 import { mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';

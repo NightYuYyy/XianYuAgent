@@ -1,3 +1,4 @@
+import { proxiedFetchFor, wsAgentFor } from './xianyu-proxy.js';
 import { notify } from './notifier.js';
 import crypto from 'node:crypto';
 import { WebSocket } from 'ws';

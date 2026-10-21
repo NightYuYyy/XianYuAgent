@@ -1,3 +1,4 @@
+import { proxiedFetchFor } from './xianyu-proxy.js';
 import crypto from 'node:crypto';
 import QRCode from 'qrcode';
 import {
