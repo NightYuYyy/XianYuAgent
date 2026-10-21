@@ -28,11 +28,27 @@ export function QrLoginView({ model }: QrLoginViewProps) {
           {session.qrImageDataUrl ? <><img src={session.qrImageDataUrl} alt="闲鱼二维码登录"/><span className="qr-login-help">打开闲鱼 App → 扫一扫</span><span className="qr-login-note">请勿截屏或转发二维码</span></> : <div className="qr-login-placeholder"><strong>二维码暂不可用</strong><span>请关闭弹窗后重新打开。</span></div>}
         </div>
         {session.verificationUrl && <a className="qr-login-link" href={session.verificationUrl} target="_blank" rel="noreferrer">在新窗口打开验证链接</a>}
-        {session.status === 'verification_required' && <div className="qr-login-error" role="alert"><strong>需要完成人工验证</strong><span>{session.verificationAutoLaunch ? '验证页已由浏览器打开，请完成页面上的验证；完成后系统会自动继续登录。' : '闲鱼已要求额外验证。请打开验证链接完成验证后再重试，系统不会伪造登录成功。'}</span></div>}
+        {session.status === 'verification_required' && <div className="qr-login-error" role="alert"><strong>{isIdentityVerification(session.verificationUrl) ? '需要在手机上完成二次验证' : '需要完成人工验证'}</strong><span>{verificationHint(session)}</span></div>}
         {session.status === 'succeeded' && <div className="qr-login-success" role="status"><strong>账号已重新连接</strong><span>凭证已由服务端保存并完成登录态校验。</span></div>}
       </>}
     </div>
   );
+}
+
+/** Havana identity verification (人脸/短信) lives under passport `/iv/`; it is completed on the phone, not on this page. */
+function isIdentityVerification(verificationUrl?: string): boolean {
+  return /\/iv\/|havana_iv_token|mini_login_check/i.test(verificationUrl ?? '');
+}
+
+function verificationHint(session: { verificationUrl?: string; verificationAutoLaunch?: boolean }): string {
+  if (isIdentityVerification(session.verificationUrl)) {
+    return session.verificationAutoLaunch
+      ? '闲鱼要求人脸或短信验证。请在手机闲鱼 App 上完成验证，期间请勿关闭此弹窗；服务端会等待验证结果并自动完成登录。'
+      : '闲鱼要求人脸或短信验证。请打开验证链接并在手机上完成验证后重新扫码。';
+  }
+  return session.verificationAutoLaunch
+    ? '验证页已由浏览器打开，请完成页面上的验证；完成后系统会自动继续登录。'
+    : '闲鱼已要求额外验证。请打开验证链接完成验证后再重试，系统不会伪造登录成功。';
 }
 
 function formatQrExpiry(seconds: number): string {

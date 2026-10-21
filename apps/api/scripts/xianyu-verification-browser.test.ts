@@ -164,3 +164,64 @@ test('Chromium SingletonLock ownership compares live process paths safely', asyn
     },
   ), true);
 });
+
+test('Havana identity verification pages are recognised and complete once unb is issued', async () => {
+  const { classifyVerificationUrl, isIdentityVerificationUrl } = await import('../src/xianyu-verification-browser.js');
+  const identityUrl = 'https://passport.goofish.com/iv/remote/pc/mini_login_check.htm?havana_iv_token=CN-SPLIT-redacted';
+  assert.equal(classifyVerificationUrl(identityUrl), 'identity');
+  assert.equal(isIdentityVerificationUrl(identityUrl), true);
+  assert.equal(classifyVerificationUrl('https://h5api.m.goofish.com/h5/mtop.taobao.idlemessage.pc.login.token/1.0/_____tmd_____/punish?x5step=2'), 'slider');
+  assert.equal(classifyVerificationUrl('https://www.goofish.com/im'), 'slider');
+  // identity completion is driven by the login cookie, not by x5sec or the URL
+  assert.equal(isVerificationPageComplete(identityUrl, [], [], 'identity'), false);
+  assert.equal(isVerificationPageComplete(identityUrl, [{ name: 'x5sec', value: 'fresh', domain: '.goofish.com', path: '/' }], [], 'identity'), false);
+  assert.equal(isVerificationPageComplete(identityUrl, [{ name: 'unb', value: '3477613846', domain: '.goofish.com', path: '/' }], [], 'identity'), true);
+  assert.equal(isVerificationPageComplete('https://www.goofish.com/im', [{ name: 'unb', value: '3477613846', domain: '.goofish.com', path: '/' }], [{ name: 'unb', value: '3477613846', domain: '.goofish.com', path: '/' }], 'identity'), false);
+  // the slider rule is unchanged
+  assert.equal(isVerificationPageComplete('https://www.goofish.com/im', [{ name: 'unb', value: '3477613846', domain: '.goofish.com', path: '/' }], [], 'slider'), false);
+});
+
+test('verification browser accepts the Havana identity page instead of rejecting it as unrelated', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'xianyu-identity-url-test-'));
+  const browserFactory = {
+    launchPersistentContext: async () => { throw new Error('FACTORY_REACHED'); },
+  };
+  try {
+    const browser = new XianyuVerificationBrowser({ mode: 'launch', sliderMode: 'auto', userDataDir: profile, maxWaitMs: 500, browserFactory });
+    await assert.rejects(
+      () => browser.waitForCompletion({ verificationUrl: 'https://passport.goofish.com/iv/remote/pc/mini_login_check.htm?havana_iv_token=CN-SPLIT-redacted', profileKey: 'identity-account' }),
+      (error: unknown) => error instanceof Error && error.message === 'FACTORY_REACHED',
+    );
+  } finally {
+    await rm(profile, { recursive: true, force: true });
+  }
+});
+
+test('identity verification waits for the page to finish login itself and never runs the slider solver', async () => {
+  const profile = await mkdtemp(join(tmpdir(), 'xianyu-patchright-identity-test-'));
+  const fixture = createServer((request, response) => {
+    if (request.url?.startsWith('/iv/remote/pc/mini_login_check.htm')) {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      // No slider on this page: the phone completes the verification and the
+      // page then follows ivCheckLogin, which issues the login cookies.
+      response.end('<!doctype html><div id="iv">请在手机上完成验证</div><script>setTimeout(() => { document.cookie = "unb=fixture-user; path=/"; location.href = "/im"; }, 400)</script>');
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end('<!doctype html><title>done</title><p>logged in</p>');
+  });
+  await new Promise<void>((resolve) => fixture.listen(0, '127.0.0.1', () => resolve()));
+  const address = fixture.address();
+  assert.ok(address && typeof address === 'object');
+  const verificationUrl = `http://127.0.0.1:${address.port}/iv/remote/pc/mini_login_check.htm?havana_iv_token=fixture`;
+  try {
+    // sliderMode 'auto' would throw XIANYU_VERIFICATION_AUTO_SOLVE_FAILED if the solver ran on this page.
+    const browser = new XianyuVerificationBrowser({ mode: 'launch', sliderMode: 'auto', headless: true, userDataDir: profile, maxWaitMs: 8_000, pollIntervalMs: 100 });
+    const result = await browser.waitForCompletion({ verificationUrl, profileKey: 'identity-fixture-account', allowManualFallback: false });
+    assert.equal(result.finalUrl, `http://127.0.0.1:${address.port}/im`);
+    assert.equal(result.cookieSnapshot.find((cookie) => cookie.name === 'unb')?.value, 'fixture-user');
+  } finally {
+    await new Promise<void>((resolve) => fixture.close(() => resolve()));
+    await rm(profile, { recursive: true, force: true });
+  }
+});

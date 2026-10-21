@@ -10,6 +10,20 @@ import { XianyuSliderSolver, type XianyuSliderMode } from './xianyu-slider-solve
 
 export type XianyuVerificationBrowserMode = 'disabled' | 'launch';
 
+/**
+ * Xianyu serves two different second-factor pages after a QR scan or an MTOP
+ * call is challenged:
+ *
+ * - `slider`: a Baxia/NC slider on a `punish|captcha|verify|security` URL. The
+ *   page is finished when it leaves that URL and a fresh `x5sec` cookie exists.
+ * - `identity`: a Havana identity-verification (人脸/短信) page under
+ *   `passport.goofish.com/iv/...`. The user completes it on their phone; the
+ *   PC page keeps polling and, once the phone succeeds, finishes the login
+ *   itself and writes `unb` plus the other session cookies. Nothing can be
+ *   automated here, but the page must stay open or the login never completes.
+ */
+export type XianyuVerificationKind = 'slider' | 'identity';
+
 export interface XianyuVerificationBrowserOptions {
   mode?: XianyuVerificationBrowserMode;
   sliderMode?: XianyuSliderMode;
@@ -31,6 +45,8 @@ export interface XianyuVerificationBrowserResult {
 }
 
 const DEFAULT_MAX_WAIT_MS = 3 * 60_000;
+/** Phone-side face/SMS verification needs the user to pick up the phone; 3 minutes is routinely too short. */
+const IDENTITY_MAX_WAIT_MS = 10 * 60_000;
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 
 /**
@@ -133,11 +149,15 @@ export class XianyuVerificationBrowser {
     maxWaitMs?: number;
     pollIntervalMs?: number;
   }, profileDir: string): Promise<XianyuVerificationBrowserResult> {
-    const maxWaitMs = Math.max(250, Math.floor(input.maxWaitMs ?? this.maxWaitMs));
+    const kind = classifyVerificationUrl(input.verificationUrl);
+    const defaultMaxWaitMs = kind === 'identity' ? Math.max(this.maxWaitMs, IDENTITY_MAX_WAIT_MS) : this.maxWaitMs;
+    const maxWaitMs = Math.max(250, Math.floor(input.maxWaitMs ?? defaultMaxWaitMs));
     const pollIntervalMs = Math.max(25, Math.floor(input.pollIntervalMs ?? this.pollIntervalMs));
     const allowManualFallback = input.allowManualFallback ?? this.allowManualFallback;
     const useHeadless = shouldUseHeadlessVerificationBrowser(this.sliderMode, this.headless);
-    const hideWindow = shouldHideVerificationWindow(this.sliderMode, useHeadless, allowManualFallback);
+    // The identity page polls Xianyu from its own JS; a minimized/off-screen
+    // window gets its timers throttled by Chrome, so never hide it.
+    const hideWindow = kind === 'slider' && shouldHideVerificationWindow(this.sliderMode, useHeadless, allowManualFallback);
     const releaseProfileLock = await acquireXianyuVerificationProfileLock(profileDir, maxWaitMs);
     try {
       const context = await this.browserFactory.launchPersistentContext({
@@ -156,7 +176,9 @@ export class XianyuVerificationBrowser {
         await waitForPageContent(page, Math.min(maxWaitMs, 12_000), pollIntervalMs);
         await sleep(750);
 
-        if (this.sliderMode === 'auto') {
+        if (kind === 'identity') {
+          console.info(JSON.stringify({ component: 'xianyu-verification', event: 'identity_verification_wait', maxWaitMs, hideWindow, headless: useHeadless }));
+        } else if (this.sliderMode === 'auto') {
           const sliderResult = await new XianyuSliderSolver(page, {
             maxRetries: this.sliderMaxRetries,
             logger: console,
@@ -177,16 +199,19 @@ export class XianyuVerificationBrowser {
         while (Date.now() < deadline) {
           lastUrl = page.url();
           lastCookies = await context.cookies();
-          if (isVerificationPageComplete(lastUrl, lastCookies, initialSnapshot)) {
+          if (isVerificationPageComplete(lastUrl, lastCookies, initialSnapshot, kind)) {
             await sleep(1_000);
+            lastUrl = page.url();
             lastCookies = await context.cookies();
-            if (isVerificationPageComplete(lastUrl, lastCookies, initialSnapshot)) {
+            if (isVerificationPageComplete(lastUrl, lastCookies, initialSnapshot, kind)) {
+              console.info(JSON.stringify({ component: 'xianyu-verification', event: 'verification_completed', kind, finalUrl: lastUrl }));
               return { finalUrl: lastUrl, cookieSnapshot: dropStaleCaptchaChallengeCookies(mapCookies(lastCookies)) };
             }
           }
           if (isBlankOrInvalidVerificationPage(lastUrl)) throw new Error('XIANYU_VERIFICATION_PAGE_EMPTY');
           await sleep(pollIntervalMs);
         }
+        console.warn(JSON.stringify({ component: 'xianyu-verification', event: 'verification_timeout', kind, lastUrl, maxWaitMs }));
         throw new Error('XIANYU_VERIFICATION_TIMEOUT');
       } finally {
         await closeVerificationPages(context);
@@ -240,7 +265,29 @@ export function resolveVerificationCookieUrl(verificationUrl: string): string {
   return url.toString();
 }
 
-export function isVerificationPageComplete(finalUrl: string, cookies: XianyuCookieSnapshot, initialCookies: XianyuCookieSnapshot = []): boolean {
+export function classifyVerificationUrl(value: string): XianyuVerificationKind {
+  return isIdentityVerificationUrl(value) ? 'identity' : 'slider';
+}
+
+export function isIdentityVerificationUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const path = url.pathname.toLowerCase();
+    return path.includes('/iv/') || url.searchParams.has('havana_iv_token') || /mini_login_check|identity_verify|ivchecklogin/.test(path);
+  } catch {
+    return false;
+  }
+}
+
+export function isVerificationPageComplete(finalUrl: string, cookies: XianyuCookieSnapshot, initialCookies: XianyuCookieSnapshot = [], kind: XianyuVerificationKind = 'slider'): boolean {
+  if (kind === 'identity') {
+    // The identity page finishes the login itself: `unb` only appears once the
+    // phone-side verification succeeded and the PC page followed ivCheckLogin.
+    const current = cookies.find((cookie) => cookie.name.toLowerCase() === 'unb' && cookie.value.trim());
+    if (!current) return false;
+    const initial = initialCookies.find((cookie) => cookie.name.toLowerCase() === 'unb' && cookie.value.trim());
+    return !initial || initial.value !== current.value;
+  }
   if (!isPostVerificationUrl(finalUrl)) return false;
   const current = cookies.find((cookie) => cookie.name.toLowerCase() === 'x5sec' && cookie.value.trim());
   if (!current) return false;
@@ -322,7 +369,8 @@ function assertVerificationUrl(value: string): void {
     const isGoofishHost = hostname === 'goofish.com' || hostname.endsWith('.goofish.com') || hostname === 'localhost' || hostname === '127.0.0.1';
     const path = `${url.pathname}${url.search}${url.hash}`;
     const isLocalFixture = hostname === 'localhost' || hostname === '127.0.0.1';
-    if (!isGoofishHost || (!isLocalFixture && !/punish|captcha|verify|security/i.test(path))) throw new Error('invalid target');
+    const isKnownChallengePath = /punish|captcha|verify|security/i.test(path) || isIdentityVerificationUrl(value);
+    if (!isGoofishHost || (!isLocalFixture && !isKnownChallengePath)) throw new Error('invalid target');
   } catch {
     throw new Error('XIANYU_VERIFICATION_URL_INVALID');
   }

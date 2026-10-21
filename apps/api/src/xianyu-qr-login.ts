@@ -20,6 +20,8 @@ const API_GENERATE_QR = `${PASSPORT_HOST}/newlogin/qrcode/generate.do`;
 const API_SCAN_STATUS = `${PASSPORT_HOST}/newlogin/qrcode/query.do`;
 const QR_VERIFY_TARGET = 'https://www.goofish.com/im';
 const USER_AGENT = XIANYU_USER_AGENT;
+/** How long a session may stay alive after Xianyu asks for a second factor. */
+const VERIFICATION_EXTENSION_MS = 10 * 60_000;
 
 export type XianyuQrStatus = 'waiting' | 'scanned' | 'succeeded' | 'expired' | 'cancelled' | 'failed' | 'verification_required';
 
@@ -170,6 +172,11 @@ export class XianyuQrLoginAdapter {
             session.status = 'verification_required';
             session.verificationUrl = result.iframeRedirectUrl;
             session.errorCode = 'VERIFICATION_REQUIRED';
+            // The phone-side verification (人脸/短信) regularly outlives the
+            // original QR window; keep the session alive while the server-side
+            // verification page waits for it, otherwise `get()` reports
+            // QR_EXPIRED while the login is still completing.
+            session.expiresAt = Math.max(session.expiresAt, Date.now() + VERIFICATION_EXTENSION_MS);
             await this.emitStatus(session);
             if (this.verificationBrowser?.enabled) {
               try {
@@ -185,7 +192,12 @@ export class XianyuQrLoginAdapter {
                 await this.emitStatus(session);
               } catch (error) {
                 if (!this.isCurrent(session)) return;
+                // Without the verification browser the login can never finish;
+                // surface a terminal state with the real cause instead of
+                // leaving the UI on "please complete verification" forever.
+                session.status = 'failed';
                 session.errorCode = classifyError(error);
+                console.warn(JSON.stringify({ component: 'xianyu-qr', event: 'verification_failed', sessionId: session.sessionId, accountId: session.accountId, errorCode: session.errorCode, verificationUrl: result.iframeRedirectUrl }));
                 await this.emitStatus(session);
               }
             }
@@ -370,7 +382,11 @@ function classifyError(error: unknown): string {
   const code = error && typeof error === 'object' && 'code' in error ? String((error as { code?: unknown }).code ?? '') : '';
   if (/^[A-Z][A-Z0-9_:-]*$/.test(code)) return code;
   const message = error instanceof Error ? error.message : String(error);
-  return message.startsWith('QR_') ? message : 'QR_NETWORK_ERROR';
+  if (message.startsWith('QR_')) return message;
+  // Verification browser failures carry their own diagnostic code (optionally
+  // suffixed with a lower-case reason); keep it instead of masking it.
+  if (/^XIANYU_[A-Z0-9_]+(?::[A-Za-z0-9_-]+)?$/.test(message)) return message;
+  return 'QR_NETWORK_ERROR';
 }
 function normalizeUrl(raw: string): string | undefined { const value = String(raw ?? '').replaceAll('\\/', '/').trim(); if (!value) return undefined; return value.startsWith('//') ? `https:${value}` : new URL(value, PASSPORT_HOST).toString(); }
 

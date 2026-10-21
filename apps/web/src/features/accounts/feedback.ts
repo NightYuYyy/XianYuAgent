@@ -15,6 +15,11 @@ const accountErrorLabels: Record<string, string> = {
   QR_ACCOUNT_MISMATCH: '扫码账号与当前账号不一致，请使用对应账号重新扫码。',
   QR_LOGIN_UNAVAILABLE: '二维码登录暂不可用，请稍后重试。',
   QR_EXPIRED: '二维码已过期，请关闭弹窗后重新扫码。',
+  QR_CONFIRMED_WITHOUT_UNB: '闲鱼未返回登录态，请重新扫码并完成验证。',
+  XIANYU_VERIFICATION_TIMEOUT: '二次验证等待超时，请重新扫码并尽快在手机上完成验证。',
+  XIANYU_VERIFICATION_URL_INVALID: '闲鱼返回的验证链接无法识别，请重新扫码。',
+  XIANYU_VERIFICATION_PAGE_EMPTY: '验证页面加载失败，请重新扫码。',
+  XIANYU_VERIFICATION_BROWSER_DISABLED: '服务端未启用验证浏览器，无法完成二次验证。',
   FORBIDDEN: '当前账号没有操作权限。',
   NOT_FOUND: '账号或通知已不存在，请刷新后重试。',
 };
@@ -31,6 +36,7 @@ export function accountErrorMessage(error: unknown, fallback: string): string {
   for (const code of codes) {
     if (!code) continue;
     if (Object.hasOwn(accountErrorLabels, code)) return accountErrorLabels[code];
+    if (code.startsWith('XIANYU_VERIFICATION_AUTO_SOLVE_FAILED')) return '滑块验证未通过，请重新扫码后重试。';
     if (/CAPTCHA|SLIDER|X5SEC|RGV587|FAIL_SYS_USER_VALIDATE/i.test(code)) return '需要安全验证，请在闲鱼完成验证后重新授权。';
   }
   if (record?.status === 401) return '登录已过期，请重新登录。';
