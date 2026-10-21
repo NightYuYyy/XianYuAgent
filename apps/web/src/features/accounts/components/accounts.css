@@ -76,7 +76,7 @@
 .qr-login-state strong, .qr-login-success strong, .qr-login-error strong { color: var(--text); font-size: 13px; }
 .qr-login-success { border: 1px solid var(--success-border); background: var(--success-bg); }
 .qr-login-error { border: 1px solid rgba(180,35,24,.18); background: var(--danger-bg); }
-.account-login-modal { display: flex; width: min(680px, calc(100vw - 32px)); height: 540px; max-height: calc(100vh - 48px); flex-direction: column; overflow: hidden; }
+.account-login-modal { display: flex; width: min(680px, calc(100vw - 32px)); min-height: 540px; max-height: calc(100vh - 48px); flex-direction: column; overflow: hidden; }
 .account-login-modal .modal-head { flex: 0 0 auto; }
 .account-login-methods { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0 0 16px; }
 .account-login-method { display: grid; gap: 6px; min-height: 92px; padding: 11px; border: 1px solid var(--border); border-radius: 10px; background: #fff; color: var(--text); text-align: left; cursor: pointer; }
@@ -110,7 +110,7 @@
   .accounts-domain-table { min-width: 1100px; }
   .accounts-domain-pagination { justify-content: center; }
   .account-login-methods { grid-template-columns: 1fr; }
-  .account-login-modal { height: auto; max-height: calc(100vh - 28px); }
+  .account-login-modal { min-height: 0; max-height: calc(100vh - 28px); }
 }
 
 .modal-backdrop.account-modal-backdrop { background: rgba(17,24,39,.54); backdrop-filter: blur(7px); }
@@ -131,7 +131,9 @@
 .account-delete-modal .icon-button { width: 30px; height: 30px; }
 .account-login-modal .account-login-methods { gap: 10px; margin: 7px 23px 0; }
 .account-login-method { min-height: 86px; }
-.account-login-body { padding: 0 23px 16px; overflow: hidden; }
+.account-login-body { padding: 0 23px 16px; overflow: auto; }
+.account-login-body .qr-login-link, .account-login-body .qr-login-error, .account-login-body .qr-login-success { margin-top: 10px; }
+.account-login-body .qr-login-error, .account-login-body .qr-login-success { padding: 12px 14px; }
 .qr-login-view { gap: 0; }
 .qr-login-status-row { margin-top: 14px; }
 .qr-login-status-row .badge { border-radius: 999px; }
