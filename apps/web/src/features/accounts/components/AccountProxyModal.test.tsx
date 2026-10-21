@@ -12,7 +12,7 @@ const account: AccountVM = {
   connection: { status: 'online' },
   enabled: true,
   aiEnabled: true,
-  credentialState: 'complete',
+  credentialState: 'configured',
   version: 1,
   updatedAt: '2026-10-21T00:00:00.000Z',
   proxyUrl: 'http://user:pass@1.2.3.4:3128',

@@ -78,7 +78,7 @@ export function proxyDispatcherFor(proxyUrl: string): Dispatcher {
  * getSetCookie, json/text/arrayBuffer).
  */
 export function proxiedFetchFor(proxyUrl?: string): typeof fetch {
-  if (!proxyUrl) return globalThis.fetch.bind(globalThis);
+  if (!proxyUrl) return globalThis.fetch;
   const dispatcher = proxyDispatcherFor(proxyUrl);
   return ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => undiciFetch(input as never, { ...(init as object), dispatcher } as never) as unknown as Promise<Response>) as typeof fetch;
 }
