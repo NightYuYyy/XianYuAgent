@@ -465,7 +465,7 @@ function buildCouponPreviewManifest(accountId: string, label: string, purpose: N
   };
 }
 
-function productStatusLabel(status: string): string { return ({ draft: '草稿', ready: '待发布', publishing: '发布中', published: '已发布', failed: '发布失败', archived: '已归档' } as Record<string, string>)[status] ?? status; }
+function productStatusLabel(status: string): string { return ({ draft: '草稿', ready: '待发布', publishing: '发布中', published: '已发布', failed: '发布失败', archived: '已删除' } as Record<string, string>)[status] ?? status; }
 function couponPurposeLabel(purpose: NativeCouponCreateInput['purpose']): string { return ({ text: '固定文字', data: '批量数据', api: 'API 接口', image: '图片' })[purpose]; }
 function formatMoney(valueMinor?: number): string { return typeof valueMinor === 'number' && Number.isFinite(valueMinor) ? `¥${(valueMinor / 100).toFixed(2)}` : '价格未设置'; }
 function formatAgentValue(value: string | number | boolean): string { return typeof value === 'boolean' ? (value ? '启用' : '停用') : typeof value === 'number' ? String(value) : value === 'live' ? '真实发送' : value === 'simulate' ? '模拟发送' : value; }

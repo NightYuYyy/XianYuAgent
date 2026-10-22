@@ -77,6 +77,27 @@ test('a re-synced item that is live on Xianyu again loses its stale listing mark
   assert.equal(upserted.product.status, 'published');
 });
 
+test('a product that is already deleted cannot be taken offline or deleted again', async () => {
+  const { store, admin, account, published, audit } = await setup();
+  const calls: string[] = [];
+  const xianyu = {
+    offlineItems: async (_a: string, _b: string, ids: string[]) => { calls.push(`offline:${ids.join(',')}`); return { status: 'succeeded' as const, cookieHeader: '', items: ids.map((itemId) => ({ itemId, success: true })) }; },
+    deleteItem: async (_a: string, _b: string, itemId: string) => { calls.push(`delete:${itemId}`); return { status: 'succeeded' as const, cookieHeader: '' }; },
+  };
+  const service = new ProductListingService(store, xianyu, audit);
+  await service.delete({ adminId: admin.id, accountId: account.id, productIds: [published.id], requestId: 'r', traceId: 't' });
+  assert.deepEqual(calls, ['delete:item-1']);
+
+  const offlineAgain = await service.offline({ adminId: admin.id, accountId: account.id, productIds: [published.id], requestId: 'r', traceId: 't' });
+  assert.equal(offlineAgain.items[0]?.errorCode, 'ALREADY_DELETED');
+  const deleteAgain = await service.delete({ adminId: admin.id, accountId: account.id, productIds: [published.id], requestId: 'r', traceId: 't' });
+  assert.equal(deleteAgain.items[0]?.errorCode, 'ALREADY_DELETED');
+  assert.deepEqual(calls, ['delete:item-1'], 'Xianyu is not called again for a deleted product');
+  const stored = await store.getProduct(admin.id, published.id);
+  assert.equal(stored?.status, 'archived');
+  assert.equal((stored?.attributes?.listing as { state?: string })?.state, 'deleted', 'the deleted marker is never overwritten by offline');
+});
+
 test('listing actions reject empty input and foreign accounts', async () => {
   const { store, admin, account, audit } = await setup();
   const service = new ProductListingService(store, { offlineItems: async () => { throw new Error('x'); }, deleteItem: async () => { throw new Error('x'); } }, audit);

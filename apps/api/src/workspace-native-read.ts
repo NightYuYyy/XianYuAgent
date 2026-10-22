@@ -85,7 +85,7 @@ function activityResult(summary: AutoReplyActivitySummary): NativeWorkspaceReadR
 
 function formatMoney(valueMinor?: number): string { return typeof valueMinor === 'number' && Number.isFinite(valueMinor) ? `¥${(valueMinor / 100).toFixed(2)}` : '价格未设置'; }
 function formatTime(value: string): string { const parsed = Date.parse(value); return Number.isFinite(parsed) ? new Date(parsed).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '时间未知'; }
-function productStatusLabel(status: string): string { return ({ draft: '草稿', ready: '待发布', publishing: '发布中', published: '已发布', failed: '发布失败', archived: '已归档' } as Record<string, string>)[status] ?? status; }
+function productStatusLabel(status: string): string { return ({ draft: '草稿', ready: '待发布', publishing: '发布中', published: '已发布', failed: '发布失败', archived: '已删除' } as Record<string, string>)[status] ?? status; }
 function couponPurposeLabel(purpose: string): string { return ({ text: '文本', data: '数据', api: 'API', image: '图片' } as Record<string, string>)[purpose] ?? purpose; }
 function couponStatusLabel(status: string): string { return ({ active: '有效', depleted: '已耗尽', voided: '已作废', archived: '已归档' } as Record<string, string>)[status] ?? status; }
 function paymentStatusLabel(status: string): string { return ({ unpaid: '未支付', paid: '已支付', closed: '已关闭', unknown: '未知' } as Record<string, string>)[status] ?? status; }

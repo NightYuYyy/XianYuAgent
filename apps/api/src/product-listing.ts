@@ -35,6 +35,13 @@ type AuditFn = (input: { actorId: string; action: string; targetRef?: string; re
 
 const MAX_BATCH = 50;
 
+function readListingState(product: ProductRecord): string | undefined {
+  const listing = product.attributes?.listing;
+  if (!listing || typeof listing !== 'object' || Array.isArray(listing)) return undefined;
+  const state = (listing as { state?: unknown }).state;
+  return typeof state === 'string' ? state : undefined;
+}
+
 /**
  * Takes the account's own listings off the shelf or deletes them on Xianyu,
  * then records the listing state on the local product so the catalogue shows
@@ -75,6 +82,11 @@ export class ProductListingService {
       }
       if (!product.externalProductRef) {
         items.push({ productId, title: product.title, status: 'failed', errorCode: 'NOT_PUBLISHED', message: '商品尚未发布到闲鱼，无需下架' });
+        continue;
+      }
+      if (product.status === 'archived' || readListingState(product) === 'deleted') {
+        // Already gone from Xianyu; taking it offline again would only smear a second marker over the deleted one.
+        items.push({ productId, title: product.title, status: 'failed', errorCode: 'ALREADY_DELETED', message: '商品已删除，无需再操作' });
         continue;
       }
       targets.push(product);

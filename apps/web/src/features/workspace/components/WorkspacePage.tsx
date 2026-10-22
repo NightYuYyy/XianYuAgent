@@ -411,7 +411,7 @@ function buildReadableConfirmationRows(action: WorkspaceConfirmationVM['action']
   return [['变更内容', displaySummary ?? '已准备一项受控变更']];
 }
 function productFieldLabel(value: string): string { return ({ title: '商品标题', description: '商品描述', categoryCode: '商品分类', defaultReplyTemplate: '默认回复', priceMinor: '商品价格' } as Record<string, string>)[value] ?? value; }
-function productStatusLabel(value: string): string { return ({ draft: '草稿', ready: '待发布', publishing: '发布中', published: '已发布', failed: '发布失败', archived: '已归档' } as Record<string, string>)[value] ?? value; }
+function productStatusLabel(value: string): string { return ({ draft: '草稿', ready: '待发布', publishing: '发布中', published: '已发布', failed: '发布失败', archived: '已删除' } as Record<string, string>)[value] ?? value; }
 function deliveryTypeLabel(value: string): string { return ({ manual: '人工发货', no_logistics: '免物流', coupon_only: '仅发卡券', mixed: '混合交付' } as Record<string, string>)[value] ?? value; }
 function couponActionLabel(action: string): string { return ({ coupon_create: '新建卡券', coupon_update: '更新卡券', coupon_enable: '启用卡券', coupon_disable: '停用卡券', coupon_bind: '绑定商品', coupon_unbind: '解除商品绑定', coupon_void: '作废卡券', coupon_copy: '复制卡券' } as Record<string, string>)[action] ?? '更新卡券'; }
 function formatMinorMoney(value: number): string { return `¥${(value / 100).toFixed(2)}`; }

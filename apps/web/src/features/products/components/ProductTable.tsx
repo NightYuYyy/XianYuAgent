@@ -61,7 +61,8 @@ function listingBadge(product: ProductVM) {
   const autoRelist = product.attributesJson?.autoRelist as { enabled?: boolean; delaySeconds?: number } | undefined;
   if (relist?.state === 'relisted') return <em className="products-listing-badge is-relisted" title={`成交后已自动重新发布为新链接${relist.newExternalProductRef ? ` ${relist.newExternalProductRef}` : ''}，这条不再自动续售`}>已续售</em>;
   if (autoRelist?.enabled) return <em className="products-listing-badge is-auto-relist" title={`成交付款后 ${autoRelist.delaySeconds ?? 60} 秒自动重新发布一条新链接${relist?.state === 'relisted_from' && relist.fromExternalProductRef ? `；本条由 ${relist.fromExternalProductRef} 续售而来` : ''}`}>自动续售</em>;
-  if (listing?.state === 'offline') return <em className="products-listing-badge is-offline" title="已通过后台下架，下次同步闲鱼后更新状态">已下架</em>;
-  if (listing?.state === 'deleted') return <em className="products-listing-badge is-deleted" title="已通过后台删除，下次同步闲鱼后更新状态">已删除</em>;
+  // Two states only: 下架 (still on Xianyu, can be relisted) and 删除 (gone from Xianyu; kept locally for order history).
+  if (product.status === 'archived' || listing?.state === 'deleted') return <em className="products-listing-badge is-deleted" title="已在闲鱼删除，本地只保留记录供订单追溯；默认列表不再显示">已删除</em>;
+  if (listing?.state === 'offline') return <em className="products-listing-badge is-offline" title="已在闲鱼下架，可在闲鱼重新上架；同步闲鱼后更新">已下架</em>;
   return null;
 }

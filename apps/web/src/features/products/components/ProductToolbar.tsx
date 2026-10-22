@@ -5,13 +5,13 @@ import { Button } from '../../../shared/ui/Button';
 import type { ProductFilters, ProductStatus, ProductsLoadPhase } from '../types';
 
 const statuses: Array<{ value: ProductStatus | 'all'; label: string }> = [
-  { value: 'all', label: '全部状态（不含已归档）' },
+  { value: 'all', label: '全部状态（不含已删除）' },
   { value: 'published', label: '已发布' },
   { value: 'ready', label: '待发布' },
   { value: 'draft', label: '草稿' },
   { value: 'publishing', label: '发布中' },
   { value: 'failed', label: '发布失败' },
-  { value: 'archived', label: '已归档' },
+  { value: 'archived', label: '已删除' },
 ];
 
 export function ProductToolbar({ currentAccount, contextLoading, contextError, contextMissing, filters, phase, syncing, selectedCount = 0, onBatchOffline, onBatchDelete, autoRelistLabel = '开启自动续售', onBatchAutoRelist, onRelistNow, onKeywordChange, onStatusChange, onRefresh, onSync, onCreate, onChooseAccount, onBatchConfigure }: {
