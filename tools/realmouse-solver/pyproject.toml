@@ -1,0 +1,12 @@
+[project]
+name = "xianyu-realmouse-solver"
+version = "0.1.0"
+description = "闲鱼滑块真人鼠标求解小服务（Windows），引擎来自 zhinianboke/xianyu-auto-reply（AGPL-3.0）"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "playwright>=1.52",
+    "loguru>=0.7",
+    "pydantic>=2",
+]

@@ -189,3 +189,24 @@ export interface ChatQuickPhraseVM {
   label: string;
   content: string;
 }
+
+/** Settings → 滑块求解器 status card (GET /api/v1/system/slider-solver). */
+export interface SliderSolverProbeVM {
+  reachable: boolean;
+  latencyMs: number;
+  httpStatus?: number;
+  error?: string;
+  /** Raw counters from the solver's /health: status, real_mouse_available, platform, requests, success, failed, url_expired, last_result_at. */
+  stats?: Record<string, unknown>;
+}
+
+export interface SliderSolverStatusVM {
+  configured: boolean;
+  endpoint?: string;
+  fallback: 'local' | 'none';
+  timeoutMs: number;
+  browserTimeoutSeconds: number;
+  localSliderMode: string;
+  probe?: SliderSolverProbeVM;
+  checkedAt: string;
+}

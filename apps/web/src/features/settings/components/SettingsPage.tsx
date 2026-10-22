@@ -1,35 +1,38 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { chooseFirstAvailableAccountId, useAccountContext } from '../../../app/account-context';
-import { createCredentialApi, createMockAutoReplyAgentSettingsApi, createMockCredentialApi, createMockOpenAISettingsApi, type AutoReplyAgentSettingsApi, type CredentialApi, type OpenAISettingsApi } from '../api';
+import { createCredentialApi, createMockAutoReplyAgentSettingsApi, createMockCredentialApi, createMockOpenAISettingsApi, createMockSystemApi, type AutoReplyAgentSettingsApi, type CredentialApi, type OpenAISettingsApi, type SystemApi } from '../api';
 import { resolveRuntimeApi } from '../../../api/runtime';
 import { useAutoReplyAgentSettingsController } from '../agent-settings-controller';
 import { AutoReplyAgentPanel } from './AutoReplyAgentPanel';
 import { useCredentialController } from '../controller';
 import type { CredentialRefVM } from '../types';
 import { OpenAISettingsPanel } from './OpenAISettingsPanel';
+import { SliderSolverPanel } from './SliderSolverPanel';
 import type { ModelProviderApi } from '../model-provider-api';
 import type { ProviderModelsVM } from '../model-provider-api';
 import { Button } from '../../../shared/ui/Button';
 import { InputField } from '../../../shared/ui/InputField';
 import './settings.css';
 
-type TabKey = 'autoReply' | 'model' | 'credentials' | 'safety' | 'outbox' | 'plugins';
+type TabKey = 'autoReply' | 'model' | 'credentials' | 'solver' | 'safety' | 'outbox' | 'plugins';
 
 const tabs: Array<{ id: TabKey; label: string; mobileLabel: string; meta: string }> = [
   { id: 'autoReply', label: '自动回复 Agent', mobileLabel: 'Agent', meta: 'Buyer Agent' },
   { id: 'model', label: 'OpenAI API', mobileLabel: '模型', meta: 'ModelClient' },
   { id: 'credentials', label: '凭证管理', mobileLabel: '凭证', meta: 'CredentialStore' },
+  { id: 'solver', label: '滑块求解器', mobileLabel: '滑块', meta: 'Remote Solver' },
   { id: 'safety', label: '安全输出校验', mobileLabel: '安全', meta: 'Gateway' },
   { id: 'outbox', label: 'Outbox Worker', mobileLabel: '队列', meta: 'Runtime' },
   { id: 'plugins', label: '插件配置', mobileLabel: '插件', meta: 'Skill / Plugin' },
 ];
 
-export function SettingsPage({ api: providedApi, agentApi: providedAgentApi, openaiApi: providedOpenaiApi, modelApi: providedModelApi }: { api?: CredentialApi; agentApi?: AutoReplyAgentSettingsApi; openaiApi?: OpenAISettingsApi; modelApi?: ModelProviderApi }) {
+export function SettingsPage({ api: providedApi, agentApi: providedAgentApi, openaiApi: providedOpenaiApi, modelApi: providedModelApi, systemApi: providedSystemApi }: { api?: CredentialApi; agentApi?: AutoReplyAgentSettingsApi; openaiApi?: OpenAISettingsApi; modelApi?: ModelProviderApi; systemApi?: SystemApi }) {
   const { accounts, accountsLoading, accountsError, currentAccountId, setCurrentAccountId } = useAccountContext();
   const api = useMemo(() => providedApi ?? createCredentialApiFromRuntime(), [providedApi]);
   const agentApi = useMemo(() => resolveRuntimeApi(providedAgentApi, createMockAutoReplyAgentSettingsApi, 'AUTO_REPLY_AGENT_API_NOT_PROVIDED'), [providedAgentApi]);
   const openaiApi = useMemo(() => resolveRuntimeApi(providedOpenaiApi, createMockOpenAISettingsApi, 'OPENAI_SETTINGS_API_NOT_PROVIDED'), [providedOpenaiApi]);
   const modelApi = useMemo(() => providedModelApi ?? createEmptyModelProviderApi(), [providedModelApi]);
+  const systemApi = useMemo(() => resolveRuntimeApi(providedSystemApi, createMockSystemApi, 'SYSTEM_API_NOT_PROVIDED'), [providedSystemApi]);
   const [activeTab, setActiveTab] = useState<TabKey>('autoReply');
   const [editor, setEditor] = useState<'create' | 'edit' | 'rotate' | null>(null);
   const [selectedCredential, setSelectedCredential] = useState<CredentialRefVM | undefined>();
@@ -57,7 +60,7 @@ export function SettingsPage({ api: providedApi, agentApi: providedAgentApi, ope
           {tabs.map((tab) => <button key={tab.id} type="button" className={activeTab === tab.id ? 'active' : ''} onClick={() => setActiveTab(tab.id)}><span className="settings-tab-label">{tab.label}</span><span className="settings-tab-mobile-label">{tab.mobileLabel}</span><small>{tab.meta}</small></button>)}
         </aside>
         <div className="settings-active">
-          {activeTab === 'credentials' ? <CredentialStorePanel accountName={selectedAccount?.displayName} accountId={currentAccountId ?? ''} accountsLoading={accountsLoading} accountsError={accountsError} state={controller.state} items={items} onCreate={() => openEditor('create')} onEdit={(item) => openEditor('edit', item)} onRotate={(item) => openEditor('rotate', item)} onStatus={(item, status) => { void controller.setStatus({ credentialId: item.id, expectedVersion: item.version, status }); }} onRetry={controller.reload} /> : activeTab === 'autoReply' ? <AutoReplyAgentPanel controller={agentController} accountName={selectedAccount?.displayName} accountId={currentAccountId} /> : activeTab === 'model' ? <OpenAISettingsPanel accountId={currentAccountId ?? ''} accountName={selectedAccount?.displayName} api={openaiApi} modelApi={modelApi} accountsLoading={accountsLoading} accountsError={accountsError} /> : <ReferencePanel tab={activeTab} onOpenCredentials={() => setActiveTab('credentials')} />}
+          {activeTab === 'credentials' ? <CredentialStorePanel accountName={selectedAccount?.displayName} accountId={currentAccountId ?? ''} accountsLoading={accountsLoading} accountsError={accountsError} state={controller.state} items={items} onCreate={() => openEditor('create')} onEdit={(item) => openEditor('edit', item)} onRotate={(item) => openEditor('rotate', item)} onStatus={(item, status) => { void controller.setStatus({ credentialId: item.id, expectedVersion: item.version, status }); }} onRetry={controller.reload} /> : activeTab === 'autoReply' ? <AutoReplyAgentPanel controller={agentController} accountName={selectedAccount?.displayName} accountId={currentAccountId} /> : activeTab === 'model' ? <OpenAISettingsPanel accountId={currentAccountId ?? ''} accountName={selectedAccount?.displayName} api={openaiApi} modelApi={modelApi} accountsLoading={accountsLoading} accountsError={accountsError} /> : activeTab === 'solver' ? <SliderSolverPanel api={systemApi} /> : <ReferencePanel tab={activeTab} onOpenCredentials={() => setActiveTab('credentials')} />}
         </div>
       </div>
       {editor && <CredentialEditor mode={editor} accountId={currentAccountId ?? ''} credential={selectedCredential} onClose={() => { setEditor(null); setSelectedCredential(undefined); }} onCreate={controller.create} onUpdate={controller.update} onRotate={controller.rotate} />}
@@ -122,8 +125,8 @@ function CredentialEditor({ mode, accountId, credential, onClose, onCreate, onUp
   return <div className="modal-backdrop" role="presentation"><form className="card modal-card settings-editor" onSubmit={(event) => void submit(event)}><div className="modal-head"><div><p className="eyebrow">{mode === 'rotate' ? 'Rotate Secret' : 'Credential Store'}</p><h2>{title}</h2><p>{mode === 'edit' ? '只更新引用元数据，不会读取旧密钥。' : '明文只存在于本次受控提交，不会写入 URL 或本地缓存。'}</p></div><button type="button" className="icon-button" onClick={onClose} aria-label="关闭">×</button></div><div className="settings-form-grid">{mode !== 'rotate' && <><InputField label="Provider" value={provider} onChange={(event) => setProvider(event.target.value)} required /><InputField label="Alias" value={alias} onChange={(event) => setAlias(event.target.value)} required /><InputField fieldClassName="full" label="备注（可选）" value={label} onChange={(event) => setLabel(event.target.value)} /></>}{mode !== 'edit' && <InputField fieldClassName="full" label="API Key" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" placeholder="输入新的 API Key" required minLength={8} />}</div>{error && <div className="inline-error" role="alert">{error}</div>}<div className="settings-editor-note"><strong>安全边界</strong><span>服务端只返回指纹摘要（{credential?.fingerprint ?? '保存后生成'}），不会提供 reveal。</span></div><div className="modal-actions"><Button variant="ghost" type="button" onClick={onClose}>取消</Button><Button variant="primary" type="submit" disabled={busy || !accountId}>{busy ? '提交中…' : mode === 'rotate' ? '确认轮换' : mode === 'create' ? '保存配置' : '保存修改'}</Button></div></form></div>;
 }
 
-function ReferencePanel({ tab, onOpenCredentials }: { tab: Exclude<TabKey, 'credentials'>; onOpenCredentials: () => void }) {
-  const content: Record<Exclude<TabKey, 'credentials'>, { title: string; description: string; rows: Array<[string, string, string]> }> = {
+function ReferencePanel({ tab, onOpenCredentials }: { tab: Exclude<TabKey, 'credentials' | 'solver'>; onOpenCredentials: () => void }) {
+  const content: Record<Exclude<TabKey, 'credentials' | 'solver'>, { title: string; description: string; rows: Array<[string, string, string]> }> = {
     autoReply: { title: '自动回复 Agent', description: '买家侧 Agent 配置已独立保存，保存后下一条消息读取最新配置。', rows: [['配置范围', '买家侧自动回复', '独立'], ['工具权限', '四个只读工具', '受控'], ['发送模式', '模拟发送 / 白名单真实发送', '策略'] ] },
     model: { title: 'OpenAI API 兼容模型配置', description: 'ModelClient 只消费 CredentialRef，不在页面回显明文 API Key。', rows: [['当前配置', 'openai-compatible / primary', '已脱敏'], ['Secret', 'secret_store_ref:model_api_key_primary', '不可查看'], ['生效规则', '保存后由运行时读取引用', '受控'] ] },
     safety: { title: '安全输出校验', description: '买家输入按不可信内容处理，凭证、Cookie 和内部配置永不进入买家链路。', rows: [['Prompt Injection', '拦截', '高优先级'], ['凭证泄露', '拦截', '高优先级'], ['非订单交付', '按订单条件校验', '策略'] ] },

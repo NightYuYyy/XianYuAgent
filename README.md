@@ -228,3 +228,7 @@ quarantine 清理验收：先确认 Worker 启动日志包含 `quarantineCleanup
 6. 任意自动尝试失败都返回验证错误，不伪造成功；只有新的 `x5sec` 且页面离开验证态才算通过。
 
 该实现不依赖裸 CDP，也不在服务端日志中输出业务 Cookie 或 Token；服务器部署时需要可执行的正式版 Chrome。验证上下文完成后立即关闭，持久化 profile 仅用于复用账号登录态。
+
+### 4. 远程真人鼠标滑块求解器
+
+闲鱼风控会拒绝一切 CDP 注入的滑块输入（`code=300, sig=from bx`），本地算法实际过不了；生产用的是一台 Windows 桌面机上的真人鼠标求解器，经 SSH 反向隧道供 api 容器调用。源码、安装、隧道、服务器侧 `XIANYU_SLIDER_REMOTE_*` 变量和排障表都在 [`tools/realmouse-solver/README.md`](tools/realmouse-solver/README.md)（该目录为 AGPL-3.0，见其 `NOTICE.md`）。后台 **设置 → 滑块求解器** 实时显示求解器是否可达、真人鼠标引擎是否可用及累计通过/失败次数。

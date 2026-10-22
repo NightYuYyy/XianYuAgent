@@ -73,6 +73,8 @@ export interface AppRuntime {
   products: ProductService;
   productPublisher: ProductPublishService;
   productListing: ProductListingService;
+  /** External physical-mouse slider solver client; undefined when XIANYU_SLIDER_REMOTE_* is not configured. */
+  remoteSlider?: XianyuRemoteSliderSolver;
   productKnowledgeBase: ProductKnowledgeBaseService;
   productAutomation: ProductAutomationService;
   productAutomationTrigger: ProductAutomationTrigger;
@@ -542,7 +544,7 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
       intervalMs: positiveEnvNumber(process.env.PRODUCT_POLISH_INTERVAL_HOURS, 24) * 3_600_000,
       maxItemsPerRun: positiveEnvNumber(process.env.PRODUCT_POLISH_MAX_ITEMS_PER_RUN, 200),
     }),
-    config, store, auth, accounts, coupons, orders, orderDelivery, products, productPublisher, productListing, autoRelist, productKnowledgeBase, productAutomation, productAutomationTrigger, productAutomationWorker, paymentEventWorker, productSync, credentials, apiKeyCredentials, openaiSettings, modelProviderRuntime, dashboard, messages, autoReply, autoReplyRepair, autoReplyAgentSettings, autoReplyActivity, redisRealtime, workspace, piSkills, workspaceCommands, workspaceRuntime, qrLogin, xianyu, xianyuItemDetail, objectStorage, xianyuIm,
+    config, store, auth, accounts, coupons, orders, orderDelivery, products, productPublisher, productListing, remoteSlider: remoteSlider ?? undefined, autoRelist, productKnowledgeBase, productAutomation, productAutomationTrigger, productAutomationWorker, paymentEventWorker, productSync, credentials, apiKeyCredentials, openaiSettings, modelProviderRuntime, dashboard, messages, autoReply, autoReplyRepair, autoReplyAgentSettings, autoReplyActivity, redisRealtime, workspace, piSkills, workspaceCommands, workspaceRuntime, qrLogin, xianyu, xianyuItemDetail, objectStorage, xianyuIm,
     server,
     async listen() {
       await new Promise<void>((resolve) => runtime.server.listen(config.port, config.host, resolve));
@@ -1699,6 +1701,21 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
       return success(ctx, { ...result, product: toProductView(result.product) });
     });
   }
+  if (ctx.path === '/api/v1/system/slider-solver' && ctx.method === 'GET') {
+    // Settings → 滑块求解器: is the desktop solver (and its SSH tunnel) reachable right now?
+    const solver = runtime.remoteSlider;
+    const probe = solver ? await solver.health() : undefined;
+    return { statusCode: 200, body: success(ctx, {
+      configured: Boolean(solver),
+      endpoint: solver?.endpoint,
+      fallback: config.xianyuSliderRemoteFallback,
+      timeoutMs: config.xianyuSliderRemoteTimeoutMs,
+      browserTimeoutSeconds: config.xianyuSliderRemoteBrowserTimeoutSeconds,
+      localSliderMode: config.xianyuVerificationSliderMode,
+      probe,
+      checkedAt: new Date().toISOString(),
+    }).body };
+  }
   if (ctx.path === '/api/v1/products/relist-jobs' && ctx.method === 'GET') {
     const accountId = optionalString(ctx.query.accountId);
     const productId = optionalString(ctx.query.productId);
@@ -2102,6 +2119,7 @@ function parseProductListQuery(query: Record<string, string>): import('./domain.
     keyword: optionalString(query.keyword),
     accountId: optionalString(query.accountId),
     status: optionalString(query.status) as import('./domain.js').ProductListQuery['status'],
+    includeArchived: query.includeArchived === 'true' || query.includeArchived === '1',
     sortBy: optionalString(query.sortBy) as import('./domain.js').ProductListQuery['sortBy'],
     sortOrder: optionalString(query.sortOrder) as import('./domain.js').ProductListQuery['sortOrder'],
     page: page === undefined || Number.isNaN(page) ? page : Math.trunc(page),

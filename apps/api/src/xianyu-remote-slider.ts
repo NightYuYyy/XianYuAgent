@@ -41,6 +41,18 @@ export interface XianyuRemoteSliderResult {
   elapsedMs: number;
 }
 
+/** Result of probing the solver's `/health` endpoint (see tools/realmouse-solver). */
+export interface XianyuRemoteSliderHealth {
+  reachable: boolean;
+  latencyMs: number;
+  /** HTTP status when the probe got an answer. */
+  httpStatus?: number;
+  /** Why the probe failed, for the settings page. */
+  error?: string;
+  /** Raw stats from the solver (`status`, `real_mouse_available`, counters, `last_result_at`) when reachable. */
+  stats?: Record<string, unknown>;
+}
+
 export const REMOTE_SLIDER_UNAVAILABLE = 'XIANYU_REMOTE_SLIDER_UNAVAILABLE';
 export const REMOTE_SLIDER_UNAUTHORIZED = 'XIANYU_REMOTE_SLIDER_UNAUTHORIZED';
 export const REMOTE_SLIDER_URL_EXPIRED = 'XIANYU_REMOTE_SLIDER_URL_EXPIRED';
@@ -68,6 +80,49 @@ export class XianyuRemoteSliderSolver {
 
   get enabled(): boolean {
     return Boolean(this.url && this.secret);
+  }
+
+  /** The configured solve endpoint, for display. The secret never leaves the process. */
+  get endpoint(): string {
+    return this.url;
+  }
+
+  /**
+   * Probe the solver's `/health` (same origin as the solve URL). Cheap and
+   * side-effect free, so the settings page can poll it to see whether the
+   * desktop box and its SSH tunnel are up before a challenge arrives.
+   */
+  async health(timeoutMs = 5_000): Promise<XianyuRemoteSliderHealth> {
+    const started = Date.now();
+    let healthUrl: string;
+    try {
+      const parsed = new URL(this.url);
+      parsed.pathname = '/health';
+      parsed.search = '';
+      healthUrl = parsed.toString();
+    } catch {
+      return { reachable: false, latencyMs: 0, error: 'INVALID_URL' };
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.max(1_000, timeoutMs));
+    try {
+      const response = await this.fetchImpl(healthUrl, { method: 'GET', headers: { accept: 'application/json' }, signal: controller.signal });
+      const latencyMs = Date.now() - started;
+      if (!response.ok) return { reachable: false, latencyMs, httpStatus: response.status, error: `HTTP_${response.status}` };
+      let stats: Record<string, unknown> = {};
+      try {
+        const body = await response.json() as unknown;
+        if (body && typeof body === 'object' && !Array.isArray(body)) stats = body as Record<string, unknown>;
+      } catch {
+        return { reachable: false, latencyMs, httpStatus: response.status, error: 'INVALID_JSON' };
+      }
+      return { reachable: true, latencyMs, httpStatus: response.status, stats };
+    } catch (error) {
+      const aborted = error instanceof Error && error.name === 'AbortError';
+      return { reachable: false, latencyMs: Date.now() - started, error: aborted ? 'TIMEOUT' : 'UNREACHABLE' };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async solve(input: XianyuRemoteSliderInput): Promise<XianyuRemoteSliderResult> {

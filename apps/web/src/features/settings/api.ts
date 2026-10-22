@@ -1,4 +1,4 @@
-import type { AutoReplyAgentConfigVM, CredentialListVM, CredentialRefVM, CredentialStatus, OpenAIConfigListVM, OpenAIConfigVM, OpenAIRuntimeVM, OpenAIRoutingMode } from './types';
+import type { AutoReplyAgentConfigVM, CredentialListVM, CredentialRefVM, CredentialStatus, OpenAIConfigListVM, OpenAIConfigVM, OpenAIRuntimeVM, OpenAIRoutingMode, SliderSolverStatusVM } from './types';
 
 interface Transport {
   get<T>(path: string): Promise<T>;
@@ -32,6 +32,36 @@ export interface CredentialApi {
 export interface AutoReplyAgentSettingsApi {
   get(accountId: string): Promise<AutoReplyAgentConfigVM>;
   update(input: { accountId: string; expectedVersion: number; patch: Partial<Omit<AutoReplyAgentConfigVM, 'accountId' | 'updatedByAdminId' | 'configVersion' | 'configDigest' | 'createdAt' | 'updatedAt' | 'debounceMs'>> }): Promise<AutoReplyAgentConfigVM>;
+}
+
+/** Settings → 滑块求解器: GET /api/v1/system/slider-solver (read-only runtime probe). */
+export interface SystemApi {
+  getSliderSolverStatus(): Promise<SliderSolverStatusVM>;
+}
+
+export function createSystemApi(transport: Pick<Transport, 'get'>): SystemApi {
+  return {
+    async getSliderSolverStatus() {
+      return unwrap(await transport.get<SliderSolverStatusVM | ApiEnvelope<SliderSolverStatusVM>>('/api/v1/system/slider-solver'));
+    },
+  };
+}
+
+export function createMockSystemApi(): SystemApi {
+  return {
+    async getSliderSolverStatus() {
+      return {
+        configured: true,
+        endpoint: 'http://172.17.0.1:18095/api/v1/captcha/slider-solve',
+        fallback: 'local',
+        timeoutMs: 120_000,
+        browserTimeoutSeconds: 60,
+        localSliderMode: 'auto',
+        probe: { reachable: true, latencyMs: 42, httpStatus: 200, stats: { status: 'ok', real_mouse_available: true, platform: 'win32', requests: 12, success: 11, failed: 1, url_expired: 0, last_result_at: '2026-10-22 14:30:00' } },
+        checkedAt: new Date().toISOString(),
+      };
+    },
+  };
 }
 
 export interface OpenAISettingsApi {
