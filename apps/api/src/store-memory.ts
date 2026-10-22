@@ -417,6 +417,7 @@ export class MemoryStore implements Store {
       if (!scopedAccountIds.has(product.accountId)) return false;
       if (query.accountId && product.accountId !== query.accountId) return false;
       if (query.status && product.status !== query.status) return false;
+      if (!query.status && !query.includeArchived && product.status === 'archived') return false;
       const description = readAutoReplyProductDescription(product.attributes, product.description) ?? '';
       if (normalizedKeyword && ![product.title, product.externalProductRef ?? '', description].some((value) => value.toLowerCase().includes(normalizedKeyword) || (normalizedCatalogKeyword && normalizeProductCatalogSearchText(value).includes(normalizedCatalogKeyword)))) return false;
       return true;
@@ -829,7 +830,9 @@ export class MemoryStore implements Store {
     const existing = [...this.products.values()].find((product) => product.accountId === input.accountId && product.externalProductRef && knownRefs.includes(product.externalProductRef));
     if (existing?.source === 'local' && existing.status === 'draft') return { action: 'skipped_local_draft', product: this.productDetail(existing) };
     const now = new Date().toISOString();
-    const existingAttributes = existing?.attributes && typeof existing.attributes === 'object' ? existing.attributes : {};
+    const existingAttributes: Record<string, unknown> = existing?.attributes && typeof existing.attributes === 'object' ? { ...existing.attributes } : {};
+    // The item is back in the live 在售 list, so any local offline/deleted marker is stale.
+    delete existingAttributes.listing;
     const existingXianyu = existingAttributes.xianyu && typeof existingAttributes.xianyu === 'object' && !Array.isArray(existingAttributes.xianyu) ? existingAttributes.xianyu as Record<string, unknown> : {};
     const incomingXianyu = input.item.attributes?.xianyu && typeof input.item.attributes.xianyu === 'object' && !Array.isArray(input.item.attributes.xianyu) ? input.item.attributes.xianyu as Record<string, unknown> : {};
     const attributes = {
@@ -890,6 +893,7 @@ export class MemoryStore implements Store {
     if (input.patch.defaultReplyTemplate !== undefined) product.defaultReplyTemplate = input.patch.defaultReplyTemplate ?? undefined;
     if (input.patch.knowledgeBase !== undefined) product.knowledgeBase = input.patch.knowledgeBase ?? undefined;
     if (input.patch.priceMinor !== undefined) product.priceMinor = input.patch.priceMinor ?? undefined;
+    if (input.patch.status !== undefined) product.status = input.patch.status;
     product.configVersion += 1;
     product.updatedAt = new Date().toISOString();
     return this.productDetail(product);

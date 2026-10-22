@@ -172,7 +172,8 @@ function buildProductRank(products: ProductRecord[], orders: OrderRecord[]): Das
     ordersByTitle.set(order.itemTitle, (ordersByTitle.get(order.itemTitle) ?? 0) + 1);
   }
 
-  return [...products]
+  return products
+    .filter((product) => product.status !== 'archived' && readListingState(product) !== 'deleted')
     .map((product) => {
       const orderCount = ordersByProduct.get(product.id) ?? ordersByTitle.get(product.title) ?? 0;
       const published = product.status === 'published' || product.status === 'ready';
@@ -194,6 +195,14 @@ function buildProductRank(products: ProductRecord[], orders: OrderRecord[]): Das
     .sort((left, right) => right.orderCount - left.orderCount || right.updatedAt.localeCompare(left.updatedAt) || left.row.title.localeCompare(right.row.title))
     .slice(0, 5)
     .map((entry) => entry.row);
+}
+
+/** Local marker written by ProductListingService / ProductSyncService when the item is gone from Xianyu. */
+function readListingState(product: ProductRecord): string | undefined {
+  const listing = product.attributes?.listing;
+  if (!listing || typeof listing !== 'object' || Array.isArray(listing)) return undefined;
+  const state = (listing as { state?: unknown }).state;
+  return typeof state === 'string' ? state : undefined;
 }
 
 function buildRecentActivity(orders: OrderRecord[], conversations: ConversationRecord[], now: Date): DashboardSnapshot['recentActivity'] {

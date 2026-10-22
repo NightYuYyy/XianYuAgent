@@ -296,6 +296,7 @@ export class PostgresStore implements Store {
     const conditions = ["EXISTS (SELECT 1 FROM auth.account_scopes scope WHERE scope.account_id=p.account_id AND scope.admin_id=$1 AND scope.status='active' AND (scope.expires_at IS NULL OR scope.expires_at>now()))"];
     if (query.accountId) { params.push(query.accountId); conditions.push(`p.account_id=$${params.length}`); }
     if (query.status) { params.push(query.status); conditions.push(`p.status=$${params.length}`); }
+    else if (!query.includeArchived) conditions.push("p.status <> 'archived'");
     if (query.keyword) {
       const rawKeyword = query.keyword.trim().toLowerCase();
       const normalizedKeyword = normalizeProductCatalogSearchText(query.keyword);
@@ -1026,6 +1027,7 @@ export class PostgresStore implements Store {
     if (input.patch.defaultReplyTemplate !== undefined) add('default_reply_template', input.patch.defaultReplyTemplate);
     if (input.patch.knowledgeBase !== undefined) add('knowledge_base', input.patch.knowledgeBase);
     if (input.patch.priceMinor !== undefined) add('price_minor', input.patch.priceMinor);
+    if (input.patch.status !== undefined) add('status', input.patch.status);
     if (fields.length === 0) throw new Error('PRODUCT_PATCH_EMPTY');
     fields.push('config_version=config_version+1', 'updated_at=now()');
     const result = await this.pool.query(`update products.products set ${fields.join(', ')} where id=$1 and config_version=$2 returning *`, values);
@@ -1055,7 +1057,9 @@ export class PostgresStore implements Store {
         if (!product) throw new Error('PRODUCT_SYNC_READBACK_FAILED');
         return { action: 'skipped_local_draft', product };
       }
-      const existingAttributes = existing?.attributes_json && typeof existing.attributes_json === 'object' && !Array.isArray(existing.attributes_json) ? existing.attributes_json as Record<string, unknown> : {};
+      const existingAttributes = existing?.attributes_json && typeof existing.attributes_json === 'object' && !Array.isArray(existing.attributes_json) ? { ...(existing.attributes_json as Record<string, unknown>) } : {};
+      // The item is back in the live 在售 list, so any local offline/deleted marker is stale.
+      delete existingAttributes.listing;
       const existingXianyu = existingAttributes.xianyu && typeof existingAttributes.xianyu === 'object' && !Array.isArray(existingAttributes.xianyu) ? existingAttributes.xianyu as Record<string, unknown> : {};
       const previousRefs = Array.isArray(existingXianyu.externalProductRefs) ? existingXianyu.externalProductRefs.map((value) => String(value).trim()) : [];
       const incomingXianyu = input.item.attributes?.xianyu && typeof input.item.attributes.xianyu === 'object' && !Array.isArray(input.item.attributes.xianyu) ? input.item.attributes.xianyu as Record<string, unknown> : {};

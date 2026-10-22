@@ -41,7 +41,7 @@ test('batch offline calls Xianyu once with every published item and records the 
 });
 
 test('batch delete removes each item individually and keeps unknown outcomes unmarked', async () => {
-  const { store, admin, account, published, other, audit } = await setup();
+  const { store, admin, account, published, other, draft, audit } = await setup();
   const xianyu = {
     offlineItems: async () => { throw new Error('should not offline'); },
     deleteItem: async (_a: string, _b: string, itemId: string) => itemId === 'item-1'
@@ -52,8 +52,29 @@ test('batch delete removes each item individually and keeps unknown outcomes unm
   const result = await service.delete({ adminId: admin.id, accountId: account.id, productIds: [published.id, other.id], requestId: 'r', traceId: 't' });
   assert.equal(result.succeeded, 1);
   assert.equal(result.items.find((item) => item.productId === other.id)?.status, 'unknown');
-  assert.equal(((await store.getProduct(admin.id, published.id))?.attributes?.listing as { state?: string })?.state, 'deleted');
-  assert.equal(((await store.getProduct(admin.id, other.id))?.attributes?.listing as { state?: string } | undefined)?.state, undefined);
+  const deleted = await store.getProduct(admin.id, published.id);
+  assert.equal((deleted?.attributes?.listing as { state?: string })?.state, 'deleted');
+  assert.equal(deleted?.status, 'archived', 'a deleted listing is archived locally');
+  const untouched = await store.getProduct(admin.id, other.id);
+  assert.equal((untouched?.attributes?.listing as { state?: string } | undefined)?.state, undefined);
+  assert.equal(untouched?.status, 'published');
+
+  const defaultList = await store.listProducts(admin.id, { accountId: account.id });
+  assert.deepEqual(defaultList.items.map((item) => item.id).sort(), [other.id, draft.id].sort(), 'archived products leave the default list');
+  const archivedList = await store.listProducts(admin.id, { accountId: account.id, status: 'archived' });
+  assert.deepEqual(archivedList.items.map((item) => item.id), [published.id], 'the 已归档 filter still shows them');
+  const everything = await store.listProducts(admin.id, { accountId: account.id, includeArchived: true });
+  assert.equal(everything.total, 3);
+});
+
+test('a re-synced item that is live on Xianyu again loses its stale listing marker', async () => {
+  const { store, admin, account, published } = await setup();
+  const marked = await store.updateProduct({ adminId: admin.id, productId: published.id, expectedConfigVersion: published.configVersion, patch: { attributes: { listing: { state: 'offline', source: 'fishagent' } } } });
+  assert.equal((marked?.attributes?.listing as { state?: string })?.state, 'offline');
+  const upserted = await store.upsertExternalProduct({ adminId: admin.id, accountId: account.id, syncedAt: new Date().toISOString(), item: { externalProductRef: 'item-1', title: '在售商品', imageUrls: [], attributes: {}, sourcePayloadDigest: 'd1' } });
+  assert.equal(upserted.action, 'updated');
+  assert.equal(upserted.product.attributes?.listing, undefined, 'the live listing clears offline/deleted markers');
+  assert.equal(upserted.product.status, 'published');
 });
 
 test('listing actions reject empty input and foreign accounts', async () => {

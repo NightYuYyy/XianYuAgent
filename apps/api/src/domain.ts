@@ -178,6 +178,10 @@ export interface ProductSyncResult {
   createdCount: number;
   updatedCount: number;
   skippedLocalDraftCount: number;
+  /** Local products that the full Xianyu listing no longer contains and the detail API reports as deleted → archived. */
+  archivedCount?: number;
+  /** Local products missing from the 在售 list but still readable on Xianyu → marked offline. */
+  offlineCount?: number;
   items: ProductRecord[];
   hasMore: boolean;
   nextPageNumber?: number;
@@ -192,6 +196,8 @@ export interface ProductListQuery {
   keyword?: string;
   accountId?: string;
   status?: ProductStatus;
+  /** Archived products (deleted on Xianyu) are hidden unless a status filter or this flag asks for them. */
+  includeArchived?: boolean;
   sortBy?: 'createdAt' | 'updatedAt' | 'xianyuOrder' | 'title' | 'priceMinor';
   sortOrder?: 'asc' | 'desc';
   page?: number;
@@ -588,6 +594,8 @@ export interface ProductPatch {
   description?: string | null;
   categoryCode?: string | null;
   attributes?: Record<string, unknown>;
+  /** Internal lifecycle transitions only (archive); the public PATCH route never forwards it. */
+  status?: ProductStatus;
   defaultReplyTemplate?: string | null;
   knowledgeBase?: string | null;
   priceMinor?: number | null;

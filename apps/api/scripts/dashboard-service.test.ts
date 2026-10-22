@@ -18,6 +18,9 @@ test('DashboardService aggregates scoped accounts, orders, products, coupons and
   for (let index = 1; index <= 5; index += 1) {
     await store.createProduct({ adminId: admin.id, accountId: account.id, title: `排行商品 ${index}`, status: 'published' });
   }
+  // Deleted on Xianyu: one archived by ProductListingService, one only carrying the sync marker. Neither belongs on the dashboard.
+  await store.createProduct({ adminId: admin.id, accountId: account.id, title: '已归档商品', status: 'archived', attributes: { listing: { state: 'deleted', source: 'fishagent' } } });
+  await store.createProduct({ adminId: admin.id, accountId: account.id, title: '仅标记删除商品', status: 'published', attributes: { listing: { state: 'deleted', source: 'sync' } } });
   const coupon = await store.createCouponBatch({ adminId: admin.id, accountId: account.id, label: '资料包交付配置', purpose: 'data' });
   await store.importCouponItems({ adminId: admin.id, batchId: coupon.id, contents: ['A-001', 'A-002', 'A-003'] });
   await store.bindCouponBatch({ adminId: admin.id, batchId: coupon.id, productId: product.id });
@@ -73,6 +76,7 @@ test('DashboardService aggregates scoped accounts, orders, products, coupons and
   assert.equal(snapshot.productRank[0]?.status, '可交付');
   assert.equal(snapshot.productRank[0]?.subtitle, '虚拟资源 · 交付配置已就绪');
   assert.equal(snapshot.productRank.length, 5);
+  assert.ok(!snapshot.productRank.some((row) => row.title === '已归档商品' || row.title === '仅标记删除商品'), 'deleted listings stay off the dashboard');
   assert.ok(snapshot.recentActivity.some((item) => item.text.includes('DASH-PENDING')));
   assert.ok(snapshot.riskTodos.some((item) => item.id.startsWith('order-')));
   assert.ok(snapshot.riskTodos.some((item) => item.id.startsWith('conversation-')));

@@ -5,7 +5,7 @@ import { Button } from '../../../shared/ui/Button';
 import type { ProductFilters, ProductStatus, ProductsLoadPhase } from '../types';
 
 const statuses: Array<{ value: ProductStatus | 'all'; label: string }> = [
-  { value: 'all', label: '全部状态' },
+  { value: 'all', label: '全部状态（不含已归档）' },
   { value: 'published', label: '已发布' },
   { value: 'ready', label: '待发布' },
   { value: 'draft', label: '草稿' },

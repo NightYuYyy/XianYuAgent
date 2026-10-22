@@ -461,8 +461,52 @@ export class ProductSyncService {
       else if (upserted.action === 'updated') updatedCount += 1;
       else skippedLocalDraftCount += 1;
     }
-    await this.audit({ actorId: input.adminId, action: 'product.sync.completed', targetRef: syncRunId, requestId: input.requestId, traceId: input.traceId, accountId: input.accountId, payload: { pagesFetched: fetched.pages.length, fetchedCount: fetched.items.length, createdCount, updatedCount, skippedLocalDraftCount, hasMore: fetched.hasMore } });
-    return { syncRunId, accountId: input.accountId, pageNumber: 1, pageSize, pagesFetched: fetched.pages.length, fetchedCount: fetched.items.length, createdCount, updatedCount, skippedLocalDraftCount, items: products, hasMore: fetched.hasMore, nextPageNumber: fetched.hasMore ? fetched.pages.length + 1 : undefined };
+    // Only a complete listing can tell us what is *missing*; a truncated one cannot.
+    const reconciled = fetched.hasMore ? { archivedCount: 0, offlineCount: 0 } : await this.reconcileMissingProducts(input, syncedItems, products);
+    await this.audit({ actorId: input.adminId, action: 'product.sync.completed', targetRef: syncRunId, requestId: input.requestId, traceId: input.traceId, accountId: input.accountId, payload: { pagesFetched: fetched.pages.length, fetchedCount: fetched.items.length, createdCount, updatedCount, skippedLocalDraftCount, archivedCount: reconciled.archivedCount, offlineCount: reconciled.offlineCount, hasMore: fetched.hasMore } });
+    return { syncRunId, accountId: input.accountId, pageNumber: 1, pageSize, pagesFetched: fetched.pages.length, fetchedCount: fetched.items.length, createdCount, updatedCount, skippedLocalDraftCount, archivedCount: reconciled.archivedCount, offlineCount: reconciled.offlineCount, items: products, hasMore: fetched.hasMore, nextPageNumber: fetched.hasMore ? fetched.pages.length + 1 : undefined };
+  }
+
+  /**
+   * The 在售 list is the only feed Xianyu gives us, so a local product that is
+   * missing from a complete listing was either taken offline or deleted in the
+   * app. The item detail API tells the two apart: a deleted item answers
+   * FAIL_BIZ_ITEM_DEL_NOT_FOUND, an offline one is still readable. Deleted
+   * items are archived (hidden from the default list and the dashboard, kept
+   * for order history); offline ones only get the 已下架 badge. Transient
+   * detail failures leave the product untouched so a flaky request never
+   * archives a live listing.
+   */
+  private async reconcileMissingProducts(input: { adminId: string; accountId: string }, syncedItems: XianyuProductItem[], syncedProducts: ProductRecord[]): Promise<{ archivedCount: number; offlineCount: number }> {
+    const liveRefs = new Set<string>();
+    for (const item of syncedItems) for (const ref of [item.externalProductRef, ...(item.externalProductRefs ?? [])]) if (ref) liveRefs.add(String(ref).trim());
+    const syncedIds = new Set(syncedProducts.map((product) => product.id));
+    const local = await this.store.listProducts(input.adminId, { accountId: input.accountId, page: 1, pageSize: SYNC_RECONCILE_PAGE_SIZE, sortBy: 'updatedAt', sortOrder: 'desc' });
+    let archivedCount = 0;
+    let offlineCount = 0;
+    for (const product of local.items) {
+      if (syncedIds.has(product.id) || product.source !== 'xianyu' || product.status !== 'published' || !product.externalProductRef || liveRefs.has(product.externalProductRef)) continue;
+      const currentState = readListingState(product.attributes);
+      if (currentState === 'deleted') continue;
+      let detail: Awaited<ReturnType<XianyuMtopClient['fetchItemDetail']>>;
+      try {
+        detail = await this.xianyu.fetchItemDetail(input.adminId, input.accountId, product.externalProductRef);
+      } catch {
+        continue;
+      }
+      if (detail.accountInvalid) break;
+      const deleted = !detail.success && isXianyuItemDeletedError(detail.errorCode, detail.message);
+      if (!detail.success && !deleted) continue;
+      if (!deleted && currentState === 'offline') continue;
+      const state = deleted ? 'deleted' : 'offline';
+      const attributes = { ...(product.attributes ?? {}), listing: { state, updatedAt: new Date().toISOString(), source: 'sync' } };
+      const patch: ProductPatch = deleted ? { attributes, status: 'archived' } : { attributes };
+      const updated = await this.store.updateProduct({ adminId: input.adminId, productId: product.id, expectedConfigVersion: product.configVersion, patch }).catch(() => undefined);
+      if (!updated) continue;
+      if (deleted) archivedCount += 1;
+      else offlineCount += 1;
+    }
+    return { archivedCount, offlineCount };
   }
 
   private async enrichRemoteUpdatedAt(adminId: string, accountId: string, item: XianyuProductItem): Promise<XianyuProductItem> {
@@ -478,6 +522,22 @@ export class ProductSyncService {
 }
 
 function isUuid(value: string): boolean { return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
+
+/** Upper bound on local products examined after a full sync; one account never approaches it. */
+const SYNC_RECONCILE_PAGE_SIZE = 500;
+
+function readListingState(attributes: Record<string, unknown> | undefined): string | undefined {
+  const listing = attributes?.listing;
+  if (!listing || typeof listing !== 'object' || Array.isArray(listing)) return undefined;
+  const state = (listing as { state?: unknown }).state;
+  return typeof state === 'string' ? state : undefined;
+}
+
+/** `mtop.taobao.idle.pc.detail` answers `FAIL_BIZ_ITEM_DEL_NOT_FOUND::您要看的宝贝不存在或已被删除啦!` for a deleted item. */
+export function isXianyuItemDeletedError(errorCode?: string, message?: string): boolean {
+  const text = `${errorCode ?? ''} ${message ?? ''}`;
+  return /ITEM_DEL_NOT_FOUND|ITEM_NOT_FOUND|ITEM_NOT_EXIST|宝贝不存在|已被删除/i.test(text);
+}
 
 function normalizeBoundedInteger(value: unknown, fallback: number, minimum: number, maximum: number): number {
   const numeric = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : Number.NaN;

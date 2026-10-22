@@ -39,6 +39,10 @@ const MAX_BATCH = 50;
  * Takes the account's own listings off the shelf or deletes them on Xianyu,
  * then records the listing state on the local product so the catalogue shows
  * it immediately (the next Xianyu sync reconciles the canonical status).
+ *
+ * A deleted listing is also archived: it drops out of the default product list
+ * and the dashboard, but stays in the database so orders keep their reference
+ * and the 「已归档」 filter can still show it.
  */
 export class ProductListingService {
   constructor(
@@ -101,7 +105,8 @@ export class ProductListingService {
       items.push({ productId: product.id, externalProductRef: product.externalProductRef, title: product.title, status: outcome.status, errorCode: outcome.errorCode, message: outcome.message });
       if (outcome.status !== 'succeeded') continue;
       const attributes = { ...(product.attributes ?? {}), listing: { state, updatedAt: new Date().toISOString(), source: 'fishagent' } };
-      const record = await this.store.updateProduct({ adminId: input.adminId, productId: product.id, expectedConfigVersion: product.configVersion, patch: { attributes } }).catch(() => undefined);
+      const patch = state === 'deleted' ? { attributes, status: 'archived' as const } : { attributes };
+      const record = await this.store.updateProduct({ adminId: input.adminId, productId: product.id, expectedConfigVersion: product.configVersion, patch }).catch(() => undefined);
       updated.push(record ?? product);
     }
 
