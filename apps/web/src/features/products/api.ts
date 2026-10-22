@@ -1,4 +1,4 @@
-import type { ProductAssetVM, ProductCouponVM, ProductDraftInput, ProductDraftPatch, ProductFilters, ProductSkuVM, ProductStatus, ProductSyncResultVM, ProductVM, ProductsPageVM, XianyuItemDetailVM, XianyuItemImageVM, XianyuItemSellerVM } from './types';
+import type { ProductAssetVM, ProductCouponVM, ProductDraftInput, ProductDraftPatch, ProductFilters, ProductPublishMultiSpecMeta, ProductSkuVM, ProductStatus, ProductSyncResultVM, ProductVM, ProductsPageVM, XianyuItemDetailVM, XianyuItemImageVM, XianyuItemSellerVM } from './types';
 import type { ProductPostageMode, ProductPublishSpecOverride, ProductPublishSpecPreview, PublishAttachment } from './product-publish';
 
 export interface ProductsApiTransport {
@@ -72,6 +72,7 @@ export interface ProductPublishRequest {
   location?: string | ProductPublishLocation;
   attachments: PublishAttachment[];
   specOverrides?: ProductPublishSpecOverride[];
+  multiSpec?: ProductPublishMultiSpecMeta;
 }
 
 export interface ProductPublishLocation {
@@ -510,6 +511,7 @@ export function createProductsApi(transport: ProductsApiTransport): ProductsApi 
         form.set('location', JSON.stringify(input.location));
       }
       form.set('specOverrides', input.specOverrides?.length ? JSON.stringify(input.specOverrides) : '');
+      if (input.multiSpec && input.multiSpec.skus.length > 0) form.set('multiSpec', JSON.stringify(input.multiSpec));
       for (const attachment of input.attachments) if (attachment.file) form.append('images', attachment.file, attachment.file.name);
       const payload = await post<ProductPublishResultPayload | ApiEnvelope<ProductPublishResultPayload>>('/api/v1/products/publish', form, { headers: { 'Idempotency-Key': options.idempotencyKey ?? idempotencyKey('product-publish') } });
       const result = unwrapEnvelope(payload);

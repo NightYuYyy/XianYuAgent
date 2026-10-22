@@ -52,7 +52,7 @@ import { ProductAutomationTrigger, ProductAutomationWorker } from './product-aut
 import { XianyuProductAutomationExecutionAdapter } from './product-automation-xianyu.js';
 import { conversationRefreshMode, messageRefreshMode } from './messages-loading-policy.js';
 import { CouponAssetService } from './coupon-assets.js';
-import { ProductPublishService } from './product-publish.js';
+import { ProductPublishService, readMultiSpecMeta } from './product-publish.js';
 import { ProductKnowledgeBaseService } from './product-knowledge-base.js';
 import { classifyXianyuFailure } from './xianyu-account-health.js';
 import { PiSkillManager } from './pi-skills.js';
@@ -1642,18 +1642,20 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
     const accountId = optionalString(ctx.body.accountId);
     return mutation(runtime, ctx, authContext, accountId, async () => {
       if (!accountId) throw new ServiceError(422, 'VALIDATION_FAILED', 'accountId is required');
+      const publishMultiSpec = parsePublishMultiSpec(ctx.body.multiSpec);
       const published = await runtime.productPublisher.publish({
         adminId: authContext.admin.id,
         accountId,
         title: String(ctx.body.title ?? ''),
         description: String(ctx.body.description ?? ''),
         categoryCode: optionalString(ctx.body.categoryCode),
-        priceMinor: parsePublishMinor(ctx.body.priceMinor ?? ctx.body.price),
+        priceMinor: publishMultiSpec ? (parseOptionalPublishMinor(ctx.body.priceMinor ?? ctx.body.price) ?? 0) : parsePublishMinor(ctx.body.priceMinor ?? ctx.body.price),
         originalPriceMinor: parseOptionalPublishMinor(ctx.body.originalPriceMinor ?? ctx.body.originalPrice),
         postageMode: parsePublishPostageMode(ctx.body.postageMode),
         postageMinor: parseOptionalPublishMinor(ctx.body.postageMinor ?? ctx.body.postage),
         location: parsePublishLocation(ctx.body.location),
         specOverrides: parsePublishSpecOverrides(ctx.body.specOverrides),
+        multiSpec: publishMultiSpec,
         images: readPublishImages(ctx.body.images),
         requestId: ctx.requestId,
         traceId: ctx.traceId,
@@ -2057,6 +2059,16 @@ function locationFromLabel(label: string): import('./product-publish.js').Produc
   if (parts.length >= 3) return { province: parts[0], city: parts[1], area: parts.slice(2).join(' '), poiName: label };
   if (parts.length === 2) return { province: parts[0], city: parts[1], poiName: label };
   return { poiName: label };
+}
+
+function parsePublishMultiSpec(value: unknown): import('./product-publish.js').ProductPublishMultiSpecInput | undefined {
+  if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) return undefined;
+  const parsed = typeof value === 'string' ? (() => {
+    try { return JSON.parse(value); } catch { throw new ServiceError(422, 'VALIDATION_FAILED', '多规格字段格式无效'); }
+  })() : value;
+  const multiSpec = readMultiSpecMeta(parsed);
+  if (!multiSpec) throw new ServiceError(422, 'VALIDATION_FAILED', '多规格字段格式无效');
+  return multiSpec;
 }
 
 function parsePublishSpecOverrides(value: unknown): import('./product-publish.js').ProductPublishSpecOverride[] | undefined {

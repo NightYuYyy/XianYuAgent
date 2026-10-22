@@ -1,6 +1,6 @@
 import type { AutoRelistJobRecord, ProductRecord, Store } from './domain.js';
 import type { ProductAutomationService } from './product-automation.js';
-import type { ProductPostageMode, ProductPublishImageInput, ProductPublishService } from './product-publish.js';
+import { readMultiSpecMeta, type ProductPostageMode, type ProductPublishImageInput, type ProductPublishService } from './product-publish.js';
 import { digestJson } from './security.js';
 import { ServiceError } from './services.js';
 import { downloadImage, type XianyuItemDetailService } from './xianyu-item-detail-service.js';
@@ -197,6 +197,7 @@ export class AutoRelistService {
       originalPriceMinor: typeof publishMeta.originalPriceMinor === 'number' ? publishMeta.originalPriceMinor : undefined,
       postageMode,
       postageMinor: typeof publishMeta.postageMinor === 'number' ? publishMeta.postageMinor : undefined,
+      multiSpec: readMultiSpecMeta(publishMeta.multiSpec),
       images,
       requestId,
       traceId: requestId,

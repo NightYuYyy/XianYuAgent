@@ -310,3 +310,22 @@ body .app-viewport .products-domain .ui-placeholder-cell.products-placeholder { 
 .products-listing-badge.is-deleted{background:#FEE2E2;color:#991B1B}
 .products-listing-badge.is-auto-relist{background:#DBEAFE;color:#1D4ED8}
 .products-listing-badge.is-relisted{background:#E2E8F0;color:#475569}
+
+/* 多规格编辑器（发布表单内） */
+.product-publish-sku-editor { display: grid; gap: 10px; }
+.product-publish-sku-toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; font-weight: 700; color: var(--text); }
+.product-publish-sku-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent, #2563eb); }
+.product-publish-sku-hint { font-size: 12px; font-weight: 500; color: var(--muted); line-height: 1.5; }
+.product-publish-sku-name { display: grid; gap: 6px; max-width: 320px; }
+.product-publish-sku-rows { display: grid; gap: 8px; }
+.product-publish-sku-head, .product-publish-sku-row { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 0.8fr) 32px; gap: 8px; align-items: center; }
+.product-publish-sku-head { font-size: 12px; color: var(--muted); font-weight: 600; }
+.product-publish-sku-remove { width: 32px; height: 32px; border: 1px solid var(--line, rgba(0,0,0,.12)); border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; }
+.product-publish-sku-remove:disabled { opacity: .4; cursor: default; }
+.product-publish-sku-add { justify-self: start; padding: 6px 12px; border: 1px dashed var(--line, rgba(0,0,0,.2)); border-radius: 8px; background: transparent; color: var(--text); font-weight: 600; cursor: pointer; }
+.product-publish-sku-add:disabled { opacity: .4; cursor: default; }
+@media (max-width: 720px) {
+  .product-publish-sku-head { display: none; }
+  .product-publish-sku-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .product-publish-sku-row > :first-child { grid-column: 1 / -1; }
+}

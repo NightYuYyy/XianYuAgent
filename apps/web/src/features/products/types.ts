@@ -88,7 +88,20 @@ export interface ProductPublishImageMeta {
   size?: number;
 }
 
+export interface ProductPublishSkuMeta {
+  value: string;
+  priceMinor: number;
+  quantity: number;
+}
+
+/** 单维度多规格：规格名 + 各规格值的价格/库存，发布后保存在 attributesJson.publish.multiSpec。 */
+export interface ProductPublishMultiSpecMeta {
+  name: string;
+  skus: ProductPublishSkuMeta[];
+}
+
 export interface ProductPublishMeta {
+  multiSpec?: ProductPublishMultiSpecMeta;
   originalPriceMinor?: number;
   postageMode?: 'free' | 'distance' | 'fixed' | 'none' | 'seller' | 'buyer';
   postageMinor?: number;

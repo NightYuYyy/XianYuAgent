@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import { ProductPublishComposer } from './components/ProductPublishComposer';
 import { ProductPublishForm } from './components/ProductPublishForm';
-import { inferProductCategory, inferProductSpecs, serializeAttachments, shouldPreviewOfficialSpecifications } from './product-publish';
+import { createSkuRow, inferProductCategory, inferProductSpecs, minSkuPriceMinor, readMultiSpecMeta, serializeAttachments, shouldPreviewOfficialSpecifications, skuRowsToMeta, validateSkuRows } from './product-publish';
 import { toDraftInput, validateProductForm } from './validation';
 
 describe('product publish form contract', () => {
@@ -33,7 +33,7 @@ describe('product publish form contract', () => {
 
   it('adapts shipping and address UI to the official publish flow', () => {
     const html = renderToStaticMarkup(createElement(ProductPublishForm, {
-      values: { accountId: 'account-1', title: '耳机', description: '全新', categoryCode: 'digital.audio', priceMinor: '', priceYuan: '200', originalPriceYuan: '', postageMode: 'fixed', postageYuan: '', location: '', attachments: [] },
+      values: { accountId: 'account-1', title: '耳机', description: '全新', categoryCode: 'digital.audio', priceMinor: '', priceYuan: '200', originalPriceYuan: '', postageMode: 'fixed', postageYuan: '', location: '', attachments: [], multiSpecEnabled: false, multiSpecName: '', skuRows: [] },
       errors: {},
       onChange: vi.fn(),
       onAttachmentsChange: vi.fn(),
@@ -56,7 +56,7 @@ describe('product publish form contract', () => {
 
   it('renders official options as editable selectors before publishing', () => {
     const html = renderToStaticMarkup(createElement(ProductPublishForm, {
-      values: { accountId: 'account-1', title: '游戏资料', description: '攻略', categoryCode: '', priceMinor: '', priceYuan: '20', originalPriceYuan: '', postageMode: 'free' as const, postageYuan: '', location: '深圳湾公园', attachments: [], specOverrides: [] },
+      values: { accountId: 'account-1', title: '游戏资料', description: '攻略', categoryCode: '', priceMinor: '', priceYuan: '20', originalPriceYuan: '', postageMode: 'free' as const, postageYuan: '', location: '深圳湾公园', attachments: [], specOverrides: [], multiSpecEnabled: false, multiSpecName: '', skuRows: [] },
       errors: {},
       officialPreview: { category: { catId: 'cat-1', catName: '游戏装备', channelCatId: 'channel-1' }, specs: [{ propertyId: '-10000', propertyName: '分类', selected: { text: '游戏装备' }, options: [{ text: '游戏装备' }, { text: '电子资料' }] }], imageUrls: [], replay: { source: 'reference-project', steps: [] } },
       previewState: 'success',
@@ -79,3 +79,27 @@ describe('product publish form contract', () => {
   });
 });
 
+describe('product publish multi-spec form', () => {
+  it('validates sku rows with readable messages and maps them to minor units', () => {
+    const rows = [createSkuRow({ value: '测试卡', priceYuan: '5', quantity: '10' }), createSkuRow({ value: '天卡', priceYuan: '20.5', quantity: '10' })];
+    expect(validateSkuRows('卡种', rows)).toBeUndefined();
+    expect(validateSkuRows('', rows)).toContain('规格名称');
+    expect(validateSkuRows('卡种', [])).toContain('至少添加');
+    expect(validateSkuRows('卡种', [createSkuRow({ value: '天卡', priceYuan: '0', quantity: '1' })])).toContain('售价');
+    expect(validateSkuRows('卡种', [rows[0]!, createSkuRow({ value: '测试卡', priceYuan: '1', quantity: '1' })])).toContain('重复');
+    expect(validateSkuRows('卡种', [createSkuRow({ value: 'a:b', priceYuan: '1', quantity: '1' })])).toContain('冒号');
+    expect(skuRowsToMeta(' 卡种 ', rows)).toEqual({ name: '卡种', skus: [{ value: '测试卡', priceMinor: 500, quantity: 10 }, { value: '天卡', priceMinor: 2050, quantity: 10 }] });
+    expect(minSkuPriceMinor(rows)).toBe(500);
+    expect(readMultiSpecMeta({ name: '卡种', skus: [{ value: '天卡', priceMinor: 2000, quantity: 3 }] })).toEqual({ name: '卡种', skus: [{ value: '天卡', priceMinor: 2000, quantity: 3 }] });
+    expect(readMultiSpecMeta({ name: '卡种', skus: [] })).toBeUndefined();
+  });
+
+  it('renders the sku editor and disables the single price while multi-spec is on', () => {
+    const values = { accountId: 'account-1', title: 'DT云端', description: '自动发货', categoryCode: 'digital', priceMinor: '', priceYuan: '', originalPriceYuan: '', postageMode: 'free' as const, postageYuan: '', location: '', attachments: [], multiSpecEnabled: true, multiSpecName: '卡种', skuRows: [createSkuRow({ value: '天卡', priceYuan: '20', quantity: '10' })] };
+    const html = renderToStaticMarkup(createElement(ProductPublishForm, { values, errors: { priceYuan: '第 1 个规格（天卡）请填写大于 0 的售价。' }, onChange: vi.fn(), onMultiSpecChange: vi.fn(), onAttachmentsChange: vi.fn(), onOptimize: vi.fn() }));
+    expect(html).toContain('多规格');
+    expect(html).toContain('卡种');
+    expect(html).toContain('按规格定价');
+    expect(html).toContain('第 1 个规格（天卡）');
+  });
+});

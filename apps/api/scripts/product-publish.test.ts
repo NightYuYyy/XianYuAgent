@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ProductPublishService } from '../src/product-publish.js';
+import { ProductPublishService, buildMultiSpecPayload, readMultiSpecMeta } from '../src/product-publish.js';
 import type { MtopResult, XianyuMtopClient } from '../src/xianyu-mtop.js';
 
 const ok = (response: Record<string, unknown>): MtopResult => ({ success: true, accountInvalid: false, cookieHeader: 'redacted', response });
@@ -123,4 +123,56 @@ test('uses the configured model provider for description optimization', async ()
   const service = new ProductPublishService({} as never, {} as never, async () => ({ model: 'model-x', async complete() { return { content: '优化后的闲鱼文案', model: 'model-x' }; } }), async () => 'audit-1');
   const result = await service.optimizeDescription({ adminId: 'admin-1', accountId: 'account-1', title: '裙子', description: '九成新', requestId: 'request-1', traceId: 'trace-1' });
   assert.deepEqual(result, { description: '优化后的闲鱼文案', provider: 'configured', model: 'model-x' });
+});
+
+test('publishes a multi-spec item with per-sku prices and records the lowest price locally', async () => {
+  const calls: Array<{ api: string; data: Record<string, unknown> }> = [];
+  const xianyu = {
+    async uploadChatImage() { return { success: true, accountInvalid: false, cookieHeader: 'redacted', url: 'https://img.example/card.png', width: 800, height: 800 }; },
+    async callApi(_adminId: string, _accountId: string, api: string, _version: string, data: Record<string, unknown>) {
+      calls.push({ api, data });
+      if (api === 'mtop.taobao.idle.kgraph.property.recommend') return ok({ data: { categoryPredictResult: { catId: 'cat-1', catName: '其他闲置', channelCatId: 'channel-1' } } });
+      return ok({ data: { itemId: 'multi-spec-item' } });
+    },
+  } as unknown as XianyuMtopClient;
+  const created: Array<Record<string, unknown>> = [];
+  const products = { async create(input: Record<string, unknown>) { created.push(input); return { id: 'local-product-1', accountId: 'account-1', externalProductRef: 'multi-spec-item', title: String(input.title), description: String(input.description), status: 'published', attributes: {}, configVersion: 1, createdAt: 'now', updatedAt: 'now' }; } };
+  const service = new ProductPublishService(xianyu, products as never, async () => undefined, async () => 'audit-1');
+
+  await service.publish({
+    adminId: 'admin-1', accountId: 'account-1', title: 'DT云端', description: '自动发货', priceMinor: 0, postageMode: 'free',
+    multiSpec: { name: ' 卡种 ', skus: [{ value: '天卡', priceMinor: 2000, quantity: 10 }, { value: ' 测试卡 ', priceMinor: 500, quantity: 10 }] },
+    images: [{ filename: 'one.png', contentType: 'image/png', data: Buffer.from('image') }], requestId: 'request-1', traceId: 'trace-1',
+  });
+
+  const publishData = calls.find((call) => call.api === 'mtop.idle.pc.idleitem.publish')!.data;
+  assert.equal(publishData.quantity, '1');
+  assert.deepEqual(publishData.itemPriceDTO, {});
+  assert.deepEqual(publishData.itemProperties, [{ propertyName: '卡种', supportImage: false, propertyValues: [{ propertyValue: '天卡' }, { propertyValue: '测试卡' }] }]);
+  assert.deepEqual(publishData.itemSkuList, [
+    { priceInCent: '2000', quantity: 10, propertyList: [{ propertyText: '卡种', valueText: '天卡' }] },
+    { priceInCent: '500', quantity: 10, propertyList: [{ propertyText: '卡种', valueText: '测试卡' }] },
+  ]);
+  assert.equal(created[0]!.priceMinor, 500);
+  const publishMeta = (created[0]!.attributesJson as { publish: Record<string, unknown> }).publish;
+  assert.deepEqual(readMultiSpecMeta(publishMeta.multiSpec), { name: '卡种', skus: [{ value: '天卡', priceMinor: 2000, quantity: 10 }, { value: '测试卡', priceMinor: 500, quantity: 10 }] });
+});
+
+test('rejects invalid multi-spec definitions before any external call', async () => {
+  let called = false;
+  const xianyu = { async uploadChatImage() { called = true; return { success: true }; }, async callApi() { called = true; return ok({}); } } as unknown as XianyuMtopClient;
+  const service = new ProductPublishService(xianyu, {} as never, async () => undefined, async () => 'audit-1');
+  const base = { adminId: 'admin-1', accountId: 'account-1', title: 'DT云端', description: '自动发货', priceMinor: 0, postageMode: 'free' as const, images: [{ filename: 'one.png', contentType: 'image/png', data: Buffer.from('image') }], requestId: 'request-1', traceId: 'trace-1' };
+  for (const [multiSpec, message] of [
+    [{ name: '', skus: [{ value: '天卡', priceMinor: 100, quantity: 1 }] }, '规格名称不能为空'],
+    [{ name: '卡种', skus: [{ value: '天卡', priceMinor: 100, quantity: 1 }, { value: '天卡', priceMinor: 200, quantity: 1 }] }, '规格值重复'],
+    [{ name: '卡种', skus: [{ value: '天卡', priceMinor: 0, quantity: 1 }] }, '售价必须大于 0'],
+    [{ name: '卡种', skus: [{ value: '天:卡', priceMinor: 100, quantity: 1 }] }, '不能包含冒号'],
+  ] as const) {
+    await assert.rejects(service.publish({ ...base, multiSpec: multiSpec as never }), (error: { statusCode: number; message: string }) => error.statusCode === 422 && error.message.includes(message));
+  }
+  assert.equal(called, false);
+  assert.equal(readMultiSpecMeta({ name: '卡种', skus: [] }), undefined);
+  assert.equal(readMultiSpecMeta({ name: '卡种', skus: [{ value: 1 }] }), undefined);
+  assert.deepEqual(Object.keys(buildMultiSpecPayload({ name: '卡种', skus: [{ value: '天卡', priceMinor: 100, quantity: 1 }] })).sort(), ['itemPriceDTO', 'itemProperties', 'itemSkuList', 'quantity']);
 });

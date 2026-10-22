@@ -3,12 +3,13 @@ import { inferProductCategory, inferProductSpecs, type ProductPublishFormValues,
 import type { ProductPublishPreviewVM } from '../api';
 import type { PublishAttachment } from '../product-publish';
 import { ProductPublishComposer } from './ProductPublishComposer';
+import { ProductSkuEditor, type ProductSkuEditorPatch } from './ProductSkuEditor';
 import { InputField } from '../../../shared/ui/InputField';
 import { SelectField } from '../../../shared/ui/SelectField';
 
 type FieldKey = keyof ProductPublishFormValues;
 
-export function ProductPublishForm({ values, errors, disabled, optimizing, officialPreview, previewState, onSpecOverrideChange, onChange, onAttachmentsChange, onOptimize }: {
+export function ProductPublishForm({ values, errors, disabled, optimizing, officialPreview, previewState, onSpecOverrideChange, onChange, onMultiSpecChange, onAttachmentsChange, onOptimize }: {
   values: ProductPublishFormValues;
   errors: ProductFormErrors;
   disabled?: boolean;
@@ -17,6 +18,7 @@ export function ProductPublishForm({ values, errors, disabled, optimizing, offic
   previewState?: 'idle' | 'loading' | 'success' | 'error';
   onSpecOverrideChange?: (property: ProductPublishSpecPreview, option: ProductPublishSpecOption) => void;
   onChange: (field: FieldKey, value: string) => void;
+  onMultiSpecChange?: (patch: ProductSkuEditorPatch) => void;
   onAttachmentsChange: (attachments: PublishAttachment[]) => void;
   onOptimize: () => void;
 }) {
@@ -37,9 +39,10 @@ export function ProductPublishForm({ values, errors, disabled, optimizing, offic
       </div>
       <div className="product-publish-divider" />
       <div className="product-publish-subhead"><h4>价格与物流</h4></div>
-      <div className="product-publish-official-note">库存按闲鱼官方逻辑处理。</div>
+      <div className="product-publish-official-note">{values.multiSpecEnabled ? '多规格商品按每个规格单独定价和设置库存。' : '库存按闲鱼官方逻辑处理。'}</div>
       <div className="product-publish-fields">
-        <label className="product-publish-field"><span>售价 <em>*</em></span><span className="product-publish-money-input"><b>¥</b><InputField aria-label="售价" inputMode="decimal" value={values.priceYuan} disabled={disabled} placeholder="0.00" onChange={(event) => onChange('priceYuan', event.target.value)} /></span>{field('priceYuan') && <small className="product-publish-error">{field('priceYuan')}</small>}</label>
+        <div className="product-publish-field product-publish-field-wide"><ProductSkuEditor enabled={values.multiSpecEnabled} name={values.multiSpecName} rows={values.skuRows} disabled={disabled} error={values.multiSpecEnabled ? field('priceYuan') : undefined} onChange={(patch) => onMultiSpecChange?.(patch)} /></div>
+        <label className="product-publish-field"><span>售价 <em>*</em></span><span className="product-publish-money-input"><b>¥</b><InputField aria-label="售价" inputMode="decimal" value={values.priceYuan} disabled={disabled || values.multiSpecEnabled} placeholder={values.multiSpecEnabled ? '按规格定价' : '0.00'} onChange={(event) => onChange('priceYuan', event.target.value)} /></span>{!values.multiSpecEnabled && field('priceYuan') && <small className="product-publish-error">{field('priceYuan')}</small>}</label>
         <label className="product-publish-field"><span>原价</span><span className="product-publish-money-input"><b>¥</b><InputField aria-label="原价" inputMode="decimal" value={values.originalPriceYuan} disabled={disabled} placeholder="可选" onChange={(event) => onChange('originalPriceYuan', event.target.value)} /></span>{field('originalPriceYuan') && <small className="product-publish-error">{field('originalPriceYuan')}</small>}</label>
         <label className="product-publish-field"><span>发货设置 <em>*</em></span><SelectField aria-label="发货设置" value={values.postageMode} disabled={disabled} options={[{ value: 'free', label: '包邮' }, { value: 'distance', label: '按距离计费' }, { value: 'fixed', label: '一口价' }, { value: 'none', label: '无需邮寄' }]} onChange={(event) => onChange('postageMode', event.target.value)} /><small>{postageHint}</small></label>
         <label className="product-publish-field"><span>邮费{values.postageMode === 'fixed' ? <em> *</em> : null}</span><span className="product-publish-money-input"><b>¥</b><InputField aria-label="邮费" inputMode="decimal" value={values.postageYuan} disabled={disabled || values.postageMode !== 'fixed'} placeholder={values.postageMode === 'fixed' ? '必填' : '按官方模式处理'} onChange={(event) => onChange('postageYuan', event.target.value)} /></span>{field('postageYuan') && <small className="product-publish-error">{field('postageYuan')}</small>}</label>

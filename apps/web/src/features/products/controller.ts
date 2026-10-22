@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createMockProductsApi, type ProductsApi } from './api';
 import type { ProductDetailState, ProductDraftInput, ProductDraftPatch, ProductFilters, ProductMutationError, ProductsLoadError, ProductsQueryState, ProductVM, XianyuDetailState } from './types';
-import type { ProductPublishFormValues } from './product-publish';
+import { minSkuPriceMinor, skuRowsToMeta, type ProductPublishFormValues } from './product-publish';
 import type { ProductListingResultVM, ProductPublishPreviewVM, AutoRelistJobVM } from './api';
 import { yuanToMinor } from './product-publish';
 
@@ -181,12 +181,13 @@ export function useProductsController(options: { api?: ProductsApi; initialFilte
         title: values.title.trim(),
         description: values.description.trim(),
         categoryCode: values.categoryCode.trim() || undefined,
-        priceMinor: yuanToMinor(values.priceYuan) ?? 0,
+        priceMinor: values.multiSpecEnabled ? minSkuPriceMinor(values.skuRows) : yuanToMinor(values.priceYuan) ?? 0,
         originalPriceMinor: yuanToMinor(values.originalPriceYuan),
         postageMode: values.postageMode,
         postageMinor: yuanToMinor(values.postageYuan),
         location: values.location.trim() || undefined,
         specOverrides: values.specOverrides,
+        multiSpec: values.multiSpecEnabled ? skuRowsToMeta(values.multiSpecName, values.skuRows) : undefined,
         attachments: values.attachments,
       });
       setMutation({ phase: 'success', error: null });

@@ -43,6 +43,7 @@ export interface ProductPublishInput {
   location?: ProductPublishLocationInput;
   images: ProductPublishImageInput[];
   specOverrides?: ProductPublishSpecOverride[];
+  multiSpec?: ProductPublishMultiSpecInput;
   requestId: string;
   traceId: string;
 }
@@ -67,6 +68,21 @@ export interface ProductPublishSpecPreview {
 export interface ProductPublishSpecOverride extends ProductPublishSpecOption {
   propertyId: string;
   propertyName: string;
+}
+
+export interface ProductPublishSkuInput {
+  value: string;
+  priceMinor: number;
+  quantity: number;
+}
+
+/**
+ * 单维度多规格：一个规格名（如「卡种」）+ 多个规格值（如「测试卡」「天卡」），
+ * 每个规格值独立定价与库存。闲鱼订单会带回 `规格名:规格值`，自动发货据此匹配卡券批次。
+ */
+export interface ProductPublishMultiSpecInput {
+  name: string;
+  skus: ProductPublishSkuInput[];
 }
 
 export interface ProductPublishPreviewInput {
@@ -129,6 +145,9 @@ export class ProductPublishService {
 
   async publish(input: ProductPublishInput): Promise<ProductPublishResult> {
     validatePublishInput(input);
+    const multiSpec = input.multiSpec && input.multiSpec.skus.length > 0 ? normalizeMultiSpec(input.multiSpec) : undefined;
+    // 多规格商品本地记录的价格取最低规格价，用于列表展示与续售时的价格校验。
+    const priceMinor = multiSpec ? Math.min(...multiSpec.skus.map((sku) => sku.priceMinor)) : input.priceMinor;
     const prepared = await this.prepareRecommendation(input);
     const { uploaded, steps, category } = prepared;
     const normalizedCategoryPayload = applySpecOverrides(prepared.recommendation, input.specOverrides, category);
@@ -152,7 +171,7 @@ export class ProductPublishService {
       title: input.title.trim(),
       description: input.description.trim(),
       categoryCode: input.categoryCode ?? category.catId,
-      priceMinor: input.priceMinor,
+      priceMinor,
       status: 'published',
       attributesJson: {
         publish: {
@@ -161,6 +180,7 @@ export class ProductPublishService {
           postageMinor: input.postageMinor,
           location: locationLabel(input.location),
           imageUrls,
+          ...(multiSpec ? { multiSpec } : {}),
           category,
           replaySteps: steps,
         },
@@ -222,7 +242,9 @@ function validatePublishInput(input: ProductPublishInput): void {
   if (!input.accountId.trim()) throw new ServiceError(422, 'VALIDATION_FAILED', 'accountId is required');
   if (!input.title.trim()) throw new ServiceError(422, 'VALIDATION_FAILED', '商品标题不能为空');
   if (!input.description.trim()) throw new ServiceError(422, 'VALIDATION_FAILED', '商品描述不能为空');
-  if (!Number.isSafeInteger(input.priceMinor) || input.priceMinor <= 0) throw new ServiceError(422, 'VALIDATION_FAILED', '商品价格必须大于 0');
+  const multiSpec = input.multiSpec && input.multiSpec.skus.length > 0 ? input.multiSpec : undefined;
+  if (multiSpec) validateMultiSpec(multiSpec);
+  else if (!Number.isSafeInteger(input.priceMinor) || input.priceMinor <= 0) throw new ServiceError(422, 'VALIDATION_FAILED', '商品价格必须大于 0');
   if (input.originalPriceMinor !== undefined && (!Number.isSafeInteger(input.originalPriceMinor) || input.originalPriceMinor < 0)) throw new ServiceError(422, 'VALIDATION_FAILED', '原价必须是合法金额');
   if (!['free', 'distance', 'fixed', 'none'].includes(input.postageMode)) throw new ServiceError(422, 'VALIDATION_FAILED', '邮费模式无效');
   const postageMinor = input.postageMinor;
@@ -273,6 +295,7 @@ function buildPublishPayload(input: ProductPublishInput, images: Array<{ url: st
     bizcode: 'pcMainPublish',
     publishScene: 'pcMainPublish',
   };
+  if (input.multiSpec && input.multiSpec.skus.length > 0) Object.assign(data, buildMultiSpecPayload(normalizeMultiSpec(input.multiSpec)));
   if (input.location) {
     const location = input.location;
     data.itemAddrDTO = {
@@ -477,3 +500,72 @@ function stringValue(...values: unknown[]): string {
   return '';
 }
 function record(value: unknown): Record<string, unknown> { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
+
+const MULTI_SPEC_MAX_SKUS = 50;
+const MULTI_SPEC_MAX_QUANTITY = 999_999;
+
+export function normalizeMultiSpec(input: ProductPublishMultiSpecInput): ProductPublishMultiSpecInput {
+  return {
+    name: input.name.trim(),
+    skus: input.skus.map((sku) => ({ value: sku.value.trim(), priceMinor: sku.priceMinor, quantity: sku.quantity })),
+  };
+}
+
+export function validateMultiSpec(input: ProductPublishMultiSpecInput): void {
+  const normalized = normalizeMultiSpec(input);
+  if (!normalized.name) throw new ServiceError(422, 'VALIDATION_FAILED', '规格名称不能为空');
+  if (normalized.name.length > 20) throw new ServiceError(422, 'VALIDATION_FAILED', '规格名称不能超过 20 个字符');
+  if (normalized.skus.length === 0) throw new ServiceError(422, 'VALIDATION_FAILED', '多规格商品至少需要一个规格值');
+  if (normalized.skus.length > MULTI_SPEC_MAX_SKUS) throw new ServiceError(422, 'VALIDATION_FAILED', `规格值不能超过 ${MULTI_SPEC_MAX_SKUS} 个`);
+  const seen = new Set<string>();
+  normalized.skus.forEach((sku, index) => {
+    const label = `第 ${index + 1} 个规格`;
+    if (!sku.value) throw new ServiceError(422, 'VALIDATION_FAILED', `${label}的规格值不能为空`);
+    if (sku.value.length > 30) throw new ServiceError(422, 'VALIDATION_FAILED', `${label}的规格值不能超过 30 个字符`);
+    if (sku.value.includes(':')) throw new ServiceError(422, 'VALIDATION_FAILED', `${label}的规格值不能包含冒号`);
+    if (seen.has(sku.value)) throw new ServiceError(422, 'VALIDATION_FAILED', `规格值重复：${sku.value}`);
+    seen.add(sku.value);
+    if (!Number.isSafeInteger(sku.priceMinor) || sku.priceMinor <= 0) throw new ServiceError(422, 'VALIDATION_FAILED', `${label}（${sku.value}）的售价必须大于 0`);
+    if (!Number.isSafeInteger(sku.quantity) || sku.quantity < 0 || sku.quantity > MULTI_SPEC_MAX_QUANTITY) throw new ServiceError(422, 'VALIDATION_FAILED', `${label}（${sku.value}）的库存必须在 0 到 ${MULTI_SPEC_MAX_QUANTITY} 之间`);
+  });
+}
+
+/**
+ * 闲鱼多规格发布载荷（抓包自 PC 发布页）：顶层 quantity 固定为字符串 1、itemPriceDTO 为空，
+ * 真实价格与库存由 itemSkuList 提供；itemProperties 声明规格名与可选值。
+ */
+export function buildMultiSpecPayload(multiSpec: ProductPublishMultiSpecInput): Record<string, unknown> {
+  return {
+    quantity: '1',
+    itemPriceDTO: {},
+    itemProperties: [{
+      propertyName: multiSpec.name,
+      supportImage: false,
+      propertyValues: multiSpec.skus.map((sku) => ({ propertyValue: sku.value })),
+    }],
+    itemSkuList: multiSpec.skus.map((sku) => ({
+      priceInCent: String(sku.priceMinor),
+      quantity: sku.quantity,
+      propertyList: [{ propertyText: multiSpec.name, valueText: sku.value }],
+    })),
+  };
+}
+
+/** 从商品 attributes.publish.multiSpec 之类的松散 JSON 读回多规格定义；格式不对返回 undefined。 */
+export function readMultiSpecMeta(value: unknown): ProductPublishMultiSpecInput | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  if (typeof source.name !== 'string' || !Array.isArray(source.skus)) return undefined;
+  const skus: ProductPublishSkuInput[] = [];
+  for (const item of source.skus) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return undefined;
+    const sku = item as Record<string, unknown>;
+    if (typeof sku.value !== 'string') return undefined;
+    const priceMinor = typeof sku.priceMinor === 'number' ? sku.priceMinor : Number(sku.priceMinor);
+    const quantity = sku.quantity === undefined ? 0 : typeof sku.quantity === 'number' ? sku.quantity : Number(sku.quantity);
+    if (!Number.isFinite(priceMinor) || !Number.isFinite(quantity)) return undefined;
+    skus.push({ value: sku.value, priceMinor: Math.trunc(priceMinor), quantity: Math.trunc(quantity) });
+  }
+  if (skus.length === 0) return undefined;
+  return { name: source.name, skus };
+}

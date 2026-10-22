@@ -1,4 +1,4 @@
-import type { ProductDraftInput, ProductDraftPatch, ProductPublishImageMeta } from './types';
+import type { ProductDraftInput, ProductDraftPatch, ProductPublishImageMeta, ProductPublishMultiSpecMeta } from './types';
 import { yuanToMinor } from './product-publish';
 
 export type ProductFormValues = {
@@ -13,6 +13,7 @@ export type ProductFormValues = {
   postageYuan?: string;
   location?: string;
   publishImages?: ProductPublishImageMeta[];
+  multiSpec?: ProductPublishMultiSpecMeta;
 };
 
 export type ProductFormErrors = Partial<Record<keyof ProductFormValues, string>>;
@@ -34,8 +35,9 @@ export function validateProductForm(values: ProductFormValues): ProductFormError
 }
 
 function publishMeta(values: ProductFormValues) {
-  if (values.priceYuan === undefined && values.originalPriceYuan === undefined && values.postageMode === undefined && values.postageYuan === undefined && values.location === undefined && values.publishImages === undefined) return undefined;
+  if (values.priceYuan === undefined && values.originalPriceYuan === undefined && values.postageMode === undefined && values.postageYuan === undefined && values.location === undefined && values.publishImages === undefined && values.multiSpec === undefined) return undefined;
   return {
+    ...(values.multiSpec ? { multiSpec: values.multiSpec } : {}),
     originalPriceMinor: yuanToMinor(values.originalPriceYuan),
     postageMode: values.postageMode ?? 'free',
     postageMinor: yuanToMinor(values.postageYuan),
