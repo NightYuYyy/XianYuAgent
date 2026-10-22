@@ -55,6 +55,7 @@ export class DashboardService {
   async getSnapshot(adminId: string, query?: DashboardQuery): Promise<DashboardSnapshot>;
   async getSnapshot(adminId: string, now?: Date, query?: DashboardQuery): Promise<DashboardSnapshot>;
   async getSnapshot(adminId: string, nowOrQuery: Date | DashboardQuery = new Date(), query: DashboardQuery = {}): Promise<DashboardSnapshot> {
+    const snapshotNow = nowOrQuery instanceof Date ? nowOrQuery : new Date();
     const now = nowOrQuery instanceof Date ? nowOrQuery : new Date();
     const resolvedQuery = nowOrQuery instanceof Date ? query : nowOrQuery;
     const accountId = resolvedQuery.accountId?.trim();
@@ -84,7 +85,7 @@ export class DashboardService {
     const todayOrders = orders.filter((order) => parseTime(order.createdAt) >= todayStart);
     const todayPaidOrders = todayOrders.filter((order) => order.paymentStatus === 'paid');
     const paidOrders = orders.filter((order) => order.paymentStatus === 'paid');
-    const pendingManualCount = countPendingManual(orders, accounts, conversations);
+    const pendingManualCount = countPendingManual(orders, accounts, conversations, snapshotNow);
 
     return {
       totalSales: round(sumMajorUnits(paidOrders)),
@@ -96,7 +97,7 @@ export class DashboardService {
       health: buildHealth(accounts, coupons),
       productRank: buildProductRank(products, orders),
       recentActivity: buildRecentActivity(orders, conversations, now),
-      riskTodos: buildRiskTodos(accounts, orders, conversations),
+      riskTodos: buildRiskTodos(accounts, orders, conversations, snapshotNow),
     };
   }
 }
@@ -225,7 +226,21 @@ function buildRecentActivity(orders: OrderRecord[], conversations: ConversationR
   return activity.filter((item) => item.at >= cutoff).sort((left, right) => right.at - left.at).slice(0, ACTIVITY_LIMIT).map(({ at: _at, ...item }) => item);
 }
 
-function buildRiskTodos(accounts: AccountRecord[], orders: OrderRecord[], conversations: ConversationRecord[]): DashboardSnapshot['riskTodos'] {
+const UNREAD_TODO_MAX_AGE_MS = 14 * 24 * 3_600_000;
+
+/**
+ * 只有"我是卖家、最近 14 天内还有未读"的会话才算待办。
+ * 历史同步进来的旧会话（尤其是自己当买家的）常年挂着未读数，之前全被算成"有待回复消息"，
+ * 点进聊天页又什么都不用处理。
+ */
+export function isActionableUnread(conversation: ConversationRecord, now: Date): boolean {
+  if (conversation.unreadCount <= 0 || conversation.side === 'buyer') return false;
+  if (!conversation.lastMessageAt) return true;
+  const age = now.getTime() - Date.parse(conversation.lastMessageAt);
+  return !Number.isFinite(age) || age <= UNREAD_TODO_MAX_AGE_MS;
+}
+
+function buildRiskTodos(accounts: AccountRecord[], orders: OrderRecord[], conversations: ConversationRecord[], now: Date): DashboardSnapshot['riskTodos'] {
   const todos: DashboardSnapshot['riskTodos'] = [];
   for (const account of accounts.filter((item) => ['expired', 'disconnected', 'degraded', 'verification_required'].includes(item.status))) {
     const risk = account.status === 'verification_required';
@@ -235,16 +250,16 @@ function buildRiskTodos(accounts: AccountRecord[], orders: OrderRecord[], conver
     const failed = order.deliveryStatus === 'failed';
     todos.push({ id: `order-${order.id}`, title: `${order.itemTitle} ${failed ? '发货失败' : '待人工处理'}`, detail: failed ? (order.deliveryFailReason || '外部发货未成功，需要复核。') : '订单已付款但还没有完成交付。', severity: failed ? 'high' : 'medium', href: '/orders' });
   }
-  for (const conversation of conversations.filter((item) => item.unreadCount > 0)) {
-    todos.push({ id: `conversation-${conversation.id}`, title: `${conversation.buyerDisplayName || conversation.buyerRef} 有待回复消息`, detail: `${conversation.unreadCount} 条消息等待处理。`, severity: 'low', href: '/messages' });
+  for (const conversation of conversations.filter((item) => isActionableUnread(item, now))) {
+    todos.push({ id: `conversation-${conversation.id}`, title: `${conversation.buyerDisplayName || conversation.buyerRef} 有待回复消息`, detail: `${conversation.unreadCount} 条未读，点开直接回复。`, severity: 'low', href: `/messages?conversationId=${encodeURIComponent(conversation.id)}` });
   }
   return todos.slice(0, RISK_LIMIT);
 }
 
-function countPendingManual(orders: OrderRecord[], accounts: AccountRecord[], conversations: ConversationRecord[]): number {
+function countPendingManual(orders: OrderRecord[], accounts: AccountRecord[], conversations: ConversationRecord[], now: Date): number {
   return orders.filter((order) => order.paymentStatus === 'paid' && order.deliveryStatus !== 'delivered' && order.deliveryStatus !== 'cancelled').length
     + accounts.filter((account) => ['expired', 'disconnected', 'degraded', 'verification_required'].includes(account.status)).length
-    + conversations.filter((conversation) => conversation.unreadCount > 0).length;
+    + conversations.filter((conversation) => isActionableUnread(conversation, now)).length;
 }
 
 function autoProcessRate(orders: OrderRecord[]): number {

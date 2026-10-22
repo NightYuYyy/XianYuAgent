@@ -103,3 +103,14 @@ test('DashboardService aggregates scoped accounts, orders, products, coupons and
   assert.equal(threeDays.trend.at(-1)?.orderAmount, 249);
   assert.equal(threeDays.trend.at(-1)?.salesAmount, 179);
 });
+
+test('stale or buyer-side unread conversations are not counted as pending work', async () => {
+  const { isActionableUnread } = await import('../src/dashboard.js');
+  const now = new Date('2026-10-23T00:00:00Z');
+  const base = { id: 'c', accountId: 'a', externalConversationRef: 'x', buyerRef: 'b', unreadCount: 1, handlingMode: 'ai', side: 'seller', version: 1, createdAt: '', updatedAt: '' } as never as import('../src/domain.js').ConversationRecord;
+  assert.equal(isActionableUnread({ ...base, lastMessageAt: '2026-10-20T00:00:00Z' }, now), true);
+  assert.equal(isActionableUnread({ ...base, lastMessageAt: '2026-08-01T00:00:00Z' }, now), false);
+  assert.equal(isActionableUnread({ ...base, side: 'buyer', lastMessageAt: '2026-10-22T00:00:00Z' }, now), false);
+  assert.equal(isActionableUnread({ ...base, unreadCount: 0, lastMessageAt: '2026-10-22T00:00:00Z' }, now), false);
+  assert.equal(isActionableUnread({ ...base, lastMessageAt: undefined }, now), true);
+});
