@@ -214,15 +214,33 @@ export class PostgresStore implements Store {
       if (remaining.rows[0]) {
         updated = await client.query('update accounts.accounts set risk_source=$2,risk_code=$3,risk_last_seen_at=$4,updated_at=now() where id=$1 returning *', [input.accountId, remaining.rows[0].source, remaining.rows[0].code, remaining.rows[0].last_seen_at]);
       } else {
-        updated = await client.query(`update accounts.accounts set status=case when degraded_source is not null then 'degraded'
-          when transport_status='connected' and transport_seen_at>now()-interval '15 seconds' then 'connected' else 'disconnected' end,
-          risk_code=null,risk_source=null,risk_first_seen_at=null,risk_last_seen_at=null,risk_episode=null,updated_at=now() where id=$1 returning *`, [input.accountId]);
-        await client.query("insert into accounts.risk_alert_outbox (account_id,episode,event_type) values ($1,$2,'verification_cleared') on conflict do nothing", [input.accountId, input.episode]);
-        await client.query("update orders.payment_event_jobs set next_attempt_at=now(),updated_at=now() where account_id=$1 and status in ('pending','resolve_pending') and last_error ~ 'ACCOUNT_NOT_READY|ACCOUNT_VALIDATION_REQUIRED|SESSION_EXPIRED|CREDENTIAL_MISSING|MTOP_RETRY_EXHAUSTED'", [input.accountId]);
+        updated = await this.finalizeRiskEpisodeClear(client, input.accountId, input.episode);
       }
       await client.query('commit');
       return this.toAccount(updated.rows[0]);
     } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
+  }
+  // Drops every outstanding challenge of the episode at once. Used after a fresh,
+  // verified login replaced the credential the challenges were recorded against.
+  async clearAccountRiskEpisode(input: { adminId: string; accountId: string; episode: string }): Promise<AccountRecord | undefined> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      const account = await client.query("select a.* from accounts.accounts a join auth.account_scopes s on s.account_id=a.id where a.id=$1 and s.admin_id=$2 and s.status='active' for update", [input.accountId, input.adminId]);
+      if (!account.rows[0] || String(account.rows[0].risk_episode ?? '') !== input.episode) { await client.query('commit'); return account.rows[0] ? this.toAccount(account.rows[0]) : undefined; }
+      await client.query("delete from accounts.health_signals where account_id=$1 and kind='verification_required' and episode=$2::uuid", [input.accountId, input.episode]);
+      const updated = await this.finalizeRiskEpisodeClear(client, input.accountId, input.episode);
+      await client.query('commit');
+      return this.toAccount(updated.rows[0]);
+    } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
+  }
+  private async finalizeRiskEpisodeClear(client: PoolClient, accountId: string, episode: string) {
+    const updated = await client.query(`update accounts.accounts set status=case when degraded_source is not null then 'degraded'
+      when transport_status='connected' and transport_seen_at>now()-interval '15 seconds' then 'connected' else 'disconnected' end,
+      risk_code=null,risk_source=null,risk_first_seen_at=null,risk_last_seen_at=null,risk_episode=null,updated_at=now() where id=$1 returning *`, [accountId]);
+    await client.query("insert into accounts.risk_alert_outbox (account_id,episode,event_type) values ($1,$2,'verification_cleared') on conflict do nothing", [accountId, episode]);
+    await client.query("update orders.payment_event_jobs set next_attempt_at=now(),updated_at=now() where account_id=$1 and status in ('pending','resolve_pending') and last_error ~ 'ACCOUNT_NOT_READY|ACCOUNT_VALIDATION_REQUIRED|SESSION_EXPIRED|CREDENTIAL_MISSING|MTOP_RETRY_EXHAUSTED'", [accountId]);
+    return updated;
   }
   async setAccountTransport(input: { adminId: string; accountId: string; status: 'connecting' | 'connected' | 'disconnected' | 'failed' }): Promise<void> {
     const updated = await this.pool.query(`with previous as materialized (select id,transport_status from accounts.accounts where id=$2), updated as (

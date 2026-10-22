@@ -1511,6 +1511,7 @@ export interface Store {
   updateAccount(adminId: string, accountId: string, patch: { sellerRef?: string; displayName?: string; remark?: string; avatarUrl?: string; platformUserId?: string; proxyUrl?: string | null; autoPolish?: boolean; status?: AccountStatus; lastConnectedAt?: string }): Promise<AccountRecord | undefined>;
   recordAccountRisk(input: { adminId: string; accountId: string; code: string; source: string }): Promise<AccountRecord | undefined>;
   clearAccountRisk(input: { adminId: string; accountId: string; episode: string; source: string; startedAt: string }): Promise<AccountRecord | undefined>;
+  clearAccountRiskEpisode(input: { adminId: string; accountId: string; episode: string }): Promise<AccountRecord | undefined>;
   recordAccountDegraded(input: { adminId: string; accountId: string; source: string }): Promise<AccountRecord | undefined>;
   clearAccountDegraded(input: { adminId: string; accountId: string; source: string; startedAt: string }): Promise<AccountRecord | undefined>;
   setAccountTransport(input: { adminId: string; accountId: string; status: 'connecting' | 'connected' | 'disconnected' | 'failed' }): Promise<void>;

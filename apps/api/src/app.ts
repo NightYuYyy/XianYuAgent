@@ -388,6 +388,15 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
       }
       await credentials.verify({ adminId, accountId: resolvedAccountId, status: 'active', requestId: `qr:${sessionId}`, traceId: `qr:${sessionId}` });
       console.info(JSON.stringify({ component: 'xianyu-qr', event: 'credential_verified_active', sessionId, adminId, accountId: resolvedAccountId }));
+      // Any open security challenge was recorded against the previous cookie.
+      // A freshly scanned and verified login supersedes it, so clear the whole
+      // episode now instead of waiting for each affected mtop api to succeed again
+      // (otherwise the account keeps showing "需要安全验证" after re-authorizing).
+      const riskAccount = await store.getAccount(adminId, resolvedAccountId);
+      if (riskAccount?.riskEpisode) {
+        await store.clearAccountRiskEpisode({ adminId, accountId: resolvedAccountId, episode: riskAccount.riskEpisode });
+        console.info(JSON.stringify({ component: 'xianyu-qr', event: 'risk_cleared_by_login', sessionId, adminId, accountId: resolvedAccountId, riskCode: riskAccount.riskCode, riskSource: riskAccount.riskSource }));
+      }
       await hydrateAccountProfile({ accounts, xianyu, adminId, accountId: resolvedAccountId, fallbackSellerRef: unb, requestId: `qr:${sessionId}`, traceId: `qr:${sessionId}` });
       await accounts.updateLoginSession({ adminId, accountId: resolvedAccountId, sessionId, patch: { status: 'succeeded', completedAt: new Date().toISOString(), failureCode: undefined }, requestId: `qr:${sessionId}`, traceId: `qr:${sessionId}` });
       // QR login success is determined by the external login cookie and the

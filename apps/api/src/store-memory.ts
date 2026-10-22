@@ -348,6 +348,17 @@ export class MemoryStore implements Store {
       account.updatedAt = new Date().toISOString();
       return { ...account };
     }
+    return this.finalizeRiskEpisodeClear(account, input.episode);
+  }
+  async clearAccountRiskEpisode(input: { adminId: string; accountId: string; episode: string }): Promise<AccountRecord | undefined> {
+    const account = await this.getAccount(input.adminId, input.accountId);
+    if (!account || account.riskEpisode !== input.episode) return account;
+    for (const [key, signal] of this.healthSignals) {
+      if (signal.accountId === account.id && signal.kind === 'verification_required' && signal.episode === input.episode) this.healthSignals.delete(key);
+    }
+    return this.finalizeRiskEpisodeClear(account, input.episode);
+  }
+  private finalizeRiskEpisodeClear(account: AccountRecord, episode: string): AccountRecord {
     account.status = account.degradedSource ? 'degraded' : account.transportStatus === 'connected' && account.transportSeenAt && Date.parse(account.transportSeenAt) > Date.now() - 15_000 ? 'connected' : 'disconnected';
     account.riskCode = undefined;
     account.riskSource = undefined;
@@ -356,8 +367,8 @@ export class MemoryStore implements Store {
     account.riskEpisode = undefined;
     account.updatedAt = new Date().toISOString();
     for (const job of this.paymentEvents.values()) if (job.accountId === account.id && ['pending', 'resolve_pending'].includes(job.status) && /ACCOUNT_NOT_READY|ACCOUNT_VALIDATION_REQUIRED|SESSION_EXPIRED|CREDENTIAL_MISSING|MTOP_RETRY_EXHAUSTED/.test(job.lastError ?? '')) job.nextAttemptAt = account.updatedAt;
-    const key = `${account.id}:${input.episode}:verification_cleared`;
-    if (!this.riskAlerts.has(key)) this.riskAlerts.set(key, { id: createId(), accountId: account.id, episode: input.episode, eventType: 'verification_cleared', delivered: false });
+    const key = `${account.id}:${episode}:verification_cleared`;
+    if (!this.riskAlerts.has(key)) this.riskAlerts.set(key, { id: createId(), accountId: account.id, episode, eventType: 'verification_cleared', delivered: false });
     return { ...account };
   }
   async flushAccountRiskAlerts(limit: number): Promise<number> {

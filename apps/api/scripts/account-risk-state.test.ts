@@ -69,3 +69,26 @@ test('multiple risk sources remain active until each succeeds and then reveal un
   await store.clearAccountDegraded({ adminId: admin.id, accountId: account.id, source: 'order.detail', startedAt });
   assert.equal((await store.getAccount(admin.id, account.id))?.status, 'connected');
 });
+
+test('a fresh verified login clears every challenge of the episode at once', async () => {
+  const store = new MemoryStore();
+  const admin = await store.createAdmin({ email: 'risk-login@example.com', passwordHash: 'hash', displayName: 'Risk' });
+  const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'seller-risk-login' });
+  await store.setAccountTransport({ adminId: admin.id, accountId: account.id, status: 'connected' });
+  const risk = await store.recordAccountRisk({ adminId: admin.id, accountId: account.id, code: 'ACCOUNT_VALIDATION_REQUIRED', source: 'mtop.taobao.idle.pc.detail' });
+  await store.recordAccountRisk({ adminId: admin.id, accountId: account.id, code: 'RGV587', source: 'order.detail' });
+  const episode = risk?.riskEpisode ?? '';
+  await store.clearAccountRiskEpisode({ adminId: admin.id, accountId: account.id, episode: 'stale-episode' });
+  assert.equal((await store.getAccount(admin.id, account.id))?.status, 'verification_required');
+  const cleared = await store.clearAccountRiskEpisode({ adminId: admin.id, accountId: account.id, episode });
+  assert.equal(cleared?.status, 'connected');
+  assert.equal(cleared?.riskEpisode, undefined);
+  assert.equal(cleared?.riskCode, undefined);
+  assert.equal(await store.flushAccountRiskAlerts(10), 2);
+  assert.deepEqual((await store.listRiskNotifications(admin.id)).map((item) => item.eventType).sort(), ['verification_cleared', 'verification_required']);
+  await store.clearAccountRisk({ adminId: admin.id, accountId: account.id, episode, source: 'order.detail', startedAt: new Date(Date.now() + 1000).toISOString() });
+  assert.equal((await store.getAccount(admin.id, account.id))?.status, 'connected');
+  const next = await store.recordAccountRisk({ adminId: admin.id, accountId: account.id, code: 'RGV587', source: 'order.detail' });
+  assert.notEqual(next?.riskEpisode, episode);
+  assert.equal(next?.status, 'verification_required');
+});
