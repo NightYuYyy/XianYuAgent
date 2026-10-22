@@ -53,6 +53,7 @@ import { XianyuProductAutomationExecutionAdapter } from './product-automation-xi
 import { conversationRefreshMode, messageRefreshMode } from './messages-loading-policy.js';
 import { CouponAssetService } from './coupon-assets.js';
 import { ProductPublishService, readMultiSpecMeta } from './product-publish.js';
+import { ProductEditService } from './product-edit.js';
 import { ProductKnowledgeBaseService } from './product-knowledge-base.js';
 import { classifyXianyuFailure } from './xianyu-account-health.js';
 import { PiSkillManager } from './pi-skills.js';
@@ -99,6 +100,7 @@ export interface AppRuntime {
   qrLogin: XianyuQrLoginAdapter;
   xianyu: XianyuMtopClient;
   xianyuItemDetail: XianyuItemDetailService;
+  productEditor: ProductEditService;
   objectStorage: ObjectStorage;
   xianyuIm: XianyuImService;
   server: Server;
@@ -433,6 +435,7 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
     return auditId;
   };
   const productPublisher = new ProductPublishService(xianyu, products, resolveAccountModelClient, productAudit);
+  const productEditor = new ProductEditService(xianyu, store, productAudit);
   const productListing = new ProductListingService(store, xianyu, productAudit);
   const productKnowledgeBase = new ProductKnowledgeBaseService(store, products, resolveAccountModelClient, productAudit);
   const xianyuItemDetail = new XianyuItemDetailService(store, xianyu, objectStorage, async (input) => {
@@ -544,7 +547,7 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
       intervalMs: positiveEnvNumber(process.env.PRODUCT_POLISH_INTERVAL_HOURS, 24) * 3_600_000,
       maxItemsPerRun: positiveEnvNumber(process.env.PRODUCT_POLISH_MAX_ITEMS_PER_RUN, 200),
     }),
-    config, store, auth, accounts, coupons, orders, orderDelivery, products, productPublisher, productListing, remoteSlider: remoteSlider ?? undefined, autoRelist, productKnowledgeBase, productAutomation, productAutomationTrigger, productAutomationWorker, paymentEventWorker, productSync, credentials, apiKeyCredentials, openaiSettings, modelProviderRuntime, dashboard, messages, autoReply, autoReplyRepair, autoReplyAgentSettings, autoReplyActivity, redisRealtime, workspace, piSkills, workspaceCommands, workspaceRuntime, qrLogin, xianyu, xianyuItemDetail, objectStorage, xianyuIm,
+    config, store, auth, accounts, coupons, orders, orderDelivery, products, productPublisher, productEditor, productListing, remoteSlider: remoteSlider ?? undefined, autoRelist, productKnowledgeBase, productAutomation, productAutomationTrigger, productAutomationWorker, paymentEventWorker, productSync, credentials, apiKeyCredentials, openaiSettings, modelProviderRuntime, dashboard, messages, autoReply, autoReplyRepair, autoReplyAgentSettings, autoReplyActivity, redisRealtime, workspace, piSkills, workspaceCommands, workspaceRuntime, qrLogin, xianyu, xianyuItemDetail, objectStorage, xianyuIm,
     server,
     async listen() {
       await new Promise<void>((resolve) => runtime.server.listen(config.port, config.host, resolve));
@@ -1603,6 +1606,28 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
     return undefined;
   }
 
+  const productEditMatch = ctx.path.match(/^\/api\/v1\/products\/([^/]+)\/xianyu-edit(\/detail)?$/);
+  if (productEditMatch && productEditMatch[2] && ctx.method === 'GET') {
+    const productId = decodeURIComponent(productEditMatch[1]);
+    return { statusCode: 200, body: success(ctx, await runtime.productEditor.getEditDetail(authContext.admin.id, productId)).body };
+  }
+  if (productEditMatch && !productEditMatch[2] && ctx.method === 'POST') {
+    const productId = decodeURIComponent(productEditMatch[1]);
+    return mutation(runtime, ctx, authContext, undefined, async () => {
+      const result = await runtime.productEditor.edit({
+        adminId: authContext.admin.id,
+        productId,
+        title: optionalString(ctx.body.title),
+        description: optionalString(ctx.body.description),
+        priceMinor: parseOptionalPublishMinor(ctx.body.priceMinor),
+        quantity: parseOptionalPublishMinor(ctx.body.quantity),
+        skus: readEditSkus(ctx.body.skus),
+        requestId: ctx.requestId,
+        traceId: ctx.traceId,
+      });
+      return success(ctx, { ...result, product: toProductView(result.product) });
+    });
+  }
   const productDetailMatch = ctx.path.match(/^\/api\/v1\/products\/([^/]+)\/(?:xianyu-detail|detail)(?:\/refresh)?$/);
   if (productDetailMatch && (ctx.method === 'GET' || ctx.method === 'POST')) {
     const productId = decodeURIComponent(productDetailMatch[1]);
@@ -2076,6 +2101,18 @@ function locationFromLabel(label: string): import('./product-publish.js').Produc
   if (parts.length >= 3) return { province: parts[0], city: parts[1], area: parts.slice(2).join(' '), poiName: label };
   if (parts.length === 2) return { province: parts[0], city: parts[1], poiName: label };
   return { poiName: label };
+}
+
+function readEditSkus(value: unknown): import('./product-edit.js').ProductEditSkuInput[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: import('./product-edit.js').ProductEditSkuInput[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const sku = item as Record<string, unknown>;
+    if (typeof sku.value !== 'string' || !sku.value.trim()) continue;
+    out.push({ value: sku.value.trim(), priceMinor: parseOptionalPublishMinor(sku.priceMinor), quantity: parseOptionalPublishMinor(sku.quantity) });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 function parsePublishMultiSpec(value: unknown): import('./product-publish.js').ProductPublishMultiSpecInput | undefined {
