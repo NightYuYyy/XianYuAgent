@@ -217,3 +217,32 @@ export interface XianyuDetailState {
   data: XianyuItemDetailVM | null;
   error: ProductsLoadError | null;
 }
+
+/** 闲鱼编辑快照（后端 /xianyu-edit/detail 的 summary）。 */
+export interface XianyuEditDetailVM {
+  itemId: string;
+  title: string;
+  description: string;
+  multiSpec: boolean;
+  priceMinor?: number;
+  quantity: number;
+  images: Array<{ url: string; width: number; height: number }>;
+  skus: Array<{ value: string; priceMinor: number; quantity: number }>;
+}
+
+export interface XianyuEditRequest {
+  title?: string;
+  description?: string;
+  priceMinor?: number;
+  quantity?: number;
+  skus?: Array<{ value: string; priceMinor?: number; quantity?: number }>;
+  keepImageUrls?: string[];
+  newImages?: File[];
+}
+
+export interface XianyuEditState {
+  phase: 'idle' | 'loading' | 'ready' | 'saving' | 'error';
+  productId?: string;
+  detail: XianyuEditDetailVM | null;
+  error: string | null;
+}

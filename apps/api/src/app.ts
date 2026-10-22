@@ -1622,6 +1622,8 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
         priceMinor: parseOptionalPublishMinor(ctx.body.priceMinor),
         quantity: parseOptionalPublishMinor(ctx.body.quantity),
         skus: readEditSkus(ctx.body.skus),
+        keepImageUrls: parseKeepImageUrls(ctx.body.keepImageUrls),
+        newImages: readPublishImages(ctx.body.images),
         requestId: ctx.requestId,
         traceId: ctx.traceId,
       });
@@ -2103,7 +2105,17 @@ function locationFromLabel(label: string): import('./product-publish.js').Produc
   return { poiName: label };
 }
 
+function parseKeepImageUrls(value: unknown): string[] | undefined {
+  if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) return undefined;
+  const parsed = typeof value === 'string' ? (() => {
+    try { return JSON.parse(value); } catch { throw new ServiceError(422, 'VALIDATION_FAILED', 'keepImageUrls 格式无效'); }
+  })() : value;
+  if (!Array.isArray(parsed)) throw new ServiceError(422, 'VALIDATION_FAILED', 'keepImageUrls 格式无效');
+  return parsed.filter((item): item is string => typeof item === 'string' && item.trim() !== '').map((item) => item.trim());
+}
+
 function readEditSkus(value: unknown): import('./product-edit.js').ProductEditSkuInput[] | undefined {
+  if (typeof value === 'string' && value.trim()) { try { value = JSON.parse(value); } catch { throw new ServiceError(422, 'VALIDATION_FAILED', 'skus 格式无效'); } }
   if (!Array.isArray(value)) return undefined;
   const out: import('./product-edit.js').ProductEditSkuInput[] = [];
   for (const item of value) {

@@ -1,4 +1,5 @@
 import type { ProductRecord, Store } from './domain.js';
+import type { ProductPublishImageInput } from './product-publish.js';
 import { ServiceError } from './services.js';
 import type { MtopResult, XianyuMtopClient } from './xianyu-mtop.js';
 
@@ -7,13 +8,14 @@ import type { MtopResult, XianyuMtopClient } from './xianyu-mtop.js';
  *
  * 流程：editdetail 拉平台当前详情作为快照 → 在快照上覆盖要改的字段 → edit 全量提交。
  * edit 是全量覆盖，不是增量，所以快照里的图片、运费、地址、服务承诺、规格都要原样回传，
- * 否则平台上的对应内容会被清空。
+ * 否则平台上的对应内容会被清空。换图：保留的旧图直接复用快照条目，新图先走聊天图片上传拿 URL。
  */
 export const PRODUCT_EDIT_DETAIL_API = 'mtop.idle.pc.backend.idleitem.editdetail';
 export const PRODUCT_EDIT_API = 'mtop.idle.pc.backend.idleitem.edit';
 const SELLER_REFERER = 'https://seller.goofish.com/?site=COMMONPRO';
 const SELLER_EXTRA_PARAMS = { idle_site_biz_code: 'COMMONPRO', spm_cnt: 'a21107h.42826273.0.0' };
 const SELLER_HEADERS = { idle_site_biz_code: 'COMMONPRO', idle_user_group_member_id: '' };
+const MAX_IMAGES = 9;
 
 export interface ProductEditSkuInput {
   value: string;
@@ -31,6 +33,10 @@ export interface ProductEditInput {
   /** 多规格：按规格值匹配快照里的 SKU，只改给出的价格/库存 */
   skus?: ProductEditSkuInput[];
   quantity?: number;
+  /** 要保留的现有图片 URL（按新顺序）；不传表示全部保留 */
+  keepImageUrls?: string[];
+  /** 新增图片，追加在保留图之后 */
+  newImages?: ProductPublishImageInput[];
   requestId: string;
   traceId: string;
 }
@@ -39,6 +45,18 @@ export interface ProductEditResult {
   product: ProductRecord;
   itemId: string;
   changed: string[];
+}
+
+/** 给前端编辑表单用的精简快照。 */
+export interface ProductEditSummary {
+  itemId: string;
+  title: string;
+  description: string;
+  multiSpec: boolean;
+  priceMinor?: number;
+  quantity: number;
+  images: Array<{ url: string; width: number; height: number }>;
+  skus: Array<{ value: string; priceMinor: number; quantity: number }>;
 }
 
 type Rec = Record<string, unknown>;
@@ -67,14 +85,14 @@ export class ProductEditService {
     return { product, itemId };
   }
 
-  /** 拉取平台当前的编辑详情（原样返回，便于排查字段）。 */
-  async getEditDetail(adminId: string, productId: string): Promise<{ itemId: string; detail: Rec }> {
+  /** 拉取平台当前的编辑详情：原始快照 + 精简摘要。 */
+  async getEditDetail(adminId: string, productId: string): Promise<{ itemId: string; detail: Rec; summary: ProductEditSummary }> {
     const { product, itemId } = await this.loadProduct(adminId, productId);
     const result = await this.callSeller(adminId, product.accountId, PRODUCT_EDIT_DETAIL_API, { itemId });
     if (!result.success) throw new ServiceError(502, result.errorCode ?? 'XIANYU_EDIT_DETAIL_FAILED', result.message ?? '获取闲鱼商品编辑详情失败');
     const detail = rec(rec(result.response).data);
-    if (!text(detail.itemId)) throw new ServiceError(502, 'XIANYU_EDIT_DETAIL_EMPTY', '闲鱼未返回商品详情（可能不是鱼小铺账号，或商品不属于该账号）');
-    return { itemId, detail };
+    if (!text(detail.itemId)) throw new ServiceError(502, 'XIANYU_EDIT_DETAIL_EMPTY', '闲鱼未返回商品详情（商品可能已删除或不属于该账号）');
+    return { itemId, detail, summary: summarizeEditDetail(detail) };
   }
 
   async edit(input: ProductEditInput): Promise<ProductEditResult> {
@@ -86,7 +104,26 @@ export class ProductEditService {
     const { product, itemId } = await this.loadProduct(input.adminId, input.productId);
     const { detail } = await this.getEditDetail(input.adminId, input.productId);
 
-    const { payload, changed } = buildEditPayload(detail, itemId, { title, description, priceMinor: input.priceMinor, skus: input.skus, quantity: input.quantity });
+    // 图片：保留的从快照复用，新图上传后追加
+    let images: Rec[] | undefined;
+    const newImages = input.newImages ?? [];
+    if (input.keepImageUrls !== undefined || newImages.length > 0) {
+      const snapshotImages = list(detail.imageInfoDOList).map(rec).filter((e) => text(e.url));
+      const kept = input.keepImageUrls === undefined
+        ? snapshotImages
+        : input.keepImageUrls.map((url) => snapshotImages.find((e) => text(e.url) === url.trim())).filter((e): e is Rec => Boolean(e));
+      if (kept.length + newImages.length < 1) throw new ServiceError(422, 'VALIDATION_FAILED', '至少保留或上传 1 张图片');
+      if (kept.length + newImages.length > MAX_IMAGES) throw new ServiceError(422, 'VALIDATION_FAILED', `图片最多 ${MAX_IMAGES} 张`);
+      const uploaded: Rec[] = [];
+      for (const image of newImages) {
+        const result = await this.xianyu.uploadChatImage(input.adminId, product.accountId, image.filename, image.contentType, image.data);
+        if (!result.success || !result.url) throw new ServiceError(502, result.errorCode ?? 'IMAGE_UPLOAD_FAILED', result.message ?? '商品图片上传失败');
+        uploaded.push({ url: result.url, widthSize: result.width ?? 800, heightSize: result.height ?? 600, major: 'false', type: '0', extraInfo: { isH: 'false', isT: 'false', raw: 'false' } });
+      }
+      images = [...kept, ...uploaded];
+    }
+
+    const { payload, changed } = buildEditPayload(detail, itemId, { title, description, priceMinor: input.priceMinor, skus: input.skus, quantity: input.quantity, images });
     if (changed.length === 0) throw new ServiceError(422, 'VALIDATION_FAILED', '没有要修改的内容');
 
     const result = await this.callSeller(input.adminId, product.accountId, PRODUCT_EDIT_API, { inputJson: JSON.stringify(payload) });
@@ -99,12 +136,36 @@ export class ProductEditService {
     if (title !== undefined) patch.title = title;
     if (description !== undefined) patch.description = description;
     if (input.priceMinor !== undefined) patch.priceMinor = input.priceMinor;
+    if (images) {
+      const publishMeta = rec(product.attributes.publish);
+      patch.attributes = { ...product.attributes, publish: { ...publishMeta, imageUrls: images.map((e) => text(e.url)) } };
+    }
     const updated = Object.keys(patch).length > 0
       ? await this.store.updateProduct({ adminId: input.adminId, productId: product.id, expectedConfigVersion: product.configVersion, patch })
       : product;
     await this.audit({ actorId: input.adminId, action: 'product.xianyu_edited', targetRef: product.id, requestId: input.requestId, traceId: input.traceId, accountId: product.accountId, payload: { itemId, changed } });
     return { product: updated ?? product, itemId, changed };
   }
+}
+
+export function summarizeEditDetail(detail: Rec): ProductEditSummary {
+  const textDto = rec(detail.itemTextDTO);
+  const rawSkus = list(detail.itemSkuList).map(rec).filter((s) => list(s.propertyList).length > 0);
+  const multiSpec = rawSkus.length > 0;
+  return {
+    itemId: text(detail.itemId),
+    title: text(textDto.title ?? detail.title),
+    description: text(textDto.desc ?? detail.desc ?? detail.description),
+    multiSpec,
+    priceMinor: multiSpec ? undefined : asInt(rec(detail.itemPriceDTO).priceInCent) || undefined,
+    quantity: asInt(detail.quantity),
+    images: list(detail.imageInfoDOList).map(rec).filter((e) => text(e.url)).map((e) => ({ url: text(e.url), width: asInt(e.widthSize, 800), height: asInt(e.heightSize, 800) })),
+    skus: rawSkus.map((sku) => ({
+      value: list(sku.propertyList).map(rec).map((p) => text(p.valueText)).filter(Boolean).join(' / '),
+      priceMinor: asInt(sku.priceInCent ?? sku.price),
+      quantity: asInt(sku.quantity),
+    })),
+  };
 }
 
 /** editdetail 里的值几乎都是字符串（"true"、"800"），按 edit 请求的真类型重建。 */
@@ -153,7 +214,7 @@ function normalizeAddress(addr: Rec): Rec | undefined {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-export function buildEditPayload(detail: Rec, itemId: string, overrides: { title?: string; description?: string; priceMinor?: number; skus?: ProductEditSkuInput[]; quantity?: number }): { payload: Rec; changed: string[] } {
+export function buildEditPayload(detail: Rec, itemId: string, overrides: { title?: string; description?: string; priceMinor?: number; skus?: ProductEditSkuInput[]; quantity?: number; images?: Rec[] }): { payload: Rec; changed: string[] } {
   const changed: string[] = [];
   const textDto = rec(detail.itemTextDTO);
   const title = overrides.title ?? text(textDto.title ?? detail.title);
@@ -208,6 +269,12 @@ export function buildEditPayload(detail: Rec, itemId: string, overrides: { title
   let quantity: string | number = multiSpec ? '1' : asInt(detail.quantity, 1);
   if (!multiSpec && overrides.quantity !== undefined && overrides.quantity !== quantity) { quantity = overrides.quantity; changed.push('quantity'); }
 
+  // 图片：覆盖列表或快照原样；第一张为主图
+  const snapshotImages = list(detail.imageInfoDOList).map(rec).filter((e) => text(e.url));
+  const sourceImages = overrides.images ?? snapshotImages;
+  if (overrides.images && overrides.images.map((e) => text(e.url)).join('\n') !== snapshotImages.map((e) => text(e.url)).join('\n')) changed.push('images');
+  const imageInfoDOList = sourceImages.map((entry, index) => ({ ...normalizeImage(entry), major: index === 0 }));
+
   const catDto = rec(detail.itemCatDTO);
   const itemCatDTO: Rec = { catId: text(catDto.catId), catName: text(catDto.catName), channelCatId: text(catDto.channelCatId), tbCatId: text(catDto.tbCatId) };
   if (text(catDto.leafId)) itemCatDTO.leafId = text(catDto.leafId);
@@ -217,7 +284,7 @@ export function buildEditPayload(detail: Rec, itemId: string, overrides: { title
     itemTypeStr: text(detail.itemTypeStr) || 'b',
     quantity,
     simpleItem: 'true',
-    imageInfoDOList: list(detail.imageInfoDOList).map(rec).filter((e) => text(e.url)).map(normalizeImage),
+    imageInfoDOList,
     itemTextDTO: { desc: description, title, titleDescSeparate: true },
     itemLabelExtList: list(detail.itemLabelExtList),
     userRightsProtocols: normalizeUserRights(list(detail.userRightsProtocols)),

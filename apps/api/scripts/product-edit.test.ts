@@ -63,3 +63,20 @@ test('single-sku edit updates the top-level price', () => {
   assert.equal(payload.quantity, 5);
   assert.equal('itemSkuList' in payload, false);
 });
+
+test('image override keeps snapshot entries, appends uploads and marks the first as major', () => {
+  const kept = { url: 'https://img/b.jpg', major: 'false', widthSize: '1000', heightSize: '563', type: '0' };
+  const uploaded = { url: 'https://img/new.png', widthSize: 1536, heightSize: 1024, major: 'false', type: '0', extraInfo: { isH: 'false', isT: 'false', raw: 'false' } };
+  const { payload, changed } = buildEditPayload(snapshot, 'x', { images: [kept, uploaded] });
+  assert.deepEqual(changed, ['images']);
+  const images = payload.imageInfoDOList as Array<Record<string, unknown>>;
+  assert.equal(images.length, 2);
+  assert.equal(images[0]!.url, 'https://img/b.jpg');
+  assert.equal(images[0]!.major, true);
+  assert.equal(images[1]!.url, 'https://img/new.png');
+  assert.equal(images[1]!.major, false);
+  assert.equal(images[1]!.widthSize, 1536);
+  assert.equal(images[1]!.status, 'done');
+  const same = buildEditPayload(snapshot, 'x', { images: (snapshot.imageInfoDOList as unknown[]).map((e) => e as Record<string, unknown>) });
+  assert.deepEqual(same.changed, []);
+});

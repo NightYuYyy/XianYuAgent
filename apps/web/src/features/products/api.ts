@@ -1,4 +1,4 @@
-import type { ProductAssetVM, ProductCouponVM, ProductDraftInput, ProductDraftPatch, ProductFilters, ProductPublishMultiSpecMeta, ProductSkuVM, ProductStatus, ProductSyncResultVM, ProductVM, ProductsPageVM, XianyuItemDetailVM, XianyuItemImageVM, XianyuItemSellerVM } from './types';
+import type { ProductAssetVM, ProductCouponVM, ProductDraftInput, ProductDraftPatch, ProductFilters, ProductPublishMultiSpecMeta, ProductSkuVM, ProductStatus, ProductSyncResultVM, ProductVM, ProductsPageVM, XianyuEditDetailVM, XianyuEditRequest, XianyuItemDetailVM, XianyuItemImageVM, XianyuItemSellerVM } from './types';
 import type { ProductPostageMode, ProductPublishSpecOverride, ProductPublishSpecPreview, PublishAttachment } from './product-publish';
 
 export interface ProductsApiTransport {
@@ -25,6 +25,8 @@ export interface ProductsApi {
   batchAutoRelist(input: { accountId: string; productIds: string[]; enabled: boolean; delaySeconds?: number }, options?: { idempotencyKey?: string }): Promise<{ enabled: boolean; products: ProductVM[] }>;
   relistNow(input: { accountId: string; productIds: string[] }, options?: { idempotencyKey?: string }): Promise<{ jobs: AutoRelistJobVM[] }>;
   listRelistJobs(input: { accountId: string; productId?: string; limit?: number }): Promise<AutoRelistJobVM[]>;
+  getXianyuEditDetail(productId: string): Promise<XianyuEditDetailVM>;
+  editXianyuProduct(productId: string, input: XianyuEditRequest, options?: { idempotencyKey?: string }): Promise<{ product: ProductVM; changed: string[] }>;
 }
 
 export interface AutoRelistJobVM {
@@ -434,6 +436,24 @@ export function createProductsApi(transport: ProductsApiTransport): ProductsApi 
       const payload = await transport.get<ProductPayload | ApiEnvelope<ProductPayload>>(`/api/v1/products/${encodeURIComponent(productId)}`);
       return toProductVM(unwrapEnvelope(payload));
     },
+    async getXianyuEditDetail(productId) {
+      const payload = await transport.get<{ summary: XianyuEditDetailVM } | ApiEnvelope<{ summary: XianyuEditDetailVM }>>(`/api/v1/products/${encodeURIComponent(productId)}/xianyu-edit/detail`);
+      return unwrapEnvelope(payload).summary;
+    },
+    async editXianyuProduct(productId, input, options = {}) {
+      const post = requireTransportMethod(transport, 'post');
+      const form = new FormData();
+      if (input.title !== undefined) form.set('title', input.title);
+      if (input.description !== undefined) form.set('description', input.description);
+      if (input.priceMinor !== undefined) form.set('priceMinor', String(input.priceMinor));
+      if (input.quantity !== undefined) form.set('quantity', String(input.quantity));
+      if (input.skus?.length) form.set('skus', JSON.stringify(input.skus));
+      if (input.keepImageUrls !== undefined) form.set('keepImageUrls', JSON.stringify(input.keepImageUrls));
+      for (const file of input.newImages ?? []) form.append('images', file, file.name);
+      const payload = await post<{ product: ProductPayload; changed: string[] } | ApiEnvelope<{ product: ProductPayload; changed: string[] }>>(`/api/v1/products/${encodeURIComponent(productId)}/xianyu-edit`, form, { headers: { 'Idempotency-Key': options.idempotencyKey ?? idempotencyKey('product-xianyu-edit') } });
+      const result = unwrapEnvelope(payload);
+      return { product: toProductVM(result.product), changed: result.changed ?? [] };
+    },
     async getXianyuDetail(productId) {
       const payload = await transport.get<XianyuItemDetailPayload | ApiEnvelope<XianyuItemDetailPayload>>(`/api/v1/products/${encodeURIComponent(productId)}/detail`);
       return toXianyuItemDetail(unwrapEnvelope(payload), productId);
@@ -611,6 +631,30 @@ export function createMockProductsApi(seed: ProductVM[] = [
       const product = seed.find((item) => item.id === productId);
       if (!product) throw new Error('PRODUCT_NOT_FOUND');
       return mockXianyuItemDetail(product);
+    },
+    async getXianyuEditDetail(productId) {
+      const product = seed.find((item) => item.id === productId);
+      if (!product) throw new Error('PRODUCT_NOT_FOUND');
+      const publish = (product.attributesJson?.publish ?? {}) as { imageUrls?: string[]; multiSpec?: { name: string; skus: Array<{ value: string; priceMinor: number; quantity: number }> } };
+      return {
+        itemId: product.externalProductRef ?? '',
+        title: product.title,
+        description: product.description ?? '',
+        multiSpec: Boolean(publish.multiSpec?.skus?.length),
+        priceMinor: publish.multiSpec?.skus?.length ? undefined : product.priceMinor,
+        quantity: 1,
+        images: (publish.imageUrls ?? []).map((url) => ({ url, width: 800, height: 800 })),
+        skus: publish.multiSpec?.skus ?? [],
+      };
+    },
+    async editXianyuProduct(productId, input) {
+      const product = seed.find((item) => item.id === productId);
+      if (!product) throw new Error('PRODUCT_NOT_FOUND');
+      if (input.title !== undefined) product.title = input.title;
+      if (input.description !== undefined) product.description = input.description;
+      if (input.priceMinor !== undefined) product.priceMinor = input.priceMinor;
+      product.configVersion += 1;
+      return { product: { ...product }, changed: Object.keys(input) };
     },
     async syncXianyuDetail(productId) {
       const product = seed.find((item) => item.id === productId);

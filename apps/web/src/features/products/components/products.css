@@ -329,3 +329,28 @@ body .app-viewport .products-domain .ui-placeholder-cell.products-placeholder { 
   .product-publish-sku-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .product-publish-sku-row > :first-child { grid-column: 1 / -1; }
 }
+
+/* 编辑闲鱼商品弹窗 */
+.xianyu-edit-panel { width: min(760px, 96vw); }
+.xianyu-edit-body { display: grid; gap: 16px; }
+.xianyu-edit-field { display: grid; gap: 6px; color: var(--muted); font-size: 13px; font-weight: 700; min-width: 0; }
+.xianyu-edit-field small { font-weight: 500; color: var(--muted); }
+.xianyu-edit-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.xianyu-edit-skus { display: grid; gap: 8px; }
+.xianyu-edit-sku { display: grid; grid-template-columns: minmax(0, 1fr) 160px 140px; gap: 10px; align-items: center; padding: 8px 12px; border: 1px solid var(--line, rgba(0,0,0,.1)); border-radius: 10px; }
+.xianyu-edit-sku b { color: var(--text); font-weight: 700; }
+.xianyu-edit-money, .xianyu-edit-qty { display: flex; align-items: center; gap: 6px; }
+.xianyu-edit-money i, .xianyu-edit-qty i { font-style: normal; color: var(--muted); }
+.xianyu-edit-images { display: flex; flex-wrap: wrap; gap: 10px; }
+.xianyu-edit-image { position: relative; width: 112px; height: 112px; border-radius: 10px; overflow: hidden; border: 1px solid var(--line, rgba(0,0,0,.12)); background: #0b1222; }
+.xianyu-edit-image img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.xianyu-edit-image em { position: absolute; left: 6px; bottom: 6px; font-style: normal; font-size: 11px; padding: 2px 6px; border-radius: 999px; background: rgba(0,0,0,.65); color: #fff; }
+.xianyu-edit-image.is-new em { background: #2563eb; }
+.xianyu-edit-image button { position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; border: none; border-radius: 50%; background: rgba(0,0,0,.65); color: #fff; cursor: pointer; line-height: 22px; padding: 0; }
+.xianyu-edit-add { display: flex; align-items: center; justify-content: center; border-style: dashed; cursor: pointer; color: var(--muted); font-weight: 700; }
+.xianyu-edit-add input { display: none; }
+.xianyu-edit-actions { display: flex; justify-content: flex-end; gap: 10px; padding-top: 4px; }
+@media (max-width: 720px) {
+  .xianyu-edit-row { grid-template-columns: 1fr; }
+  .xianyu-edit-sku { grid-template-columns: 1fr; }
+}

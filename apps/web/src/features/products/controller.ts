@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createMockProductsApi, type ProductsApi } from './api';
-import type { ProductDetailState, ProductDraftInput, ProductDraftPatch, ProductFilters, ProductMutationError, ProductsLoadError, ProductsQueryState, ProductVM, XianyuDetailState } from './types';
+import type { ProductDetailState, ProductDraftInput, ProductDraftPatch, ProductFilters, ProductMutationError, ProductsLoadError, ProductsQueryState, ProductVM, XianyuDetailState, XianyuEditRequest, XianyuEditState } from './types';
 import { minSkuPriceMinor, skuRowsToMeta, type ProductPublishFormValues } from './product-publish';
 import type { ProductListingResultVM, ProductPublishPreviewVM, AutoRelistJobVM } from './api';
 import { yuanToMinor } from './product-publish';
@@ -78,6 +78,10 @@ export interface ProductsController {
   batchListing: (action: 'offline' | 'delete', input: { accountId: string; productIds: string[] }) => Promise<ProductListingResultVM | null>;
   batchAutoRelist: (input: { accountId: string; productIds: string[]; enabled: boolean; delaySeconds?: number }) => Promise<{ enabled: boolean; products: ProductVM[] } | null>;
   relistNow: (input: { accountId: string; productIds: string[] }) => Promise<{ jobs: AutoRelistJobVM[] } | null>;
+  openXianyuEdit: (productId: string) => Promise<void>;
+  closeXianyuEdit: () => void;
+  submitXianyuEdit: (input: XianyuEditRequest) => Promise<boolean>;
+  xianyuEdit: XianyuEditState;
   syncError: ProductMutationError | null;
   clearMutation: () => void;
   state: ProductsQueryState;
@@ -92,6 +96,7 @@ export function useProductsController(options: { api?: ProductsApi; initialFilte
   const [state, setState] = useState<ProductsQueryState>({ phase: 'idle', data: null, error: null });
   const [detail, setDetail] = useState<ProductDetailState>({ phase: 'idle', data: null, error: null });
   const [xianyuDetail, setXianyuDetail] = useState<XianyuDetailState>({ phase: 'idle', data: null, error: null });
+  const [xianyuEdit, setXianyuEdit] = useState<XianyuEditState>({ phase: 'idle', detail: null, error: null });
   const [mutation, setMutation] = useState<ProductsMutationState>({ phase: 'idle', error: null });
   const [syncError, setSyncError] = useState<ProductMutationError | null>(null);
   const requestId = useRef(0);
@@ -159,6 +164,30 @@ export function useProductsController(options: { api?: ProductsApi; initialFilte
     }
   }, [productsApi]);
   const closeXianyuDetail = useCallback(() => { xianyuDetailRequestId.current += 1; setXianyuDetail({ phase: 'idle', data: null, error: null }); }, []);
+  const openXianyuEdit = useCallback(async (productId: string) => {
+    setXianyuEdit({ phase: 'loading', productId, detail: null, error: null });
+    try {
+      const detail = await productsApi.getXianyuEditDetail(productId);
+      setXianyuEdit({ phase: 'ready', productId, detail, error: null });
+    } catch (error) {
+      setXianyuEdit({ phase: 'error', productId, detail: null, error: toProductsMutationError(error).message });
+    }
+  }, [productsApi]);
+  const closeXianyuEdit = useCallback(() => setXianyuEdit({ phase: 'idle', detail: null, error: null }), []);
+  const submitXianyuEdit = useCallback(async (input: XianyuEditRequest) => {
+    const productId = xianyuEdit.productId;
+    if (!productId) return false;
+    setXianyuEdit((previous) => ({ ...previous, phase: 'saving', error: null }));
+    try {
+      await productsApi.editXianyuProduct(productId, input);
+      setXianyuEdit({ phase: 'idle', detail: null, error: null });
+      await reload();
+      return true;
+    } catch (error) {
+      setXianyuEdit((previous) => ({ ...previous, phase: 'error', error: toProductsMutationError(error).message }));
+      return false;
+    }
+  }, [productsApi, reload, xianyuEdit.productId]);
   const setKeyword = useCallback((keyword: string) => { setFilters((previous) => ({ ...previous, keyword, page: 1 })); }, []);
 
   const createDraft = useCallback(async (input: ProductDraftInput) => {
@@ -340,5 +369,5 @@ export function useProductsController(options: { api?: ProductsApi; initialFilte
   }, [productsApi]);
   const clearMutation = useCallback(() => setMutation({ phase: 'idle', error: null }), []);
 
-  return { filters, setFilters, setKeyword, reload, openProduct, closeProduct, openXianyuDetail, syncXianyuDetail, closeXianyuDetail, createDraft, updateDraft, updateKnowledgeBase, generateKnowledgeBaseFromConversations, batchListing, batchAutoRelist, relistNow, optimizeKnowledgeBase, publishProduct, previewProduct, optimizeDescription, syncFromXianyu, syncError, clearMutation, state, detail, xianyuDetail, mutation };
+  return { filters, setFilters, setKeyword, reload, openProduct, closeProduct, openXianyuDetail, syncXianyuDetail, closeXianyuDetail, openXianyuEdit, closeXianyuEdit, submitXianyuEdit, xianyuEdit, createDraft, updateDraft, updateKnowledgeBase, generateKnowledgeBaseFromConversations, batchListing, batchAutoRelist, relistNow, optimizeKnowledgeBase, publishProduct, previewProduct, optimizeDescription, syncFromXianyu, syncError, clearMutation, state, detail, xianyuDetail, mutation };
 }
