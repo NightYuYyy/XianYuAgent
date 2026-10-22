@@ -27,7 +27,7 @@ describe('ConnectionBanner', () => {
     const onRetry = vi.fn();
     const html = renderToStaticMarkup(createElement(ConnectionBanner, { phase: 'timeout', onRetry }));
     expect(html).toContain('messages-connection-status timeout');
-    expect(html).toContain('>离线<');
+    expect(html).toContain('>推送断开<');
     expect(html).toContain('>重试</button>');
     expect(html).not.toContain('messages-connection-banner');
   });

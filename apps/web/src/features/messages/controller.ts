@@ -121,7 +121,12 @@ export function useMessagesController(options: { api?: MessagesApi; accountId?: 
         if (intentionalCloseRef.current) { intentionalCloseRef.current = false; return; }
         if (activeIdRef.current !== conversationId) return;
         const attempt = ++reconnectAttempt.current;
-        if (attempt > 5) { setState((previous) => ({ ...previous, realtimePhase: 'timeout', error: { code: 'REALTIME_TIMEOUT', message: '实时连接多次失败，请稍后重试。', retryable: true } })); return; }
+        if (attempt > 5) {
+          // 多次失败后不再静默放弃：显示“推送断开”，但每 15 秒继续试一次，后台重启完会自己接上。
+          setState((previous) => ({ ...previous, realtimePhase: 'timeout', error: { code: 'REALTIME_TIMEOUT', message: '实时连接多次失败，正在自动重连。', retryable: true } }));
+          retryTimerRef.current = setTimeout(() => connectRealtime(conversationId, cursorRef.current), 15_000);
+          return;
+        }
         setState((previous) => ({ ...previous, realtimePhase: 'reconnecting' }));
         retryTimerRef.current = setTimeout(() => connectRealtime(conversationId, cursorRef.current), Math.min(1000 * attempt, 5000));
       },

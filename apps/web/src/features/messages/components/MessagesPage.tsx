@@ -308,7 +308,7 @@ export function MessagesPage({ api: providedApi, active = true }: { api?: Messag
             <span className="messages-main-avatar">{activeConversation?.buyerAvatarUrl ? <img src={activeConversation.buyerAvatarUrl} alt="" /> : (activeConversation?.buyerDisplayName || activeConversation?.buyerRef || '会').slice(0, 1)}</span>
             <div><strong>{activeConversation?.buyerDisplayName || activeConversation?.buyerRef || '选择会话'}</strong><small>{activeConversation ? `用户 ID：${activeConversation.buyerRef}` : '从左侧选择一个会话'}</small></div>
           </div>
-          <div className="messages-main-header-meta"><span>{activeConversation?.itemTitle || '未关联商品'}</span><span className="messages-live-badge">真实连接</span><span className={`messages-connection-dot ${controller.state.realtimePhase}`} aria-hidden="true" /><ConnectionBanner phase={controller.state.realtimePhase} onRetry={controller.retryRealtime} /></div>
+          <div className="messages-main-header-meta"><span>{activeConversation?.itemTitle || '未关联商品'}</span><span className="messages-live-badge" title="浏览器和后台之间的实时推送通道：绿点表示新消息会即时推到这个页面。断开时页面照常能用，会自动重连，也可以点重试。">实时推送</span><span className={`messages-connection-dot ${controller.state.realtimePhase}`} aria-hidden="true" /><ConnectionBanner phase={controller.state.realtimePhase} onRetry={controller.retryRealtime} /></div>
         </header>
         {controller.state.activeConversationId ? <>
           <MessageTimeline
