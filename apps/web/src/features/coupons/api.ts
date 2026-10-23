@@ -9,7 +9,7 @@ export interface CouponsApiTransport {
 
 export interface CouponsApi {
   list(filters?: CouponBatchFilters): Promise<CouponsPageVM>;
-  getDetail(batchId: string): Promise<CouponBatchVM>;
+  getDetail(batchId: string, options?: { includeContent?: boolean }): Promise<CouponBatchVM>;
   createBatch(input: CreateCouponBatchRequest): Promise<CouponBatchVM>;
   updateBatch(batchId: string, input: UpdateCouponBatchRequest): Promise<CouponBatchVM>;
   importItems(batchId: string, items: string[]): Promise<CouponMutationVM>;
@@ -126,8 +126,8 @@ export function createCouponsApi(transport: CouponsApiTransport): CouponsApi {
       const payload = await transport.get<{ items?: CouponPayload[]; total?: number; page?: number; pageSize?: number; totalPages?: number } | ApiEnvelope<{ items?: CouponPayload[]; total?: number; page?: number; pageSize?: number; totalPages?: number }>>(`/api/v1/coupons/batches${queryString(filters)}`);
       return toPage(unwrapEnvelope(payload));
     },
-    async getDetail(batchId) {
-      const payload = await transport.get<CouponPayload | ApiEnvelope<CouponPayload>>(`/api/v1/coupons/batches/${encodeURIComponent(batchId)}`);
+    async getDetail(batchId, options) {
+      const payload = await transport.get<CouponPayload | ApiEnvelope<CouponPayload>>(`/api/v1/coupons/batches/${encodeURIComponent(batchId)}${options?.includeContent ? '?includeContent=1' : ''}`);
       return toBatchVM(unwrapEnvelope(payload));
     },
     async takeItem(batchId, note) {
@@ -218,7 +218,7 @@ export function createMockCouponsApi(seed: CouponBatchVM[] = [
       const start = (page - 1) * pageSize;
       return { items: filtered.slice(start, start + pageSize), total: filtered.length, page, pageSize, totalPages: Math.max(1, Math.ceil(filtered.length / pageSize)) };
     },
-    async getDetail(batchId) { const batch = batches.find((item) => item.batchId === batchId); if (!batch) throw Object.assign(new Error('BATCH_NOT_FOUND'), { status: 404 }); return { ...batch, items: batch.items?.map((item) => ({ ...item })) }; },
+    async getDetail(batchId, options) { const batch = batches.find((item) => item.batchId === batchId); if (!batch) throw Object.assign(new Error('BATCH_NOT_FOUND'), { status: 404 }); return { ...batch, items: batch.items?.map((item) => ({ ...item, ...(options?.includeContent ? { content: `mock-${item.id}` } : {}) })) }; },
     async takeItem(batchId, note) {
       const batch = batches.find((item) => item.batchId === batchId);
       const item = batch?.items?.find((entry) => entry.status === 'available');

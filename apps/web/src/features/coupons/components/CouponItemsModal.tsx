@@ -14,18 +14,17 @@ function describeUsage(item: CouponItemVM): string {
 
 /**
  * 卡密明细：看每张的状态（可用 / 预占中 / 已用于哪个订单），手动取一张标记已用，或单张改状态。
- * 明文默认不显示，点「查看」才向后端取（后端记审计）。
+ * 明文直接展示（详情接口 includeContent，后端记一条审计），免得一张张点。
  */
 export function CouponItemsModal({ batch, api, onClose }: { batch: CouponBatchVM; api: CouponsApi; onClose: () => void }) {
   const [detail, setDetail] = useState<CouponBatchVM | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [revealed, setRevealed] = useState<Record<string, string>>({});
   const [taken, setTaken] = useState<{ content: string; itemId: string } | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    try { setDetail(await api.getDetail(batch.batchId)); setError(null); }
+    try { setDetail(await api.getDetail(batch.batchId, { includeContent: true })); setError(null); }
     catch (err) { setError(err instanceof Error ? err.message : '读取失败'); }
   }, [api, batch.batchId]);
   useEffect(() => { void load(); }, [load]);
@@ -46,15 +45,10 @@ export function CouponItemsModal({ batch, api, onClose }: { batch: CouponBatchVM
     try {
       const result = await api.takeItem(batch.batchId, 'manual');
       setTaken({ content: result.content, itemId: result.item.id });
-      setRevealed((previous) => ({ ...previous, [result.item.id]: result.content }));
       await load();
       void copy(result.content, 'taken');
     } catch (err) { setError(err instanceof Error ? err.message : '取卡失败'); }
     finally { setBusy(false); }
-  }
-  async function reveal(item: CouponItemVM) {
-    try { const content = await api.revealItem(item.id); setRevealed((previous) => ({ ...previous, [item.id]: content })); }
-    catch (err) { setError(err instanceof Error ? err.message : '读取卡密失败'); }
   }
   async function setStatus(item: CouponItemVM, status: 'available' | 'consumed') {
     setBusy(true);
@@ -79,13 +73,11 @@ export function CouponItemsModal({ batch, api, onClose }: { batch: CouponBatchVM
         {!detail && !error && <div className="coupons-item-row"><span /><span>读取中…</span></div>}
         {items.map((item, index) => <div className="coupons-item-row" key={item.id}>
           <span className="coupons-muted">{index + 1}</span>
-          <span className="coupons-item-code" title={revealed[item.id] ?? ''}>{revealed[item.id] ?? '••••••••'}</span>
+          <span className="coupons-item-code" title={item.content ?? ''}>{item.content ?? '（无法读取）'}</span>
           <span><span className={`coupons-item-badge ${item.status}`}>{statusLabel[item.status]}</span></span>
           <span className="coupons-item-note" title={describeUsage(item)}>{describeUsage(item) || '—'}</span>
           <span className="coupons-item-actions">
-            {revealed[item.id]
-              ? <button className="btn ghost btn-small" type="button" onClick={() => void copy(revealed[item.id]!, item.id)}>{copied === item.id ? '已复制' : '复制'}</button>
-              : <button className="btn ghost btn-small" type="button" onClick={() => void reveal(item)}>查看</button>}
+            <button className="btn ghost btn-small" type="button" disabled={!item.content} onClick={() => void copy(item.content ?? '', item.id)}>{copied === item.id ? '已复制' : '复制'}</button>
             {item.status === 'available' && <button className="btn ghost btn-small" type="button" disabled={busy} onClick={() => void setStatus(item, 'consumed')}>标记已用</button>}
             {item.status === 'consumed' && <button className="btn ghost btn-small" type="button" disabled={busy} onClick={() => void setStatus(item, 'available')}>恢复可用</button>}
           </span>

@@ -29,6 +29,8 @@ export interface CouponItemVM {
   reservedUntil?: string;
   consumedAt?: string;
   usageNote?: string;
+  /** 仅 getDetail(includeContent) 时返回明文 */
+  content?: string;
 }
 
 export interface CouponBindingVM {

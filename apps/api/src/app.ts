@@ -1545,7 +1545,7 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
   if (couponBatchMatch) {
     const batchId = decodeURIComponent(couponBatchMatch[1]);
     const action = couponBatchMatch[2];
-    if (!action && ctx.method === 'GET') return { statusCode: 200, body: success(ctx, await coupons.get(authContext.admin.id, batchId)).body };
+    if (!action && ctx.method === 'GET') return { statusCode: 200, body: success(ctx, await coupons.get(authContext.admin.id, batchId, { includeContent: ['1', 'true'].includes(String(ctx.query.includeContent ?? '')), requestId: ctx.requestId, traceId: ctx.traceId })).body };
     if (!action && (ctx.method === 'PATCH' || ctx.method === 'PUT')) {
       return mutation(runtime, ctx, authContext, batchId, async () => success(ctx, await coupons.update({ adminId: authContext.admin.id, batchId, patch: { label: optionalString(ctx.body.label), purpose: optionalString(ctx.body.purpose), status: optionalString(ctx.body.status) as never, metadata: readCouponMetadata(ctx.body.metadata) }, requestId: ctx.requestId, traceId: ctx.traceId })));
     }

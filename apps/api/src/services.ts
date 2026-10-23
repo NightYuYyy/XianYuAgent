@@ -124,11 +124,13 @@ export class CouponService {
     return { ...result, items: items.map((batch) => this.toBatchView(batch)) };
   }
 
-  async get(adminId: string, batchId: string): Promise<ReturnType<CouponService['toBatchView']>> {
+  /** includeContent：数据批次把每张卡密明文一并返回（后台「卡密」弹窗用），记一条审计。 */
+  async get(adminId: string, batchId: string, options: { includeContent?: boolean; requestId?: string; traceId?: string } = {}): Promise<ReturnType<CouponService['toBatchView']>> {
     const current = await this.store.getCouponBatch(adminId, batchId);
     const batch = current ? await this.couponAssets.migrateLegacyImages({ adminId, batch: current }) : undefined;
     if (!batch) throw new ServiceError(404, 'NOT_FOUND', 'coupon batch not found');
-    return this.toBatchView(batch, true);
+    if (options.includeContent && options.requestId && options.traceId) await this.audit({ actorId: adminId, action: 'coupon.items.revealed', targetRef: batch.id, requestId: options.requestId, traceId: options.traceId, payload: { count: batch.items?.length ?? 0 }, accountId: batch.accountId });
+    return this.toBatchView(batch, true, Boolean(options.includeContent));
   }
 
   async create(input: { adminId: string; accountId: string; label?: string; purpose: string; metadata?: CouponBatchMetadata; requestId: string; traceId: string }): Promise<ReturnType<CouponService['toBatchView']>> {
@@ -238,7 +240,7 @@ export class CouponService {
     return response;
   }
 
-  private toBatchView(batch: CouponBatchRecord, detail = false): Record<string, unknown> {
+  private toBatchView(batch: CouponBatchRecord, detail = false, includeContent = false): Record<string, unknown> {
     const items = batch.items ?? [];
     const metadata = batch.metadata ?? {};
     const storedImageUrls = this.couponAssets.imageUrls(batch);
@@ -250,13 +252,13 @@ export class CouponService {
     const bindingViews = (batch.bindings ?? []).map((binding) => this.toBindingView(binding, publicBatchId));
     const counts = couponCounts(batch);
     const result: Record<string, unknown> = { batchId: publicBatchId, id: publicBatchId, ...counts, accountId: batch.accountId, label: batch.label, purpose: batch.purpose, status: batch.status, version: batch.version, updatedAt: batch.updatedAt, createdAt: batch.createdAt, metadata: detail ? detailMetadata : listMetadata, contentPreview: { text: metadata.textContent ? metadata.textContent.slice(0, 140) : undefined, apiUrl: metadata.apiConfig?.url, imageUrls }, productBindings: bindingViews.filter((binding) => binding.status === 'active') };
-    if (detail) result.items = items.map((item) => this.toItemView(item, publicBatchId));
+    if (detail) result.items = items.map((item) => this.toItemView(item, publicBatchId, includeContent));
     if (detail) result.bindings = bindingViews;
     return result;
   }
   private publicBatchId(batch: CouponBatchRecord): string { return batch.sequenceId ?? batch.id; }
   private toBindingView(binding: CouponBindingRecord, publicBatchId?: string): Record<string, unknown> { return { id: binding.id, bindingId: binding.id, batchId: publicBatchId ?? binding.batchId, productId: binding.productId, priority: binding.priority, status: binding.status, expiresAt: binding.expiresAt, createdAt: binding.createdAt, updatedAt: binding.updatedAt }; }
-  private toItemView(item: CouponItemRecord, publicBatchId?: string): Record<string, unknown> { return { id: item.id, batchId: publicBatchId ?? item.batchId, status: item.status, reservedUntil: item.reservedUntil, consumedAt: item.consumedAt, usageNote: item.usageNote, createdAt: item.createdAt }; }
+  private toItemView(item: CouponItemRecord, publicBatchId?: string, includeContent = false): Record<string, unknown> { return { id: item.id, batchId: publicBatchId ?? item.batchId, status: item.status, reservedUntil: item.reservedUntil, consumedAt: item.consumedAt, usageNote: item.usageNote, createdAt: item.createdAt, ...(includeContent ? { content: item.content } : {}) }; }
 
   /** 人工取一张可用卡密（标记已用）并返回明文，给手动发货用。 */
   async takeItem(input: { adminId: string; batchId: string; note?: string; requestId: string; traceId: string }): Promise<Record<string, unknown>> {
