@@ -8,7 +8,7 @@ const css = readFileSync(resolve(here, 'accounts.css'), 'utf8');
 
 describe('accounts list layout', () => {
   it('uses stable grid tracks with a fixed operation column', () => {
-    expect(css).toContain('minmax(88px, .75fr)');
+    expect(css).toContain('minmax(220px, 1.6fr)');
     expect(css).toContain('minmax(128px, 1fr) 252px');
     expect(css).not.toContain('1fr auto; gap: 12px');
   });

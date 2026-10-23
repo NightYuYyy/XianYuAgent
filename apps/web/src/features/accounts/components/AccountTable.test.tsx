@@ -35,6 +35,26 @@ describe('AccountTable', () => {
     expect(html).not.toContain('seller.orders.internal');
   });
 
+  it('tells slider verification, other safety verification and expired credentials apart', () => {
+    const base = { page: 1, total: 1, totalPages: 1, onPageChange: vi.fn(), onReauthorize: vi.fn(), onSwitch: vi.fn(), onDelete: vi.fn() };
+    const slider = renderToStaticMarkup(createElement(AccountTable, { ...base, accounts: [{ ...account, status: 'verification_required', riskCode: 'RGV587', riskSource: 'im_listener', riskFirstSeenAt: '2026-10-20T04:55:19.000Z' }] }));
+    expect(slider).toContain('滑块验证');
+    expect(slider).toContain('登录态没有失效');
+    expect(slider).toContain('聊天长连接');
+    expect(slider).toContain('重新扫码');
+    expect(slider).not.toContain('im_listener');
+    const safety = renderToStaticMarkup(createElement(AccountTable, { ...base, accounts: [{ ...account, status: 'verification_required', riskCode: 'ACCOUNT_VALIDATION_REQUIRED', riskSource: 'seller.orders.internal' }] }));
+    expect(safety).toContain('安全验证');
+    expect(safety).toContain('手机闲鱼');
+    expect(safety).toContain('订单接口');
+    expect(safety).not.toContain('seller.orders.internal');
+    const expired = renderToStaticMarkup(createElement(AccountTable, { ...base, accounts: [{ ...account, status: 'expired', connection: { status: 'expired' } }] }));
+    expect(expired).toContain('登录凭证已失效');
+    expect(expired).toContain('必须重新扫码登录');
+    expect(expired).toContain('重新登录');
+    expect(expired).not.toContain('滑块验证');
+  });
+
   it('restores the operation column and row actions', () => {
     const html = renderToStaticMarkup(createElement(AccountTable, {
       accounts: [account],

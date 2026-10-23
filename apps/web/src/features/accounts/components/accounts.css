@@ -19,7 +19,7 @@
 .accounts-domain-table-region { display: flex; flex: 1; min-height: 0; flex-direction: column; }
 .accounts-domain-table-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .accounts-domain-table { display: grid; min-width: 1100px; }
-.accounts-domain-row { display: grid; grid-template-columns: minmax(210px, 1.7fr) minmax(88px, .75fr) minmax(100px, .9fr) minmax(90px, .8fr) minmax(100px, .9fr) minmax(128px, 1fr) 252px; gap: 12px; align-items: center; justify-items: start; min-height: 64px; padding: 11px 18px; border-bottom: 1px solid var(--border); font-size: 12px; text-align: left; }
+.accounts-domain-row { display: grid; grid-template-columns: minmax(210px, 1.7fr) minmax(220px, 1.6fr) minmax(100px, .9fr) minmax(90px, .8fr) minmax(100px, .9fr) minmax(128px, 1fr) 252px; gap: 12px; align-items: center; justify-items: start; min-height: 64px; padding: 11px 18px; border-bottom: 1px solid var(--border); font-size: 12px; text-align: left; }
 .accounts-domain-row:last-child { border-bottom: 0; }
 .accounts-domain-head { position: sticky; top: 0; z-index: 1; min-height: 40px; background: var(--bg); color: var(--sub); font-size: 11px; font-weight: 800; }
 .accounts-domain-account-cell { display: flex; align-items: center; gap: 9px; min-width: 0; }
@@ -106,7 +106,7 @@
   .accounts-domain-toolbar-actions .ui-select-control { flex: 1 1 0; min-width: 0; width: 100%; }
   .accounts-domain-search { flex: 1; width: 100%; max-width: none; }
   .accounts-domain-kpis { grid-template-columns: 1fr; }
-  .accounts-domain-row { grid-template-columns: minmax(190px, 1.7fr) minmax(88px, .8fr) minmax(100px, .9fr) minmax(90px, .8fr) minmax(100px, .9fr) minmax(128px, 1fr) 252px; min-width: 1100px; }
+  .accounts-domain-row { grid-template-columns: minmax(190px, 1.7fr) minmax(220px, 1.6fr) minmax(100px, .9fr) minmax(90px, .8fr) minmax(100px, .9fr) minmax(128px, 1fr) 252px; min-width: 1240px; }
   .accounts-domain-table { min-width: 1100px; }
   .accounts-domain-pagination { justify-content: center; }
   .account-login-methods { grid-template-columns: 1fr; }
@@ -188,3 +188,10 @@
 .modal-card.account-proxy-modal { width: min(480px, calc(100vw - 32px)); padding: 20px 23px 21px; }
 .account-proxy-body { display: grid; gap: 12px; padding: 4px 0 0; }
 .account-proxy-body .ui-input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+/* 状态列：徽章 + 一句「出了什么事 / 该怎么办」 */
+.accounts-domain-status-cell { display: grid; gap: 4px; justify-items: start; min-width: 0; }
+.accounts-domain-status-hint { display: block; font-size: 11px; line-height: 1.45; color: var(--sub); white-space: normal; max-width: 320px; }
+.accounts-domain-status-hint b { display: block; font-weight: 600; color: var(--text); }
+.accounts-domain-status-hint.tone-danger b { color: var(--danger); }
+.accounts-domain-status-hint.tone-warn b { color: var(--warn); }

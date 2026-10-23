@@ -1,5 +1,6 @@
 import { AccountConnectionBadge, AccountCredentialBadge, AccountStatusBadge } from './AccountStatusBadge';
 import type { AccountVM } from '../types';
+import { accountStatusAdvice } from '../feedback';
 
 export function AccountTable({ accounts, activeAccountId, page, total, totalPages, onPageChange, onReauthorize, onSwitch, onDelete, onEditProxy, onToggleAutoPolish }: {
   accounts: AccountVM[];
@@ -42,14 +43,14 @@ export function AccountTable({ accounts, activeAccountId, page, total, totalPage
                 <small>{account.remark || account.sellerRef}</small>
               </span>
             </div>
-            <span role="cell"><AccountStatusBadge status={account.status} riskCode={account.riskCode} /></span>
+            <span role="cell" className="accounts-domain-status-cell"><AccountStatusBadge status={account.status} riskCode={account.riskCode} />{renderAdvice(account)}</span>
             <span role="cell"><AccountConnectionBadge status={account.connection.status} /></span>
             <span role="cell"><span className={account.aiEnabled ? 'accounts-domain-enabled' : 'accounts-domain-muted'}>{account.aiEnabled ? '已启用' : '未启用'}</span></span>
             <span role="cell"><AccountCredentialBadge state={account.credentialState} /></span>
             <span role="cell" className="accounts-domain-updated">{formatUpdatedAt(account.updatedAt)}</span>
             <span role="cell" className="accounts-domain-row-actions">
               <button className={account.id === activeAccountId ? 'btn primary' : 'btn ghost'} type="button" data-testid="account-switch" onClick={() => onSwitch(account)} disabled={account.id === activeAccountId || account.status === 'disabled'}>{account.id === activeAccountId ? '当前账号' : '切换账号'}</button>
-              <button className={account.status === 'connected' ? 'btn ghost' : 'btn primary'} type="button" onClick={() => onReauthorize(account)}>{account.status === 'connected' ? '重新授权' : '扫码授权'}</button>
+              <button className={account.status === 'connected' ? 'btn ghost' : 'btn primary'} type="button" onClick={() => onReauthorize(account)}>{reauthorizeLabel(account.status)}</button>
               {onToggleAutoPolish && <button className={account.autoPolish ? 'btn primary' : 'btn ghost'} type="button" data-testid="account-auto-polish" title={account.autoPolish ? '自动擦亮已开启，点击关闭' : '自动擦亮已关闭，点击开启'} onClick={() => onToggleAutoPolish(account)}>{account.autoPolish ? '擦亮 ✓' : '擦亮'}</button>}
               {onEditProxy && <button className="btn ghost" type="button" data-testid="account-proxy" title={account.proxyUrl ?? '未配置代理'} onClick={() => onEditProxy(account)}>{account.proxyUrl ? '代理 ✓' : '代理'}</button>}
               <button className="btn danger" type="button" data-testid="account-delete" onClick={() => onDelete(account)}>删除账号</button>
@@ -70,6 +71,19 @@ export function AccountTable({ accounts, activeAccountId, page, total, totalPage
       <span className="accounts-domain-pagination-status">第 {page} / {totalPages} 页</span>
     </nav>
   </div>;
+}
+
+function reauthorizeLabel(status: AccountVM['status']): string {
+  if (status === 'connected') return '重新授权';
+  if (status === 'expired') return '重新登录';
+  if (status === 'verification_required') return '重新扫码';
+  return '扫码授权';
+}
+
+function renderAdvice(account: AccountVM) {
+  const advice = accountStatusAdvice(account);
+  if (!advice) return null;
+  return <small className={`accounts-domain-status-hint tone-${advice.tone}`} data-testid="account-status-advice"><b>{advice.summary}</b>{advice.action}</small>;
 }
 
 function formatUpdatedAt(value: string): string {
