@@ -1535,7 +1535,13 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
     });
     return result;
   }
-  const couponBatchMatch = ctx.path.match(/^\/api\/v1\/coupons\/batches\/([^/]+)(?:\/(items\/import|bind|unbind|void))?$/);
+  const couponItemStatusMatch = ctx.path.match(/^\/api\/v1\/coupons\/batches\/([^/]+)\/items\/([^/]+)\/status$/);
+  if (couponItemStatusMatch && ctx.method === 'POST') {
+    const batchId = decodeURIComponent(couponItemStatusMatch[1]);
+    const itemId = decodeURIComponent(couponItemStatusMatch[2]);
+    return mutation(runtime, ctx, authContext, batchId, async () => success(ctx, await coupons.setItemStatus({ adminId: authContext.admin.id, batchId, itemId, status: String(ctx.body.status ?? ''), note: optionalString(ctx.body.note), requestId: ctx.requestId, traceId: ctx.traceId })));
+  }
+  const couponBatchMatch = ctx.path.match(/^\/api\/v1\/coupons\/batches\/([^/]+)(?:\/(items\/import|items\/take|bind|unbind|void))?$/);
   if (couponBatchMatch) {
     const batchId = decodeURIComponent(couponBatchMatch[1]);
     const action = couponBatchMatch[2];
@@ -1551,6 +1557,9 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
         const items = Array.isArray(ctx.body.items) ? ctx.body.items.filter((item): item is string => typeof item === 'string') : [];
         return success(ctx, await coupons.importItems({ adminId: authContext.admin.id, batchId, contents: items, requestId: ctx.requestId, traceId: ctx.traceId }));
       });
+    }
+    if (action === 'items/take' && ctx.method === 'POST') {
+      return mutation(runtime, ctx, authContext, batchId, async () => success(ctx, await coupons.takeItem({ adminId: authContext.admin.id, batchId, note: optionalString(ctx.body.note), requestId: ctx.requestId, traceId: ctx.traceId })));
     }
     if (action === 'bind' && ctx.method === 'POST') {
       return mutation(runtime, ctx, authContext, batchId, async () => success(ctx, await coupons.bind({ adminId: authContext.admin.id, batchId, productId: String(ctx.body.productId ?? ''), requestId: ctx.requestId, traceId: ctx.traceId })));
@@ -2430,6 +2439,7 @@ function readCouponMetadata(value: unknown): import('./domain.js').CouponBatchMe
   if (typeof source.minPrice === 'string') metadata.minPrice = source.minPrice;
   if (source.dockVisibility === 'public' || source.dockVisibility === 'dealer_only') metadata.dockVisibility = source.dockVisibility;
   if (typeof source.multiSpec === 'boolean') metadata.multiSpec = source.multiSpec;
+  if (typeof source.oneTime === 'boolean') metadata.oneTime = source.oneTime;
   if (typeof source.specName === 'string') metadata.specName = source.specName;
   if (typeof source.specValue === 'string') metadata.specValue = source.specValue;
   if (typeof source.textContent === 'string') metadata.textContent = source.textContent;

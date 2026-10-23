@@ -110,3 +110,26 @@ test('reservation execution key fingerprint and admin scope are enforced', async
   const otherAdmin = await value.store.createAdmin({ email: `coupon-reservation-other-${Date.now()}-${Math.random()}@example.com`, passwordHash: 'hash', displayName: 'Other Admin' });
   assert.equal(await value.store.getCouponReservation({ adminId: otherAdmin.id, reservationId: reserved.reservationId }), undefined);
 });
+
+test('one-time data batch consumes items on commit and records the order, manual take/restore work', async () => {
+  const value = await fixture(2, 'data');
+  await value.store.updateCouponBatch({ adminId: value.admin.id, batchId: value.batch.id, patch: { metadata: { ...value.batch.metadata, oneTime: true } } });
+  const first = await value.store.reserveCoupon(reservationInput(value, 'paid_auto_delivery:acc:ORDER-1'));
+  await value.store.commitCouponReservation({ adminId: value.admin.id, reservationId: first.reservationId, executionKey: 'paid_auto_delivery:acc:ORDER-1' });
+  let batch = await value.store.getCouponBatch(value.admin.id, value.batch.id);
+  const used = batch?.items?.find((item) => item.status === 'consumed');
+  assert.equal(used?.content, 'coupon-1');
+  assert.equal(used?.usageNote, 'order:ORDER-1');
+  assert.equal(batch?.items?.filter((item) => item.status === 'available').length, 1);
+  const taken = await value.store.takeCouponItem({ adminId: value.admin.id, batchId: value.batch.id, note: 'manual' });
+  assert.equal(taken?.content, 'coupon-2');
+  assert.equal(taken?.status, 'consumed');
+  assert.equal(await value.store.takeCouponItem({ adminId: value.admin.id, batchId: value.batch.id }), undefined);
+  const restored = await value.store.setCouponItemStatus({ adminId: value.admin.id, batchId: value.batch.id, itemId: taken!.id, status: 'available' });
+  assert.equal(restored?.status, 'available');
+  assert.equal(restored?.usageNote, undefined);
+  batch = await value.store.getCouponBatch(value.admin.id, value.batch.id);
+  assert.equal(batch?.items?.filter((item) => item.status === 'available').length, 1);
+  const reserved = await value.store.reserveCoupon(reservationInput(value, 'paid_auto_delivery:acc:ORDER-2'));
+  await assert.rejects(() => value.store.setCouponItemStatus({ adminId: value.admin.id, batchId: value.batch.id, itemId: reserved.items[0]!.itemId, status: 'consumed' }), /COUPON_ITEM_RESERVED/);
+});

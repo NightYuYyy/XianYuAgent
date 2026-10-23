@@ -50,6 +50,8 @@ export interface CouponBatchMetadata {
   specValue?: string;
   textContent?: string;
   dataContent?: string;
+  /** 批量数据是否一次性（发过即「已用」，不再轮换复用）；卡密类批次应开启。 */
+  oneTime?: boolean;
   apiConfig?: CouponApiConfig;
   imageUrls?: string[];
 }
@@ -511,6 +513,8 @@ export interface CouponItemRecord {
   status: CouponItemStatus;
   reservedUntil?: string;
   consumedAt?: string;
+  /** 用在哪：自动发货记订单号，人工取卡记 manual 或自定义备注。 */
+  usageNote?: string;
   createdAt: string;
 }
 
@@ -1657,6 +1661,10 @@ export interface Store {
   unbindCouponBatch(input: { adminId: string; batchId: string; productId: string }): Promise<CouponBindingRecord | undefined>;
   voidCouponBatch(input: { adminId: string; batchId: string }): Promise<CouponBatchRecord | undefined>;
   getCouponContent(adminId: string, itemId: string): Promise<{ batch: CouponBatchRecord; item: CouponItemRecord } | undefined>;
+  /** 人工取一张可用卡密并标记已用；没有可用的返回 undefined。 */
+  takeCouponItem(input: { adminId: string; batchId: string; note?: string }): Promise<CouponItemRecord | undefined>;
+  /** 人工把单张卡密标成已用/恢复可用；预占中的卡密抛 COUPON_ITEM_RESERVED。 */
+  setCouponItemStatus(input: { adminId: string; batchId: string; itemId: string; status: 'available' | 'consumed'; note?: string }): Promise<CouponItemRecord | undefined>;
   reserveCoupon(input: { adminId: string; accountId: string; batchIds: string[]; quantity: number; executionKey: string; purpose: CouponReservationPurpose; leaseSeconds?: number }): Promise<CouponReservationRecord>;
   getCouponReservation(input: { adminId: string; reservationId: string; executionKey?: string }): Promise<CouponReservationRecord | undefined>;
   bindDeliveryReservation(input: { adminId: string; accountId: string; orderNo: string; reservationId: string; executionKey: string }): Promise<boolean>;

@@ -1296,6 +1296,24 @@ export class PostgresStore implements Store {
     return { batch, item };
   }
 
+  async takeCouponItem(input: { adminId: string; batchId: string; note?: string }): Promise<CouponItemRecord | undefined> {
+    const batch = await this.getCouponBatch(input.adminId, input.batchId);
+    if (!batch) throw new Error('COUPON_NOT_FOUND');
+    const result = await this.pool.query(`update coupons.coupon_items set status='consumed', consumed_at=now(), reserved_until=null, usage_note=$2
+      where id=(select id from coupons.coupon_items where batch_id=$1 and status='available' order by created_at, id limit 1 for update skip locked) returning *`, [batch.id, input.note ?? 'manual']);
+    return result.rows[0] ? this.toCouponItem(result.rows[0]) : undefined;
+  }
+  async setCouponItemStatus(input: { adminId: string; batchId: string; itemId: string; status: 'available' | 'consumed'; note?: string }): Promise<CouponItemRecord | undefined> {
+    const batch = await this.getCouponBatch(input.adminId, input.batchId);
+    if (!batch) throw new Error('COUPON_NOT_FOUND');
+    const current = await this.pool.query('select * from coupons.coupon_items where id=$1 and batch_id=$2', [input.itemId, batch.id]);
+    if (!current.rows[0]) return undefined;
+    if (current.rows[0].status === 'reserved') throw new Error('COUPON_ITEM_RESERVED');
+    const result = input.status === 'consumed'
+      ? await this.pool.query("update coupons.coupon_items set status='consumed', consumed_at=now(), usage_note=$2 where id=$1 returning *", [input.itemId, input.note ?? 'manual'])
+      : await this.pool.query("update coupons.coupon_items set status='available', consumed_at=null, usage_note=null where id=$1 returning *", [input.itemId]);
+    return this.toCouponItem(result.rows[0]);
+  }
   async reserveCoupon(input: { adminId: string; accountId: string; batchIds: string[]; quantity: number; executionKey: string; purpose: CouponReservationPurpose; leaseSeconds?: number }): Promise<CouponReservationRecord> {
     const normalized = normalizeCouponReservationInput(input);
     const leaseSeconds = normalizeLeaseSeconds(input.leaseSeconds);
@@ -1413,6 +1431,10 @@ export class PostgresStore implements Store {
       const reusable = await client.query(`update coupons.coupon_items i set status='available',reserved_until=null,consumed_at=null
         where i.status='reserved' and i.id in (select ri.item_id from coupons.coupon_reservation_items ri where ri.reservation_id=$1) returning i.id`, [input.reservationId]);
       if (expectedItemCount <= 0 || (reusable.rowCount ?? 0) !== expectedItemCount) throw new Error('COUPON_RESERVATION_INCONSISTENT');
+      // 一次性批量数据（卡密）：提交即「已用」，并记下订单号；其余类型保持轮换复用。
+      await client.query(`update coupons.coupon_items i set status='consumed', consumed_at=now(), usage_note=$2
+        from coupons.coupon_batches b where b.id=i.batch_id and coalesce((b.metadata_json->>'oneTime')::boolean, false)
+          and i.id in (select ri.item_id from coupons.coupon_reservation_items ri where ri.reservation_id=$1)`, [input.reservationId, usageNoteFromExecutionKey(String(row.execution_key))]);
       await client.query("update coupons.coupon_reservations set status='committed',reason=null,finalized_at=now(),updated_at=now() where id=$1", [input.reservationId]);
       const committed = await client.query('select * from coupons.coupon_reservations where id=$1', [input.reservationId]);
       const record = await this.loadCouponReservation(client, committed.rows[0]);
@@ -2513,7 +2535,7 @@ export class PostgresStore implements Store {
     return { id: String(row.id), sequenceId: row.sequence_id === null || row.sequence_id === undefined ? undefined : String(row.sequence_id), accountId: String(row.account_id), label: row.label ? String(row.label) : undefined, purpose: String(row.purpose), metadata, assets, totalCount, availableCount: row.computed_available_count === undefined ? undefined : Number(row.computed_available_count), reservedCount: row.computed_reserved_count === undefined ? undefined : Number(row.computed_reserved_count), consumedCount: row.computed_consumed_count === undefined ? undefined : Number(row.computed_consumed_count), status: row.status as CouponBatchRecord['status'], version: Number(row.version ?? 1), createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString() };
   }
   private toCouponAsset(row: Row): CouponAssetRecord { return { id: String(row.id), batchId: String(row.batch_id ?? row.coupon_batch_id), storageKey: String(row.storage_key), mimeType: String(row.mime_type), checksum: row.checksum ? String(row.checksum) : undefined, caption: row.caption ? String(row.caption) : undefined, status: row.status as CouponAssetRecord['status'], createdAt: dateIso(row.created_at), updatedAt: dateIso(row.updated_at) }; }
-  private toCouponItem(row: Row): CouponItemRecord { return { id: String(row.id), batchId: String(row.batch_id), content: decryptCouponValue(row.content_ciphertext), status: row.status as CouponItemRecord['status'], reservedUntil: iso(row.reserved_until), consumedAt: iso(row.consumed_at), createdAt: new Date(String(row.created_at)).toISOString() }; }
+  private toCouponItem(row: Row): CouponItemRecord { return { id: String(row.id), batchId: String(row.batch_id), content: decryptCouponValue(row.content_ciphertext), status: row.status as CouponItemRecord['status'], reservedUntil: iso(row.reserved_until), consumedAt: iso(row.consumed_at), usageNote: row.usage_note ? String(row.usage_note) : undefined, createdAt: new Date(String(row.created_at)).toISOString() }; }
   private toCouponBinding(row: Row): CouponBindingRecord { return { id: String(row.id), batchId: String(row.coupon_batch_id), productId: String(row.product_id), priority: Number(row.priority ?? 0), status: row.status as CouponBindingRecord['status'], expiresAt: iso(row.expires_at), createdAt: new Date(String(row.created_at)).toISOString(), updatedAt: new Date(String(row.updated_at)).toISOString() }; }
   private toCouponReservation(row: Row, itemRows: Row[]): CouponReservationRecord {
     const batchIds = Array.isArray(row.batch_ids) ? row.batch_ids.map(String) : typeof row.batch_ids === 'string' ? (() => { try { return (JSON.parse(row.batch_ids) as unknown[]).map(String); } catch { return []; } })() : [];
@@ -2808,4 +2830,10 @@ function decryptCouponValue(value: unknown): string {
     decipher.setAuthTag(tag);
     return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
   } catch { return ''; }
+}
+
+/** 执行键形如 paid_auto_delivery:<account>:<orderNo>，取最后一段当订单号做使用备注。 */
+export function usageNoteFromExecutionKey(executionKey: string): string {
+  const tail = executionKey.split(':').pop() ?? executionKey;
+  return tail ? `order:${tail}` : executionKey;
 }

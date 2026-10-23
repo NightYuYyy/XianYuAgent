@@ -245,23 +245,60 @@ export class CouponService {
     const legacyImageUrls = (metadata.imageUrls ?? []).filter((url) => !this.couponAssets.isDataImage(url));
     const imageUrls = storedImageUrls.length > 0 ? storedImageUrls : legacyImageUrls;
     const detailMetadata = imageUrls.length > 0 ? { ...metadata, imageUrls } : metadata;
-    const listMetadata = { description: metadata.description, delaySeconds: metadata.delaySeconds, useNoLogisticsForm: metadata.useNoLogisticsForm, dockable: metadata.dockable, price: metadata.price, feePayer: metadata.feePayer, minPrice: metadata.minPrice, dockVisibility: metadata.dockVisibility, multiSpec: metadata.multiSpec, specName: metadata.specName, specValue: metadata.specValue };
+    const listMetadata = { description: metadata.description, delaySeconds: metadata.delaySeconds, useNoLogisticsForm: metadata.useNoLogisticsForm, dockable: metadata.dockable, price: metadata.price, feePayer: metadata.feePayer, minPrice: metadata.minPrice, dockVisibility: metadata.dockVisibility, multiSpec: metadata.multiSpec, specName: metadata.specName, specValue: metadata.specValue, oneTime: metadata.oneTime };
     const publicBatchId = this.publicBatchId(batch);
     const bindingViews = (batch.bindings ?? []).map((binding) => this.toBindingView(binding, publicBatchId));
-    const result: Record<string, unknown> = { batchId: publicBatchId, id: publicBatchId, accountId: batch.accountId, label: batch.label, purpose: batch.purpose, status: batch.status, version: batch.version, updatedAt: batch.updatedAt, createdAt: batch.createdAt, metadata: detail ? detailMetadata : listMetadata, contentPreview: { text: metadata.textContent ? metadata.textContent.slice(0, 140) : undefined, apiUrl: metadata.apiConfig?.url, imageUrls }, productBindings: bindingViews.filter((binding) => binding.status === 'active') };
+    const counts = couponCounts(batch);
+    const result: Record<string, unknown> = { batchId: publicBatchId, id: publicBatchId, ...counts, accountId: batch.accountId, label: batch.label, purpose: batch.purpose, status: batch.status, version: batch.version, updatedAt: batch.updatedAt, createdAt: batch.createdAt, metadata: detail ? detailMetadata : listMetadata, contentPreview: { text: metadata.textContent ? metadata.textContent.slice(0, 140) : undefined, apiUrl: metadata.apiConfig?.url, imageUrls }, productBindings: bindingViews.filter((binding) => binding.status === 'active') };
     if (detail) result.items = items.map((item) => this.toItemView(item, publicBatchId));
     if (detail) result.bindings = bindingViews;
     return result;
   }
   private publicBatchId(batch: CouponBatchRecord): string { return batch.sequenceId ?? batch.id; }
   private toBindingView(binding: CouponBindingRecord, publicBatchId?: string): Record<string, unknown> { return { id: binding.id, bindingId: binding.id, batchId: publicBatchId ?? binding.batchId, productId: binding.productId, priority: binding.priority, status: binding.status, expiresAt: binding.expiresAt, createdAt: binding.createdAt, updatedAt: binding.updatedAt }; }
-  private toItemView(item: CouponItemRecord, publicBatchId?: string): Record<string, unknown> { return { id: item.id, batchId: publicBatchId ?? item.batchId, status: item.status, reservedUntil: item.reservedUntil, consumedAt: item.consumedAt, createdAt: item.createdAt }; }
+  private toItemView(item: CouponItemRecord, publicBatchId?: string): Record<string, unknown> { return { id: item.id, batchId: publicBatchId ?? item.batchId, status: item.status, reservedUntil: item.reservedUntil, consumedAt: item.consumedAt, usageNote: item.usageNote, createdAt: item.createdAt }; }
+
+  /** 人工取一张可用卡密（标记已用）并返回明文，给手动发货用。 */
+  async takeItem(input: { adminId: string; batchId: string; note?: string; requestId: string; traceId: string }): Promise<Record<string, unknown>> {
+    try {
+      const taken = await this.store.takeCouponItem({ adminId: input.adminId, batchId: input.batchId, note: input.note?.trim() || 'manual' });
+      if (!taken) throw new ServiceError(409, 'COUPON_ITEM_UNAVAILABLE', '这个批次已经没有可用的卡密了');
+      const batch = await this.store.getCouponBatch(input.adminId, input.batchId);
+      await this.audit({ actorId: input.adminId, action: 'coupon.item.taken', targetRef: taken.id, requestId: input.requestId, traceId: input.traceId, payload: { batchId: input.batchId, note: input.note ?? 'manual' }, accountId: batch?.accountId });
+      return { item: this.toItemView(taken, batch ? this.publicBatchId(batch) : undefined), content: taken.content, batch: batch ? this.toBatchView(batch, true) : undefined };
+    } catch (error) { throw mapCouponStoreError(error); }
+  }
+
+  /** 人工改单张卡密状态：已用 ↔ 可用。 */
+  async setItemStatus(input: { adminId: string; batchId: string; itemId: string; status: string; note?: string; requestId: string; traceId: string }): Promise<Record<string, unknown>> {
+    if (input.status !== 'available' && input.status !== 'consumed') throw new ServiceError(422, 'VALIDATION_FAILED', 'status 只能是 available 或 consumed');
+    try {
+      const updated = await this.store.setCouponItemStatus({ adminId: input.adminId, batchId: input.batchId, itemId: input.itemId, status: input.status, note: input.note?.trim() || undefined });
+      if (!updated) throw new ServiceError(404, 'NOT_FOUND', 'coupon item not found');
+      const batch = await this.store.getCouponBatch(input.adminId, input.batchId);
+      await this.audit({ actorId: input.adminId, action: 'coupon.item.status_changed', targetRef: updated.id, requestId: input.requestId, traceId: input.traceId, payload: { batchId: input.batchId, status: input.status, note: input.note }, accountId: batch?.accountId });
+      return { item: this.toItemView(updated, batch ? this.publicBatchId(batch) : undefined), batch: batch ? this.toBatchView(batch, true) : undefined };
+    } catch (error) { throw mapCouponStoreError(error); }
+  }
+}
+
+/** 列表/详情都带上库存统计：有 items 时按 items 数，没有时用 store 预计算的数。 */
+function couponCounts(batch: CouponBatchRecord): { totalCount: number; availableCount: number; reservedCount: number; consumedCount: number } {
+  if (batch.items) {
+    const by = (status: string) => batch.items!.filter((item) => item.status === status).length;
+    return { totalCount: batch.items.length, availableCount: by('available'), reservedCount: by('reserved'), consumedCount: by('consumed') };
+  }
+  const totalCount = batch.totalCount ?? 0;
+  const availableCount = batch.availableCount ?? 0;
+  const reservedCount = batch.reservedCount ?? 0;
+  return { totalCount, availableCount, reservedCount, consumedCount: batch.consumedCount ?? Math.max(0, totalCount - availableCount - reservedCount) };
 }
 
 function mapCouponStoreError(error: unknown): ServiceError {
   if (error instanceof ServiceError) return error;
   const code = error instanceof Error ? error.message : String(error);
   if (code === 'COUPON_NOT_FOUND') return new ServiceError(404, 'NOT_FOUND', 'coupon batch not found');
+  if (code === 'COUPON_ITEM_RESERVED') return new ServiceError(409, 'COUPON_ITEM_RESERVED', '这张卡密正在被自动发货预占，等它完成后再改');
   if (code === 'COUPON_BATCH_VOIDED') return new ServiceError(409, 'CONFLICT', 'coupon batch is voided or closed');
   if (code === 'COUPON_ASSET_NOT_FOUND') return new ServiceError(404, 'NOT_FOUND', 'coupon image not found');
   if (code === 'COUPON_IMAGE_REFERENCE_INVALID') return new ServiceError(422, 'VALIDATION_FAILED', 'coupon image reference is invalid');

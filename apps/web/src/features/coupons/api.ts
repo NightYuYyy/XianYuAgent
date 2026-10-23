@@ -18,6 +18,11 @@ export interface CouponsApi {
   voidBatch(batchId: string): Promise<CouponMutationVM>;
   deleteBatch(batchId: string): Promise<CouponMutationVM>;
   batchDelete(batchIds: string[]): Promise<CouponMutationVM[]>;
+  /** 人工取一张可用卡密并标记已用，返回明文。 */
+  takeItem(batchId: string, note?: string): Promise<{ content: string; item: CouponItemVM; batch?: CouponBatchVM }>;
+  setItemStatus(batchId: string, itemId: string, status: 'available' | 'consumed', note?: string): Promise<{ item: CouponItemVM; batch?: CouponBatchVM }>;
+  /** 查看单张卡密明文（后端会记审计）。 */
+  revealItem(itemId: string): Promise<string>;
 }
 
 interface ApiEnvelope<T> { success: boolean; data: T | null; message?: string | null; error?: { code?: string }; }
@@ -74,8 +79,14 @@ function toBatchVM(payload: CouponPayload): CouponBatchVM {
     createdAt: payload.createdAt,
     metadata: payload.metadata,
     contentPreview: payload.contentPreview,
+    totalCount: numberOrUndefined(payload.totalCount),
+    availableCount: numberOrUndefined(payload.availableCount),
+    reservedCount: numberOrUndefined(payload.reservedCount),
+    consumedCount: numberOrUndefined(payload.consumedCount),
   };
 }
+
+function numberOrUndefined(value: unknown): number | undefined { return typeof value === 'number' && Number.isFinite(value) ? value : undefined; }
 
 function toCouponMutationVM(payload: CouponMutationPayload): CouponMutationVM {
   const batch = payload.batch ? toBatchVM(payload.batch) : undefined;
@@ -118,6 +129,21 @@ export function createCouponsApi(transport: CouponsApiTransport): CouponsApi {
     async getDetail(batchId) {
       const payload = await transport.get<CouponPayload | ApiEnvelope<CouponPayload>>(`/api/v1/coupons/batches/${encodeURIComponent(batchId)}`);
       return toBatchVM(unwrapEnvelope(payload));
+    },
+    async takeItem(batchId, note) {
+      const payload = await transport.post<{ content: string; item: CouponItemVM; batch?: CouponPayload } | ApiEnvelope<{ content: string; item: CouponItemVM; batch?: CouponPayload }>>(`/api/v1/coupons/batches/${encodeURIComponent(batchId)}/items/take`, { note }, mutationOptions(`coupons.take.${batchId}.${Date.now()}`));
+      const data = unwrapEnvelope(payload);
+      return { content: data.content, item: data.item, batch: data.batch ? toBatchVM(data.batch) : undefined };
+    },
+    async setItemStatus(batchId, itemId, status, note) {
+      const payload = await transport.post<{ item: CouponItemVM; batch?: CouponPayload } | ApiEnvelope<{ item: CouponItemVM; batch?: CouponPayload }>>(`/api/v1/coupons/batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemId)}/status`, { status, note }, mutationOptions(`coupons.item-status.${itemId}.${Date.now()}`));
+      const data = unwrapEnvelope(payload);
+      return { item: data.item, batch: data.batch ? toBatchVM(data.batch) : undefined };
+    },
+    async revealItem(itemId) {
+      const payload = await transport.get<{ content?: { body?: string } } | ApiEnvelope<{ content?: { body?: string } }>>(`/api/v1/coupons/${encodeURIComponent(itemId)}/content?purpose=preview`);
+      const data = unwrapEnvelope(payload);
+      return data.content?.body ?? '';
     },
     async createBatch(input) {
       const payload = await transport.post<CouponPayload | ApiEnvelope<CouponPayload>>('/api/v1/coupons/batches', input, mutationOptions(`coupons.create.${Date.now()}`));
@@ -193,6 +219,21 @@ export function createMockCouponsApi(seed: CouponBatchVM[] = [
       return { items: filtered.slice(start, start + pageSize), total: filtered.length, page, pageSize, totalPages: Math.max(1, Math.ceil(filtered.length / pageSize)) };
     },
     async getDetail(batchId) { const batch = batches.find((item) => item.batchId === batchId); if (!batch) throw Object.assign(new Error('BATCH_NOT_FOUND'), { status: 404 }); return { ...batch, items: batch.items?.map((item) => ({ ...item })) }; },
+    async takeItem(batchId, note) {
+      const batch = batches.find((item) => item.batchId === batchId);
+      const item = batch?.items?.find((entry) => entry.status === 'available');
+      if (!batch || !item) throw Object.assign(new Error('COUPON_ITEM_UNAVAILABLE'), { status: 409 });
+      Object.assign(item, { status: 'consumed', consumedAt: new Date().toISOString(), usageNote: note ?? 'manual' });
+      return { content: `mock-${item.id}`, item: { ...item }, batch: { ...batch } };
+    },
+    async setItemStatus(batchId, itemId, status, note) {
+      const batch = batches.find((item) => item.batchId === batchId);
+      const item = batch?.items?.find((entry) => entry.id === itemId);
+      if (!batch || !item) throw Object.assign(new Error('COUPON_ITEM_NOT_FOUND'), { status: 404 });
+      Object.assign(item, status === 'consumed' ? { status, consumedAt: new Date().toISOString(), usageNote: note ?? 'manual' } : { status, consumedAt: undefined, usageNote: undefined });
+      return { item: { ...item }, batch: { ...batch } };
+    },
+    async revealItem(itemId) { return `mock-${itemId}`; },
     async createBatch(input) {
       const now = new Date().toISOString();
       const batchId = nextBatchId();

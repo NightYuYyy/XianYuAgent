@@ -1,5 +1,5 @@
 export type CouponBatchStatus = 'draft' | 'active' | 'paused' | 'closed' | 'voided';
-export type CouponItemStatus = 'available' | 'reserved';
+export type CouponItemStatus = 'available' | 'reserved' | 'consumed';
 
 export interface CouponApiConfigVM { url: string; method: 'GET' | 'POST'; timeout?: number; headers?: string; params?: string; responseField?: string; }
 export interface CouponMetadataVM {
@@ -16,6 +16,7 @@ export interface CouponMetadataVM {
   specValue?: string;
   textContent?: string;
   dataContent?: string;
+  oneTime?: boolean;
   apiConfig?: CouponApiConfigVM;
   imageUrls?: string[];
 }
@@ -26,6 +27,8 @@ export interface CouponItemVM {
   maskedLabel?: string;
   status: CouponItemStatus;
   reservedUntil?: string;
+  consumedAt?: string;
+  usageNote?: string;
 }
 
 export interface CouponBindingVM {
@@ -51,6 +54,10 @@ export interface CouponBatchVM {
   createdAt?: string;
   metadata?: CouponMetadataVM;
   contentPreview?: { text?: string; apiUrl?: string; imageUrls?: string[] };
+  totalCount?: number;
+  availableCount?: number;
+  reservedCount?: number;
+  consumedCount?: number;
 }
 
 export interface CouponMutationVM {

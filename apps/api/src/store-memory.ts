@@ -1049,6 +1049,24 @@ export class MemoryStore implements Store {
     return { batch: { ...batch }, item: { ...item } };
   }
 
+  async takeCouponItem(input: { adminId: string; batchId: string; note?: string }): Promise<CouponItemRecord | undefined> {
+    const batch = this.findCouponBatch(input.batchId);
+    if (!batch || !(await this.hasAccountScope(input.adminId, batch.accountId))) throw new Error('COUPON_NOT_FOUND');
+    const item = [...this.couponItems.values()].filter((entry) => entry.batchId === batch.id && entry.status === 'available').sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))[0];
+    if (!item) return undefined;
+    item.status = 'consumed'; item.consumedAt = new Date().toISOString(); item.reservedUntil = undefined; item.usageNote = input.note ?? 'manual';
+    return { ...item };
+  }
+  async setCouponItemStatus(input: { adminId: string; batchId: string; itemId: string; status: 'available' | 'consumed'; note?: string }): Promise<CouponItemRecord | undefined> {
+    const batch = this.findCouponBatch(input.batchId);
+    if (!batch || !(await this.hasAccountScope(input.adminId, batch.accountId))) throw new Error('COUPON_NOT_FOUND');
+    const item = this.couponItems.get(input.itemId);
+    if (!item || item.batchId !== batch.id) return undefined;
+    if (item.status === 'reserved') throw new Error('COUPON_ITEM_RESERVED');
+    if (input.status === 'consumed') { item.status = 'consumed'; item.consumedAt = new Date().toISOString(); item.usageNote = input.note ?? 'manual'; }
+    else { item.status = 'available'; item.consumedAt = undefined; item.usageNote = undefined; }
+    return { ...item };
+  }
   async reserveCoupon(input: { adminId: string; accountId: string; batchIds: string[]; quantity: number; executionKey: string; purpose: CouponReservationPurpose; leaseSeconds?: number }): Promise<CouponReservationRecord> {
     return this.withCouponReservationLock(async () => {
       const normalized = normalizeCouponReservationInput(input);
@@ -1141,6 +1159,9 @@ export class MemoryStore implements Store {
       if (selected.some((item) => !item || item.status !== 'reserved')) throw new Error('COUPON_RESERVATION_INCONSISTENT');
       const nowIso = new Date().toISOString();
       for (const item of selected as CouponItemRecord[]) { item.status = 'available'; item.reservedUntil = undefined; item.consumedAt = undefined; }
+      for (const item of selected as CouponItemRecord[]) {
+        if (this.couponBatches.get(item.batchId)?.metadata?.oneTime) { item.status = 'consumed'; item.consumedAt = nowIso; item.usageNote = `order:${reservation.executionKey.split(':').pop() ?? reservation.executionKey}`; }
+      }
       reservation.status = 'committed';
       reservation.updatedAt = nowIso;
       reservation.finalizedAt = nowIso;

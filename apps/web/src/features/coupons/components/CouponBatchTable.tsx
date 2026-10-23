@@ -3,7 +3,7 @@ import type { CouponBatchVM } from '../types';
 
 const typeLabels: Record<CouponBatchVM['purpose'], string> = { text: '文本', data: '批量数据', api: 'API', image: '图片' };
 
-export function CouponBatchTable({ batches, selectedIds, page, pageSize, total, totalPages, sortBy, sortOrder, togglingBatchId, onSortChange, onPageChange, onSelect, onSelectAll, onEdit, onCopy, onBind, onToggle, onDelete }: { batches: CouponBatchVM[]; selectedIds: Set<string>; page: number; pageSize: number; total: number; totalPages: number; sortBy: 'createdAt'; sortOrder: 'asc' | 'desc'; togglingBatchId?: string | null; onSortChange: (sortBy: 'createdAt', sortOrder: 'asc' | 'desc') => void; onPageChange: (page: number) => void; onSelect: (batchId: string) => void; onSelectAll: () => void; onEdit: (batch: CouponBatchVM) => void; onCopy: (batch: CouponBatchVM) => void; onBind: (batchId: string) => void; onToggle: (batch: CouponBatchVM) => void; onDelete: (batchId: string) => void }) {
+export function CouponBatchTable({ batches, selectedIds, page, pageSize, total, totalPages, sortBy, sortOrder, togglingBatchId, onSortChange, onPageChange, onSelect, onSelectAll, onEdit, onCopy, onBind, onToggle, onDelete, onItems }: { batches: CouponBatchVM[]; selectedIds: Set<string>; page: number; pageSize: number; total: number; totalPages: number; sortBy: 'createdAt'; sortOrder: 'asc' | 'desc'; togglingBatchId?: string | null; onSortChange: (sortBy: 'createdAt', sortOrder: 'asc' | 'desc') => void; onPageChange: (page: number) => void; onSelect: (batchId: string) => void; onSelectAll: () => void; onEdit: (batch: CouponBatchVM) => void; onItems?: (batch: CouponBatchVM) => void; onCopy: (batch: CouponBatchVM) => void; onBind: (batchId: string) => void; onToggle: (batch: CouponBatchVM) => void; onDelete: (batchId: string) => void }) {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
   const allSelected = batches.length > 0 && batches.every((batch) => selectedIds.has(batch.batchId));
@@ -37,7 +37,7 @@ export function CouponBatchTable({ batches, selectedIds, page, pageSize, total, 
             <time className="coupons-muted">创建 {formatDate(batch.createdAt)}<br />更新 {formatDate(batch.updatedAt)}</time>
             <span className="coupons-row-actions" aria-label={`${batch.label} 操作`}>
               <button className="btn ghost btn-small coupons-action-button" type="button" aria-label="编辑" onClick={() => onEdit(batch)}>编辑</button>
-              <button className="btn ghost btn-small coupons-action-button" type="button" aria-label="关联商品" onClick={() => onBind(batch.batchId)}>关联商品</button>
+              {batch.purpose === 'data' && onItems && <button className="btn ghost btn-small coupons-action-button" type="button" aria-label="卡密" data-testid={`coupon-items-${batch.batchId}`} onClick={() => onItems(batch)}>卡密</button>}<button className="btn ghost btn-small coupons-action-button" type="button" aria-label="关联商品" onClick={() => onBind(batch.batchId)}>关联商品</button>
               <span className="coupons-more-actions" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpenMenuId(null); }}>
                 <button className="btn ghost btn-small coupons-action-button" type="button" aria-label="更多" aria-expanded={menuOpen} onClick={() => setOpenMenuId(menuOpen ? null : batch.batchId)}>更多</button>
                 {menuOpen && <span className="coupons-more-menu" role="menu">
@@ -74,7 +74,10 @@ function getPreviewText(batch: CouponBatchVM): string {
   const preview = batch.contentPreview;
   const metadata = batch.metadata;
   if (batch.purpose === 'text') return preview?.text || metadata?.textContent || '—';
-  if (batch.purpose === 'data') return metadata?.dataContent ? '已配置批量数据' : '未配置批量数据';
+  if (batch.purpose === 'data') {
+    if (typeof batch.totalCount === 'number') return batch.totalCount === 0 ? '还没有卡密' : `共 ${batch.totalCount} 张 · 可用 ${batch.availableCount ?? 0} · 已用 ${batch.consumedCount ?? 0}${batch.reservedCount ? ` · 预占 ${batch.reservedCount}` : ''}`;
+    return metadata?.dataContent ? '已配置批量数据' : '未配置批量数据';
+  }
   if (batch.purpose === 'api') return preview?.apiUrl || metadata?.apiConfig?.url || '—';
   return preview?.imageUrls?.join('、') || metadata?.imageUrls?.join('、') || '暂无图片';
 }
