@@ -197,3 +197,19 @@ test('invalid mutation inputs fail locally without touching the network', async 
     globalThis.fetch = originalFetch;
   }
 });
+
+test('readOrderDetail falls back to itemInfo.skuInfo for multi-spec orders (skuInfo fallback)', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    ret: ['SUCCESS::调用成功'],
+    data: { utArgs: { orderStatus: '待发货' }, components: [{ render: 'orderInfoVO', data: { itemInfo: { buyAmount: '1', skuInfo: '卡种:测试卡', itemId: 'ITEM-2', title: 'DT云端' }, priceInfo: { amount: { value: '1.99' } } } }] },
+  }), { status: 200, headers: { 'content-type': 'application/json' } });
+  try {
+    const result = await createClient().readOrderDetail('admin-1', 'account-1', 'ORDER-004');
+    assert.equal(result.success, true);
+    assert.equal(result.detail?.skuSpec, '卡种:测试卡');
+    assert.equal(result.detail?.amountMinor, 199);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

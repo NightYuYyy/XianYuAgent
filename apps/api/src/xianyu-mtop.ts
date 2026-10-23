@@ -755,7 +755,8 @@ function mapXianyuOrderDetail(response: Record<string, unknown> | undefined, ord
   const detail: XianyuOrderDetailSummary = {
     orderNo,
     quantity: parsePositiveInt(quantityValue),
-    skuSpec: joinSpec(firstScalar(itemInfo.specName, rootOrder?.specName), firstScalar(itemInfo.specValue, rootOrder?.specValue)),
+    // 多规格订单的规格信息实际在 itemInfo.skuInfo（格式「规格名:规格值」，19000 项目抓包确认），specName/specValue 多数情况下不存在。
+    skuSpec: joinSpec(firstScalar(itemInfo.specName, rootOrder?.specName), firstScalar(itemInfo.specValue, rootOrder?.specValue)) ?? firstScalar(itemInfo.skuInfo, itemInfo.skuText, itemInfo.sku, rootOrder?.skuInfo),
     amountMinor: parseAmountMinor(amountValue),
     orderStatus,
     paymentStatus: firstScalar(rootOrder?.paymentStatus, rootOrder?.payStatus),
