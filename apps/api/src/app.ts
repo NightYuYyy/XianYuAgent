@@ -624,7 +624,9 @@ async function markXianyuAccountFailure(store: Store, adminId: string, accountId
     const account = await store.getAccount(adminId, accountId);
     if (!account || account.status === 'disabled') return;
     const classification = classifyXianyuFailure(input);
-    if (classification.kind === 'degraded' && input.source && SOFT_FAILURE_SOURCES.has(input.source)) {
+    // 旁路查询（买家资料）被风控拦下也不算账号出事：它既不代表登录态失效，
+    // 也不该把账号翻成「需验证」；真正的验证需求由 login.token / IM 连接那条路径上报。
+    if ((classification.kind === 'degraded' || classification.kind === 'verification_required') && input.source && SOFT_FAILURE_SOURCES.has(input.source)) {
       console.warn(JSON.stringify({ component: 'xianyu-account-health', event: 'soft_failure_ignored', accountId, source: input.source, errorCode: input.errorCode }));
       return;
     }

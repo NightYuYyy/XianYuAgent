@@ -199,7 +199,7 @@ describe('xianyu IM credential refresh', () => {
     assert.equal((service as unknown as { clients: Map<string, unknown> }).clients.size, 0);
   });
 
-  it('refreshes an idle connected client through one account-scoped single-flight session refresh', async () => {
+  it('leaves a connected client alone instead of forcing a reconnect that re-triggers login.token', async () => {
     let refreshCalls = 0;
     const service = new XianyuImService({} as never, {} as never, {} as never);
     const client = {
@@ -221,7 +221,17 @@ describe('xianyu IM credential refresh', () => {
       internal.refreshActiveCredential('admin-1', 'account-1'),
     ]);
 
-    assert.equal(refreshCalls, 1);
+    assert.equal(refreshCalls, 0);
+    await service.close();
+  });
+
+  it('pauses buyer identity enrichment for the account after a validation challenge', async () => {
+    let calls = 0;
+    const mtop = { fetchChatUserInfo: async () => { calls += 1; return { success: false, accountInvalid: true, errorCode: 'ACCOUNT_VALIDATION_REQUIRED' }; } };
+    const service = new XianyuImService({} as never, mtop as never, {} as never);
+    const internal = service as unknown as { enrichConversationIdentity: (adminId: string, accountId: string, parsed: { externalConversationRef: string; buyerRef: string }) => Promise<unknown> };
+    for (let index = 0; index < 5; index += 1) await internal.enrichConversationIdentity('admin-1', 'account-1', { externalConversationRef: `conv-${index}`, buyerRef: `buyer-${index}` });
+    assert.equal(calls, 1);
     await service.close();
   });
 

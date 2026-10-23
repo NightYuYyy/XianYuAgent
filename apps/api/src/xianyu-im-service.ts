@@ -32,6 +32,8 @@ export class XianyuImService {
   private readonly conversationSide: ConversationSideResolver;
   private readonly credentialRefreshInFlight = new Map<string, Promise<void>>();
   private readonly identityCache = new Map<string, { buyerDisplayName?: string; buyerAvatarUrl?: string }>();
+  /** 买家资料查询被风控拦下后，这个账号暂停补全到何时（毫秒时间戳），避免几百个会话逐个撞墙。 */
+  private readonly identityEnrichPausedUntil = new Map<string, number>();
   private readonly inboundInboxWorker: InboundInboxWorker;
   /**
    * worker 进程只在发消息时临时建 IM 连接：发完即断，不写账号在线状态、不开心跳。
@@ -477,9 +479,9 @@ export class XianyuImService {
             await this.store.setAccountTransport({ adminId, accountId, status: transport });
             if (status === 'connected') {
               const accountWithRisk = await this.store.getAccount(adminId, accountId);
-              if (accountWithRisk?.riskEpisode) {
-                for (const source of ['im_listener', 'xianyu']) await this.store.clearAccountRisk({ adminId, accountId, episode: accountWithRisk.riskEpisode, source, startedAt: connectionAttemptStartedAt });
-              }
+              // 长连接能登上来说明 login.token 已经过了验证；把这一轮风险事件整体清掉，
+              // 否则买家资料查询等旁路接口留下的信号会让账号页一直挂着「需验证」。
+              if (accountWithRisk?.riskEpisode) await this.store.clearAccountRiskEpisode({ adminId, accountId, episode: accountWithRisk.riskEpisode });
               await this.store.clearAccountDegraded({ adminId, accountId, source: 'im_listener', startedAt: connectionAttemptStartedAt });
               this.startTransportHeartbeat(key, adminId, accountId, client);
               this.scheduleRecentMessageRecovery(adminId, accountId);
@@ -621,7 +623,9 @@ export class XianyuImService {
         await this.ensureClient(adminId, accountId);
         return;
       }
-      await client.refreshSession();
+      // 连接正常时什么都不做。以前这里每 10 分钟主动断开重连并重新调 login.token，
+      // 而 login.token 从服务器发出几乎每次都被 Baxia 拦下要滑块，等于每 10 分钟
+      // 自找一次滑块。token 失效时 socket 自己会断，走上面的 ensureClient 重连即可。
     })().finally(() => {
       if (this.credentialRefreshInFlight.get(key) === task) this.credentialRefreshInFlight.delete(key);
     });
@@ -739,9 +743,16 @@ export class XianyuImService {
       this.identityCache.set(cacheKey, { buyerDisplayName: parsed.buyerDisplayName, buyerAvatarUrl: parsed.buyerAvatarUrl });
       return parsed;
     }
+    if ((this.identityEnrichPausedUntil.get(accountId) ?? 0) > Date.now()) return parsed;
     try {
       const profile = await withTimeout(this.mtop.fetchChatUserInfo(adminId, accountId, parsed.externalConversationRef), 2_500);
       if (!profile) return parsed;
+      if (!profile.success && (profile.accountInvalid || profile.errorCode === 'ACCOUNT_VALIDATION_REQUIRED')) {
+        const pauseMs = 10 * 60_000;
+        this.identityEnrichPausedUntil.set(accountId, Date.now() + pauseMs);
+        console.warn(JSON.stringify({ component: 'xianyu-im-listener', event: 'identity_enrich_paused', adminId, accountId, errorCode: profile.errorCode, pauseMs }));
+        return parsed;
+      }
       const identity = { buyerDisplayName: profile.buyerDisplayName, buyerAvatarUrl: profile.buyerAvatarUrl };
       if (identity.buyerDisplayName || identity.buyerAvatarUrl) this.identityCache.set(cacheKey, identity);
       return { ...parsed, buyerDisplayName: parsed.buyerDisplayName ?? identity.buyerDisplayName, buyerAvatarUrl: parsed.buyerAvatarUrl ?? identity.buyerAvatarUrl };
