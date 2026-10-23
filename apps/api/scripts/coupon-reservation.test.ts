@@ -133,3 +133,24 @@ test('one-time data batch consumes items on commit and records the order, manual
   const reserved = await value.store.reserveCoupon(reservationInput(value, 'paid_auto_delivery:acc:ORDER-2'));
   await assert.rejects(() => value.store.setCouponItemStatus({ adminId: value.admin.id, batchId: value.batch.id, itemId: reserved.items[0]!.itemId, status: 'consumed' }), /COUPON_ITEM_RESERVED/);
 });
+
+test('coupon items can be edited and deleted unless reserved or already delivered', async () => {
+  const value = await fixture(2);
+  const batch = await value.store.getCouponBatch(value.admin.id, value.batch.id);
+  const [first, second] = batch!.items!;
+  const edited = await value.store.updateCouponItemContent({ adminId: value.admin.id, batchId: value.batch.id, itemId: first!.id, content: ' coupon-1-fixed ' });
+  assert.equal(edited?.content, 'coupon-1-fixed');
+  await assert.rejects(() => value.store.updateCouponItemContent({ adminId: value.admin.id, batchId: value.batch.id, itemId: first!.id, content: 'coupon-2' }), /COUPON_ITEM_DUPLICATE/);
+  await assert.rejects(() => value.store.updateCouponItemContent({ adminId: value.admin.id, batchId: value.batch.id, itemId: first!.id, content: '   ' }), /COUPON_ITEM_EMPTY/);
+  const reserved = await value.store.reserveCoupon(reservationInput(value, 'paid_auto_delivery:acc:ORDER-9'));
+  const reservedId = reserved.items[0]!.itemId;
+  await assert.rejects(() => value.store.deleteCouponItem({ adminId: value.admin.id, batchId: value.batch.id, itemId: reservedId }), /COUPON_ITEM_RESERVED/);
+  await value.store.commitCouponReservation({ adminId: value.admin.id, reservationId: reserved.reservationId, executionKey: 'paid_auto_delivery:acc:ORDER-9' });
+  await assert.rejects(() => value.store.deleteCouponItem({ adminId: value.admin.id, batchId: value.batch.id, itemId: reservedId }), /COUPON_ITEM_IN_USE/);
+  const otherId = reservedId === first!.id ? second!.id : first!.id;
+  assert.equal(await value.store.deleteCouponItem({ adminId: value.admin.id, batchId: value.batch.id, itemId: otherId }), true);
+  assert.equal(await value.store.deleteCouponItem({ adminId: value.admin.id, batchId: value.batch.id, itemId: otherId }), false);
+  const after = await value.store.getCouponBatch(value.admin.id, value.batch.id);
+  assert.equal(after?.items?.length, 1);
+  assert.equal(after?.totalCount, 1);
+});

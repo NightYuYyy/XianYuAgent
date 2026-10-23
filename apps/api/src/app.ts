@@ -1535,11 +1535,19 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
     });
     return result;
   }
-  const couponItemStatusMatch = ctx.path.match(/^\/api\/v1\/coupons\/batches\/([^/]+)\/items\/([^/]+)\/status$/);
-  if (couponItemStatusMatch && ctx.method === 'POST') {
-    const batchId = decodeURIComponent(couponItemStatusMatch[1]);
-    const itemId = decodeURIComponent(couponItemStatusMatch[2]);
-    return mutation(runtime, ctx, authContext, batchId, async () => success(ctx, await coupons.setItemStatus({ adminId: authContext.admin.id, batchId, itemId, status: String(ctx.body.status ?? ''), note: optionalString(ctx.body.note), requestId: ctx.requestId, traceId: ctx.traceId })));
+  const couponItemMatch = ctx.path.match(/^\/api\/v1\/coupons\/batches\/([^/]+)\/items\/([^/]+?)(\/status)?$/);
+  if (couponItemMatch && couponItemMatch[2] !== 'import' && couponItemMatch[2] !== 'take') {
+    const batchId = decodeURIComponent(couponItemMatch[1]);
+    const itemId = decodeURIComponent(couponItemMatch[2]);
+    if (couponItemMatch[3] && ctx.method === 'POST') {
+      return mutation(runtime, ctx, authContext, batchId, async () => success(ctx, await coupons.setItemStatus({ adminId: authContext.admin.id, batchId, itemId, status: String(ctx.body.status ?? ''), note: optionalString(ctx.body.note), requestId: ctx.requestId, traceId: ctx.traceId })));
+    }
+    if (!couponItemMatch[3] && ctx.method === 'PATCH') {
+      return mutation(runtime, ctx, authContext, batchId, async () => success(ctx, await coupons.updateItem({ adminId: authContext.admin.id, batchId, itemId, content: String(ctx.body.content ?? ''), requestId: ctx.requestId, traceId: ctx.traceId })));
+    }
+    if (!couponItemMatch[3] && ctx.method === 'DELETE') {
+      return mutation(runtime, ctx, authContext, batchId, async () => success(ctx, await coupons.deleteItem({ adminId: authContext.admin.id, batchId, itemId, requestId: ctx.requestId, traceId: ctx.traceId })));
+    }
   }
   const couponBatchMatch = ctx.path.match(/^\/api\/v1\/coupons\/batches\/([^/]+)(?:\/(items\/import|items\/take|bind|unbind|void))?$/);
   if (couponBatchMatch) {

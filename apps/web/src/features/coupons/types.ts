@@ -66,6 +66,8 @@ export interface CouponMutationVM {
   batchId: string;
   version: number;
   results?: Array<{ itemId?: string; ok: boolean; errorCode?: string }>;
+  importedCount?: number;
+  rejected?: Array<{ index: number; code: string; message: string }>;
 }
 
 export interface CouponBatchFilters {

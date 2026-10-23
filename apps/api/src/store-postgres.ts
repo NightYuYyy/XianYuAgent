@@ -1314,6 +1314,36 @@ export class PostgresStore implements Store {
       : await this.pool.query("update coupons.coupon_items set status='available', consumed_at=null, usage_note=null where id=$1 returning *", [input.itemId]);
     return this.toCouponItem(result.rows[0]);
   }
+  async updateCouponItemContent(input: { adminId: string; batchId: string; itemId: string; content: string }): Promise<CouponItemRecord | undefined> {
+    const batch = await this.getCouponBatch(input.adminId, input.batchId);
+    if (!batch) throw new Error('COUPON_NOT_FOUND');
+    const content = input.content.trim();
+    if (!content) throw new Error('COUPON_ITEM_EMPTY');
+    const rows = await this.pool.query('select * from coupons.coupon_items where batch_id=$1', [batch.id]);
+    const current = rows.rows.find((row) => String(row.id) === input.itemId);
+    if (!current) return undefined;
+    if (current.status === 'reserved') throw new Error('COUPON_ITEM_RESERVED');
+    if (rows.rows.some((row) => String(row.id) !== input.itemId && decryptCouponValue(row.content_ciphertext) === content)) throw new Error('COUPON_ITEM_DUPLICATE');
+    const result = await this.pool.query('update coupons.coupon_items set content_ciphertext=$2 where id=$1 returning *', [input.itemId, encryptCouponValue(content)]);
+    await this.pool.query('update coupons.coupon_batches set version=version+1,updated_at=now() where id=$1', [batch.id]);
+    return this.toCouponItem(result.rows[0]);
+  }
+  async deleteCouponItem(input: { adminId: string; batchId: string; itemId: string }): Promise<boolean> {
+    const batch = await this.getCouponBatch(input.adminId, input.batchId);
+    if (!batch) throw new Error('COUPON_NOT_FOUND');
+    const client = await this.pool.connect();
+    try {
+      await client.query('begin');
+      const current = await client.query('select status from coupons.coupon_items where id=$1 and batch_id=$2 for update', [input.itemId, batch.id]);
+      if (!current.rows[0]) { await client.query('rollback'); return false; }
+      if (current.rows[0].status === 'reserved') throw new Error('COUPON_ITEM_RESERVED');
+      try { await client.query('delete from coupons.coupon_items where id=$1', [input.itemId]); }
+      catch (error) { if ((error as { code?: string }).code === '23503') throw new Error('COUPON_ITEM_IN_USE'); throw error; }
+      await client.query('update coupons.coupon_batches set total_count=(select count(*) from coupons.coupon_items where batch_id=$1),version=version+1,updated_at=now() where id=$1', [batch.id]);
+      await client.query('commit');
+      return true;
+    } catch (error) { await client.query('rollback').catch(() => undefined); throw error; } finally { client.release(); }
+  }
   async reserveCoupon(input: { adminId: string; accountId: string; batchIds: string[]; quantity: number; executionKey: string; purpose: CouponReservationPurpose; leaseSeconds?: number }): Promise<CouponReservationRecord> {
     const normalized = normalizeCouponReservationInput(input);
     const leaseSeconds = normalizeLeaseSeconds(input.leaseSeconds);

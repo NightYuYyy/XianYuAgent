@@ -13,5 +13,6 @@ describe('CouponItemsModal', () => {
     expect(html).toContain('DT云端-测试卡');
     expect(html).toContain('取一张并标记已用');
     expect(html).toContain('用途 / 时间');
+    expect(html).toContain('新增卡密');
   });
 });

@@ -271,6 +271,28 @@ export class CouponService {
     } catch (error) { throw mapCouponStoreError(error); }
   }
 
+  /** 改单张卡密内容（录错了改一下）。 */
+  async updateItem(input: { adminId: string; batchId: string; itemId: string; content: string; requestId: string; traceId: string }): Promise<Record<string, unknown>> {
+    try {
+      const updated = await this.store.updateCouponItemContent({ adminId: input.adminId, batchId: input.batchId, itemId: input.itemId, content: input.content });
+      if (!updated) throw new ServiceError(404, 'NOT_FOUND', 'coupon item not found');
+      const batch = await this.store.getCouponBatch(input.adminId, input.batchId);
+      await this.audit({ actorId: input.adminId, action: 'coupon.item.updated', targetRef: updated.id, requestId: input.requestId, traceId: input.traceId, payload: { batchId: input.batchId }, accountId: batch?.accountId });
+      return { item: this.toItemView(updated, batch ? this.publicBatchId(batch) : undefined, true), batch: batch ? this.toBatchView(batch, true) : undefined };
+    } catch (error) { throw mapCouponStoreError(error); }
+  }
+
+  /** 删单张卡密。 */
+  async deleteItem(input: { adminId: string; batchId: string; itemId: string; requestId: string; traceId: string }): Promise<Record<string, unknown>> {
+    try {
+      const deleted = await this.store.deleteCouponItem({ adminId: input.adminId, batchId: input.batchId, itemId: input.itemId });
+      if (!deleted) throw new ServiceError(404, 'NOT_FOUND', 'coupon item not found');
+      const batch = await this.store.getCouponBatch(input.adminId, input.batchId);
+      await this.audit({ actorId: input.adminId, action: 'coupon.item.deleted', targetRef: input.itemId, requestId: input.requestId, traceId: input.traceId, payload: { batchId: input.batchId }, accountId: batch?.accountId });
+      return { deleted: true, batch: batch ? this.toBatchView(batch, true) : undefined };
+    } catch (error) { throw mapCouponStoreError(error); }
+  }
+
   /** 人工改单张卡密状态：已用 ↔ 可用。 */
   async setItemStatus(input: { adminId: string; batchId: string; itemId: string; status: string; note?: string; requestId: string; traceId: string }): Promise<Record<string, unknown>> {
     if (input.status !== 'available' && input.status !== 'consumed') throw new ServiceError(422, 'VALIDATION_FAILED', 'status 只能是 available 或 consumed');
@@ -301,6 +323,9 @@ function mapCouponStoreError(error: unknown): ServiceError {
   const code = error instanceof Error ? error.message : String(error);
   if (code === 'COUPON_NOT_FOUND') return new ServiceError(404, 'NOT_FOUND', 'coupon batch not found');
   if (code === 'COUPON_ITEM_RESERVED') return new ServiceError(409, 'COUPON_ITEM_RESERVED', '这张卡密正在被自动发货预占，等它完成后再改');
+  if (code === 'COUPON_ITEM_DUPLICATE') return new ServiceError(409, 'CONFLICT', '这个批次里已经有一样的卡密了');
+  if (code === 'COUPON_ITEM_EMPTY') return new ServiceError(422, 'VALIDATION_FAILED', '卡密内容不能为空');
+  if (code === 'COUPON_ITEM_IN_USE') return new ServiceError(409, 'CONFLICT', '这张卡密已经发给过订单，不能删除；需要的话标记为已用即可');
   if (code === 'COUPON_BATCH_VOIDED') return new ServiceError(409, 'CONFLICT', 'coupon batch is voided or closed');
   if (code === 'COUPON_ASSET_NOT_FOUND') return new ServiceError(404, 'NOT_FOUND', 'coupon image not found');
   if (code === 'COUPON_IMAGE_REFERENCE_INVALID') return new ServiceError(422, 'VALIDATION_FAILED', 'coupon image reference is invalid');

@@ -1665,6 +1665,10 @@ export interface Store {
   takeCouponItem(input: { adminId: string; batchId: string; note?: string }): Promise<CouponItemRecord | undefined>;
   /** 人工把单张卡密标成已用/恢复可用；预占中的卡密抛 COUPON_ITEM_RESERVED。 */
   setCouponItemStatus(input: { adminId: string; batchId: string; itemId: string; status: 'available' | 'consumed'; note?: string }): Promise<CouponItemRecord | undefined>;
+  /** 改单张卡密内容；预占中抛 COUPON_ITEM_RESERVED，批次内重复抛 COUPON_ITEM_DUPLICATE。 */
+  updateCouponItemContent(input: { adminId: string; batchId: string; itemId: string; content: string }): Promise<CouponItemRecord | undefined>;
+  /** 删单张卡密；预占中抛 COUPON_ITEM_RESERVED，已被订单发货记录引用抛 COUPON_ITEM_IN_USE。返回是否删掉。 */
+  deleteCouponItem(input: { adminId: string; batchId: string; itemId: string }): Promise<boolean>;
   reserveCoupon(input: { adminId: string; accountId: string; batchIds: string[]; quantity: number; executionKey: string; purpose: CouponReservationPurpose; leaseSeconds?: number }): Promise<CouponReservationRecord>;
   getCouponReservation(input: { adminId: string; reservationId: string; executionKey?: string }): Promise<CouponReservationRecord | undefined>;
   bindDeliveryReservation(input: { adminId: string; accountId: string; orderNo: string; reservationId: string; executionKey: string }): Promise<boolean>;

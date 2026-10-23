@@ -1067,6 +1067,31 @@ export class MemoryStore implements Store {
     else { item.status = 'available'; item.consumedAt = undefined; item.usageNote = undefined; }
     return { ...item };
   }
+  async updateCouponItemContent(input: { adminId: string; batchId: string; itemId: string; content: string }): Promise<CouponItemRecord | undefined> {
+    const batch = this.findCouponBatch(input.batchId);
+    if (!batch || !(await this.hasAccountScope(input.adminId, batch.accountId))) throw new Error('COUPON_NOT_FOUND');
+    const content = input.content.trim();
+    if (!content) throw new Error('COUPON_ITEM_EMPTY');
+    const item = this.couponItems.get(input.itemId);
+    if (!item || item.batchId !== batch.id) return undefined;
+    if (item.status === 'reserved') throw new Error('COUPON_ITEM_RESERVED');
+    if ([...this.couponItems.values()].some((entry) => entry.batchId === batch.id && entry.id !== item.id && entry.content === content)) throw new Error('COUPON_ITEM_DUPLICATE');
+    item.content = content;
+    batch.version += 1; batch.updatedAt = new Date().toISOString();
+    return { ...item };
+  }
+  async deleteCouponItem(input: { adminId: string; batchId: string; itemId: string }): Promise<boolean> {
+    const batch = this.findCouponBatch(input.batchId);
+    if (!batch || !(await this.hasAccountScope(input.adminId, batch.accountId))) throw new Error('COUPON_NOT_FOUND');
+    const item = this.couponItems.get(input.itemId);
+    if (!item || item.batchId !== batch.id) return false;
+    if (item.status === 'reserved') throw new Error('COUPON_ITEM_RESERVED');
+    if ([...this.couponReservations.values()].some((reservation) => reservation.items.some((entry) => entry.itemId === item.id))) throw new Error('COUPON_ITEM_IN_USE');
+    this.couponItems.delete(item.id);
+    batch.totalCount = [...this.couponItems.values()].filter((entry) => entry.batchId === batch.id).length;
+    batch.version += 1; batch.updatedAt = new Date().toISOString();
+    return true;
+  }
   async reserveCoupon(input: { adminId: string; accountId: string; batchIds: string[]; quantity: number; executionKey: string; purpose: CouponReservationPurpose; leaseSeconds?: number }): Promise<CouponReservationRecord> {
     return this.withCouponReservationLock(async () => {
       const normalized = normalizeCouponReservationInput(input);

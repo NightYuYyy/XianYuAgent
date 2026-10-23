@@ -23,6 +23,8 @@ export interface CouponsApi {
   setItemStatus(batchId: string, itemId: string, status: 'available' | 'consumed', note?: string): Promise<{ item: CouponItemVM; batch?: CouponBatchVM }>;
   /** 查看单张卡密明文（后端会记审计）。 */
   revealItem(itemId: string): Promise<string>;
+  updateItem(batchId: string, itemId: string, content: string): Promise<{ item: CouponItemVM; batch?: CouponBatchVM }>;
+  deleteItem(batchId: string, itemId: string): Promise<{ deleted: boolean; batch?: CouponBatchVM }>;
 }
 
 interface ApiEnvelope<T> { success: boolean; data: T | null; message?: string | null; error?: { code?: string }; }
@@ -94,6 +96,8 @@ function toCouponMutationVM(payload: CouponMutationPayload): CouponMutationVM {
     batchId: String(payload.batchId ?? batch?.batchId ?? ''),
     version: Number(payload.version ?? batch?.version ?? 0),
     results: payload.results,
+    importedCount: payload.importedCount,
+    rejected: payload.rejected,
   };
 }
 
@@ -139,6 +143,16 @@ export function createCouponsApi(transport: CouponsApiTransport): CouponsApi {
       const payload = await transport.post<{ item: CouponItemVM; batch?: CouponPayload } | ApiEnvelope<{ item: CouponItemVM; batch?: CouponPayload }>>(`/api/v1/coupons/batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemId)}/status`, { status, note }, mutationOptions(`coupons.item-status.${itemId}.${Date.now()}`));
       const data = unwrapEnvelope(payload);
       return { item: data.item, batch: data.batch ? toBatchVM(data.batch) : undefined };
+    },
+    async updateItem(batchId, itemId, content) {
+      const payload = await transport.patch<{ item: CouponItemVM; batch?: CouponPayload } | ApiEnvelope<{ item: CouponItemVM; batch?: CouponPayload }>>(`/api/v1/coupons/batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemId)}`, { content }, mutationOptions(`coupons.item-update.${itemId}.${Date.now()}`));
+      const data = unwrapEnvelope(payload);
+      return { item: data.item, batch: data.batch ? toBatchVM(data.batch) : undefined };
+    },
+    async deleteItem(batchId, itemId) {
+      const payload = await transport.delete<{ deleted: boolean; batch?: CouponPayload } | ApiEnvelope<{ deleted: boolean; batch?: CouponPayload }>>(`/api/v1/coupons/batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemId)}`, mutationOptions(`coupons.item-delete.${itemId}.${Date.now()}`));
+      const data = unwrapEnvelope(payload);
+      return { deleted: Boolean(data.deleted), batch: data.batch ? toBatchVM(data.batch) : undefined };
     },
     async revealItem(itemId) {
       const payload = await transport.get<{ content?: { body?: string } } | ApiEnvelope<{ content?: { body?: string } }>>(`/api/v1/coupons/${encodeURIComponent(itemId)}/content?purpose=preview`);
@@ -234,6 +248,18 @@ export function createMockCouponsApi(seed: CouponBatchVM[] = [
       return { item: { ...item }, batch: { ...batch } };
     },
     async revealItem(itemId) { return `mock-${itemId}`; },
+    async updateItem(batchId, itemId, content) {
+      const batch = batches.find((item) => item.batchId === batchId);
+      const item = batch?.items?.find((entry) => entry.id === itemId);
+      if (!batch || !item) throw Object.assign(new Error('COUPON_ITEM_NOT_FOUND'), { status: 404 });
+      return { item: { ...item, content: content.trim() }, batch: { ...batch } };
+    },
+    async deleteItem(batchId, itemId) {
+      const batch = batches.find((item) => item.batchId === batchId);
+      if (!batch) throw Object.assign(new Error('BATCH_NOT_FOUND'), { status: 404 });
+      batch.items = (batch.items ?? []).filter((entry) => entry.id !== itemId);
+      return { deleted: true, batch: { ...batch } };
+    },
     async createBatch(input) {
       const now = new Date().toISOString();
       const batchId = nextBatchId();
