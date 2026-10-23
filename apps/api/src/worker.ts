@@ -11,6 +11,8 @@ import { AutoRelistWorker } from './auto-relist.js';
 
 const config = loadConfig();
 const runtime = createApp(config);
+// worker 只在发货/自动回复时临时连 IM，发完即断；常驻监听归 api 进程，避免同 deviceId 互踢。
+runtime.xianyuIm.setEphemeralClients(true);
 const workerId = `inbound-inbox:${process.pid}:${crypto.randomUUID()}`;
 const quarantineCleanupEnabled = process.env.INBOUND_QUARANTINE_CLEANUP_ENABLED?.trim().toLowerCase() !== 'false';
 const quarantineCleanupPollMs = positiveNumber(process.env.INBOUND_QUARANTINE_CLEANUP_POLL_MS, 5 * 60 * 1_000);

@@ -33,6 +33,11 @@ export class XianyuImService {
   private readonly credentialRefreshInFlight = new Map<string, Promise<void>>();
   private readonly identityCache = new Map<string, { buyerDisplayName?: string; buyerAvatarUrl?: string }>();
   private readonly inboundInboxWorker: InboundInboxWorker;
+  /**
+   * worker 进程只在发消息时临时建 IM 连接：发完即断，不写账号在线状态、不开心跳。
+   * 否则它和 api 常驻监听用同一个 deviceId，闲鱼会把两条连接互相踢掉，陷入每几秒断一次的循环。
+   */
+  private ephemeralClients = false;
   private inboundInboxWakeInFlight?: Promise<void>;
   private inboundInboxWakeRequested = false;
 
@@ -140,7 +145,11 @@ export class XianyuImService {
   }
 
   async sendExternalText(adminId: string, accountId: string, conversationId: string, text: string, requestId: string, traceId: string): Promise<{ externalMessageRef?: string }> {
-    return this.store.withOutboundConversationLock(accountId, conversationId, () => this.sendExternalTextLocked(adminId, accountId, conversationId, text, requestId, traceId));
+    try {
+      return await this.store.withOutboundConversationLock(accountId, conversationId, () => this.sendExternalTextLocked(adminId, accountId, conversationId, text, requestId, traceId));
+    } finally {
+      if (this.ephemeralClients) await this.resetClient(adminId, accountId).catch(() => undefined);
+    }
   }
 
   private async sendExternalTextLocked(adminId: string, accountId: string, conversationId: string, text: string, requestId: string, traceId: string): Promise<{ externalMessageRef?: string }> {
@@ -205,6 +214,14 @@ export class XianyuImService {
   }
 
   async sendImage(adminId: string, accountId: string, conversationId: string, file: { filename: string; contentType: string; data: Buffer }, requestId: string, traceId: string): Promise<unknown> {
+    try {
+      return await this.sendImageInternal(adminId, accountId, conversationId, file, requestId, traceId);
+    } finally {
+      if (this.ephemeralClients) await this.resetClient(adminId, accountId).catch(() => undefined);
+    }
+  }
+
+  private async sendImageInternal(adminId: string, accountId: string, conversationId: string, file: { filename: string; contentType: string; data: Buffer }, requestId: string, traceId: string): Promise<unknown> {
     if (!file.data?.length) throw new ServiceError(422, 'VALIDATION_FAILED', 'image is required');
     if (!file.contentType.startsWith('image/')) throw new ServiceError(422, 'VALIDATION_FAILED', 'only image files are supported');
     if (file.data.length > 10 * 1024 * 1024) throw new ServiceError(413, 'PAYLOAD_TOO_LARGE', 'image must be 10MB or smaller');
@@ -391,6 +408,11 @@ export class XianyuImService {
     return undefined;
   }
 
+  /** 见 ephemeralClients 字段说明；worker 进程启动时调用。 */
+  setEphemeralClients(enabled: boolean): void {
+    this.ephemeralClients = enabled;
+  }
+
   async resetClient(adminId: string, accountId: string): Promise<void> {
     const key = `${adminId}:${accountId}`;
     const client = this.clients.get(key);
@@ -449,6 +471,7 @@ export class XianyuImService {
           },
           onStatusChange: async (status) => {
             if (status === 'connecting' || status === 'reconnecting') connectionAttemptStartedAt = new Date().toISOString();
+            if (this.ephemeralClients) return;
             const transport = status === 'connected' ? 'connected' : status === 'connecting' || status === 'reconnecting' ? 'connecting' : status === 'failed' ? 'failed' : 'disconnected';
             if (transport !== 'connected') this.stopTransportHeartbeat(key);
             await this.store.setAccountTransport({ adminId, accountId, status: transport });
@@ -462,7 +485,7 @@ export class XianyuImService {
               this.scheduleRecentMessageRecovery(adminId, accountId);
             }
           },
-          onFailure: async (error) => { await this.markAccountFailure(adminId, accountId, error, 'im_listener'); },
+          onFailure: async (error) => { await this.markAccountFailure(adminId, accountId, error, this.ephemeralClients ? 'im' : 'im_listener'); },
           onEvent: async (event) => {
             await this.handleExternalEvent(adminId, event, { deferAutoReply: true });
             // The dedicated worker remains the durable primary path. Wake a
