@@ -583,6 +583,8 @@ test('Pi runtime queues confirmation continuation while the previous round is st
     while (Date.now() < deadline && (await store.getRun(admin.id, created.run.id))?.run.status !== 'succeeded') await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal((await store.getRun(admin.id, created.run.id))?.run.status, 'succeeded');
     assert.equal(rounds, 2);
+    const streamIds = (await store.listRunEvents(admin.id, created.run.id, 0)).filter((event) => event.eventType === 'stream.started').map((event) => String(event.payload.streamId));
+    assert.equal(new Set(streamIds).size, streamIds.length, `stream ids must stay unique across the confirmation resume: ${streamIds.join(',')}`);
   } finally {
     releaseClosing();
     runtime.stop();

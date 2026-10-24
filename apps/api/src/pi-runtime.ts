@@ -870,6 +870,7 @@ export class PiRuntimeAdapter implements WorkspaceRuntime {
     const skillPrompt = this.options.skillManager ? await this.options.skillManager.buildSystemPrompt(input.adminId ?? input.run.requestedBy) : '';
     const messages = buildWorkspaceModelMessages(input.history ?? [], input.run.instruction, skillPrompt, input.attachments);
     const priorEvents = await this.store.listRunEvents(input.adminId ?? input.run.requestedBy, input.run.id, 0);
+    const priorStreamCount = priorEvents.filter((event) => event.eventType === 'stream.started').length;
     const replayableResults = completedReplayableResults(priorEvents);
     let executionPlan: WorkspaceExecutionPlan | undefined = restoreWorkspaceExecutionPlan(priorEvents);
     if (!executionPlan && workspacePlanContractUnavailable(priorEvents)) {
@@ -969,7 +970,10 @@ export class PiRuntimeAdapter implements WorkspaceRuntime {
       if (this.stopped || signal.aborted) return;
       const planCompletion = strictPlanExecution ? workspacePlanCompletionStatus(executionPlan, this.options.planPolicy) : undefined;
       const finalAnswerRound = forceFinalAnswer || Boolean(planCompletion?.complete);
-      const streamId = `${input.run.id}:stream:${round + 1}`;
+      // Unique across resumptions of the same run (after a confirmation or a
+      // reconnect the loop restarts at round 0); reusing ids made the UI merge
+      // every resumption's round-1 narration into one paragraph.
+      const streamId = `${input.run.id}:stream:${priorStreamCount + round + 1}`;
       const assistantMessageId = `${streamId}:assistant`;
       let assistant = '';
       if (executionPlan) upsertWorkspacePlanMessage(messages, createWorkspacePlanMessage(executionPlan, cachedReplayableEvidence(replayableResults)));
