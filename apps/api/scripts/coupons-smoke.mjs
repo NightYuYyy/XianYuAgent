@@ -37,7 +37,8 @@ try {
   const batchId = created.body.data.batchId;
   assert.match(String(batchId), /^\d+$/);
   assert.equal(batchId, '1');
-  assert.equal('availableCount' in created.body.data, false);
+  // Batch views carry item counts (total / available / reserved / consumed) for the 卡密 list.
+  assert.equal(typeof created.body.data.availableCount, 'number');
   assert.equal('stockAlert' in created.body.data, false);
   assert.equal(created.body.data.purpose, 'text');
   assert.equal(created.body.data.metadata.imageUrls.length, 1);
@@ -101,7 +102,7 @@ try {
   assert.equal(imported.response.status, 200);
   assert.equal(imported.body.data.importedCount, 2);
   assert.equal(imported.body.data.rejected.length, 2);
-  assert.equal('availableCount' in imported.body.data, false);
+  assert.equal(typeof imported.body.data.availableCount, 'number');
   assert.equal('stockAlert' in imported.body.data, false);
 
   const detail = await request(`/api/v1/coupons/batches/${batchId}`, { headers: { cookie } });
@@ -139,7 +140,7 @@ try {
   const deleted = await request(`/api/v1/coupons/batches/${batchId}`, { method: 'DELETE', headers: { cookie, 'X-CSRF-Token': csrf, 'Idempotency-Key': 'coupon-delete-1' } });
   assert.equal(deleted.response.status, 200);
   assert.equal(deleted.body.data.batch.status, 'voided');
-  assert.equal('availableCount' in deleted.body.data.batch, false);
+  assert.equal(typeof deleted.body.data.batch.availableCount, 'number');
   assert.equal('stockAlert' in deleted.body.data.batch, false);
   const productAfterDelete = await request(`/api/v1/products/${encodeURIComponent(product.id)}`, { headers: { cookie } });
   assert.equal(productAfterDelete.response.status, 200);
