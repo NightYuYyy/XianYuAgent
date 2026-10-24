@@ -38,6 +38,14 @@ import {
 export const DEFAULT_PI_BASE_URL = 'https://api.openai.com/v1';
 export const DEFAULT_PI_MODEL = 'gpt-4o-mini';
 export const DEFAULT_PI_TIMEOUT_MS = 30_000;
+/**
+ * Upper bound on how long a streamed call may go without its first SSE event
+ * before we give up on streaming for that round and retry it non-streamed.
+ * Some OpenAI-compatible relays accept a streamed request that carries
+ * function_call_output items and then never emit a byte, while the same
+ * request non-streamed succeeds.
+ */
+export const STREAM_FIRST_EVENT_TIMEOUT_MS = 20_000;
 export const DEFAULT_PI_PROVIDER = 'openai';
 export const DEFAULT_PI_WIRE_API: ModelWireApi = 'responses';
 /** Workspace Agent has its own loop budget; it must not reuse buyer Auto-Reply settings. */
@@ -227,6 +235,10 @@ export class OpenAICompatibleModelClient implements ModelClient {
   private readonly probeTimeoutMs: number;
   readonly supportsWebSearch: boolean;
   readonly supportsStructuredOutput: boolean;
+  /** Set once a streamed tool-result round stalled; later tool-result rounds go non-streamed directly. */
+  private toolResultStreamingBroken = false;
+
+  get modelName(): string { return this.options.model; }
 
   constructor(private readonly options: OpenAICompatibleModelClientOptions) {
     if (!options.apiKey.trim()) throw new Error('PI_RUNTIME_API_KEY_REQUIRED');
@@ -377,15 +389,43 @@ export class OpenAICompatibleModelClient implements ModelClient {
     }
   }
 
+  /** Non-streamed request surfaced through stream handlers, used when streaming is unusable. */
+  private async completeThroughHandlers(input: ModelCompletionRequest, handlers: ModelStreamHandlers): Promise<ModelCompletionResult> {
+    const result = await this.complete(input);
+    if (result.content) await handlers.onTextDelta?.(result.content);
+    for (const call of result.toolCalls ?? []) await handlers.onToolCall?.(call);
+    await handlers.onDone?.(result);
+    return result;
+  }
+
   async stream(input: ModelCompletionRequest, handlers: ModelStreamHandlers = {}): Promise<ModelCompletionResult> {
+    const hasToolResults = input.messages.some((message) => message.role === 'tool');
+    if (hasToolResults && this.toolResultStreamingBroken) return this.completeThroughHandlers(input, handlers);
     const controller = new AbortController();
     const transportTimeoutMs = requestTimeoutMs(input, this.timeoutMs);
     const timeout = setTimeout(() => controller.abort('provider_timeout'), transportTimeoutMs);
+    // Stall watchdog: cleared by the first SSE event. Leaves at least ~60% of
+    // the budget for the non-streamed retry.
+    const stallMs = Math.min(STREAM_FIRST_EVENT_TIMEOUT_MS, Math.max(5_000, Math.floor(transportTimeoutMs * 0.4)));
+    const stallTimer = stallMs < transportTimeoutMs ? setTimeout(() => controller.abort('stream_stall'), stallMs) : undefined;
     const onAbort = () => controller.abort(input.signal?.reason ?? 'external_abort');
     if (input.signal?.aborted) controller.abort(input.signal.reason ?? 'external_abort');
     else input.signal?.addEventListener('abort', onAbort, { once: true });
 
+    // One diagnostic line per streamed model call: request size, time to
+    // headers / first event, and which SSE events arrived. Without it a
+    // provider stall is indistinguishable from a slow model.
+    const diag = { startedAt: Date.now(), requestBytes: 0, inputItems: 0, toolCount: input.tools?.length ?? 0, headersMs: -1, firstEventMs: -1, lastEventMs: -1, lastEventType: '', events: {} as Record<string, number> };
+    const logDiag = (outcome: string, extra: Record<string, unknown> = {}) => {
+      console.info(JSON.stringify({ component: 'model-stream', event: 'model_stream_call', outcome, model: this.options.model, wireApi: this.wireApi, totalMs: Date.now() - diag.startedAt, timeoutMs: transportTimeoutMs, requestBytes: diag.requestBytes, inputItems: diag.inputItems, toolCount: diag.toolCount, headersMs: diag.headersMs, firstEventMs: diag.firstEventMs, lastEventMs: diag.lastEventMs, lastEventType: diag.lastEventType, events: diag.events, ...extra }));
+    };
+
     try {
+      const requestBody = JSON.stringify(this.wireApi === 'responses'
+          ? { ...toResponsesRequestBody(this.options.model, input, input.reasoningEffort ?? this.options.reasoningEffort, this.responsesProvider), stream: true }
+          : { ...toChatCompletionsRequestBody(this.options.model, input, input.reasoningEffort ?? this.options.reasoningEffort), stream: true });
+      diag.requestBytes = Buffer.byteLength(requestBody);
+      diag.inputItems = input.messages.length;
       const response = await this.fetchImpl(this.endpoint, {
         method: 'POST',
         headers: {
@@ -393,15 +433,15 @@ export class OpenAICompatibleModelClient implements ModelClient {
           authorization: `Bearer ${this.options.apiKey}`,
           'content-type': 'application/json',
         },
-        body: JSON.stringify(this.wireApi === 'responses'
-          ? { ...toResponsesRequestBody(this.options.model, input, input.reasoningEffort ?? this.options.reasoningEffort, this.responsesProvider), stream: true }
-          : { ...toChatCompletionsRequestBody(this.options.model, input, input.reasoningEffort ?? this.options.reasoningEffort), stream: true }),
+        body: requestBody,
         signal: controller.signal,
       });
+      diag.headersMs = Date.now() - diag.startedAt;
       if (!response.ok) throw new PiModelClientError('MODEL_HTTP_ERROR', `model provider returned HTTP ${response.status}`, response.status, retryAfterMs(response));
 
       const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
       if (!contentType.includes('text/event-stream') || !response.body) {
+        if (stallTimer) clearTimeout(stallTimer);
         let payload: unknown;
         try { payload = await response.json(); } catch { throw new PiModelClientError('MODEL_INVALID_RESPONSE', 'model provider returned invalid JSON'); }
         if (this.wireApi === 'responses') assertResponsesPayloadAccepted(payload);
@@ -415,14 +455,30 @@ export class OpenAICompatibleModelClient implements ModelClient {
 
       const state = createStreamState(this.options.model);
       await consumeSse(response.body, async (eventType, payload) => {
+        const elapsed = Date.now() - diag.startedAt;
+        if (diag.firstEventMs < 0) { diag.firstEventMs = elapsed; if (stallTimer) clearTimeout(stallTimer); }
+        diag.lastEventMs = elapsed;
+        const type = eventType ?? (isRecord(payload) && typeof payload.type === 'string' ? payload.type : 'data');
+        diag.lastEventType = type;
+        diag.events[type] = (diag.events[type] ?? 0) + 1;
         if (this.wireApi === 'responses') await handleResponsesStreamEvent(eventType, payload, state, handlers);
         else await handleChatStreamEvent(eventType, payload, state, handlers);
       });
       const result = finalizeStreamState(state, this.options.model, this.wireApi === 'responses');
+      logDiag(result.content || result.toolCalls?.length ? 'completed' : 'empty', { toolCalls: result.toolCalls?.length ?? 0, contentChars: result.content?.length ?? 0 });
       if (!result.content && !result.toolCalls?.length) throw new PiModelClientError('MODEL_INVALID_RESPONSE', 'model provider returned empty content');
       await handlers.onDone?.(result);
       return result;
     } catch (error) {
+      const stalled = controller.signal.aborted && controller.signal.reason === 'stream_stall' && !input.signal?.aborted;
+      if (!(error instanceof PiModelClientError && error.code === 'MODEL_INVALID_RESPONSE')) logDiag(stalled ? 'stalled' : 'failed', { abortReason: controller.signal.aborted ? String(controller.signal.reason) : undefined, error: error instanceof Error ? error.message.slice(0, 160) : String(error) });
+      if (stalled) {
+        if (hasToolResults) this.toolResultStreamingBroken = true;
+        console.warn(JSON.stringify({ component: 'model-stream', event: 'stream_stall_fallback', model: this.options.model, stallMs, hasToolResults }));
+        clearTimeout(timeout);
+        input.signal?.removeEventListener('abort', onAbort);
+        return this.completeThroughHandlers(input, handlers);
+      }
       if (error instanceof PiModelClientError) throw error;
       if (controller.signal.aborted) {
         const reason = normalizeAbortReason(controller.signal.reason);
@@ -433,6 +489,7 @@ export class OpenAICompatibleModelClient implements ModelClient {
       throw new PiModelClientError('MODEL_NETWORK_ERROR', 'model provider request failed');
     } finally {
       clearTimeout(timeout);
+      if (stallTimer) clearTimeout(stallTimer);
       input.signal?.removeEventListener('abort', onAbort);
     }
   }
@@ -892,7 +949,7 @@ export class PiRuntimeAdapter implements WorkspaceRuntime {
         await this.emit(input.run.id, 'context.compacted', { round: round + 1, status: 'succeeded', method: compacted.method, beforeChars: compacted.beforeChars, afterChars: compacted.afterChars, summary: '已压缩上下文并保留任务目标及关键结果' });
         await this.persistMessage({ adminId: input.adminId, sessionId, runId: input.run.id, messageType: 'reasoning_summary', content: redactSensitiveText(compacted.summary, this.options.redactSecrets), summary: '上下文摘要' });
       }
-      await this.emit(input.run.id, 'stream.started', { streamId, round: round + 1, model: this.options.model, status: 'running' });
+      await this.emit(input.run.id, 'stream.started', { streamId, round: round + 1, model: activeModelName(modelClient) ?? this.options.model, status: 'running' });
       await this.emit(input.run.id, 'workspace.execution.summary', { streamId, messageType: 'reasoning_summary', summary: round === 0 ? '分析任务' : '评估工具结果', content: round === 0 ? '正在核对任务目标与已有结果。' : '已读取上一轮工具结果，正在确定下一步。', status: 'running' });
       let surfacedToolCallCount = 0;
       // A strict contract plan advances one durable step at a time.  Even if
@@ -1679,6 +1736,12 @@ function extractDeltaText(value: unknown): string {
 function requestTimeoutMs(input: ModelCompletionRequest, providerTimeoutMs: number): number {
   if (Number.isFinite(input.deadlineAt)) return Math.max(1, Math.trunc((input.deadlineAt as number) - Date.now()));
   return providerTimeoutMs;
+}
+
+function activeModelName(client: unknown): string | undefined {
+  const record = client as { activeModelName?: unknown; modelName?: unknown } | undefined;
+  const name = record?.activeModelName ?? record?.modelName;
+  return typeof name === 'string' && name.trim() ? name : undefined;
 }
 
 function normalizeAbortReason(reason: unknown): 'agent_deadline' | 'provider_timeout' | 'external_abort' | 'other' {

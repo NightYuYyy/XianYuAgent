@@ -260,6 +260,14 @@ export class ModelClientService implements ModelClient {
     } finally { scoped.dispose(); }
   }
 
+  /** Model name of the provider the next request would go to (for run labels). */
+  get activeModelName(): string | undefined {
+    const role = this.chooseRole();
+    const client = role ? this.clientFor(role) : undefined;
+    const name = (client as { modelName?: unknown } | undefined)?.modelName;
+    return typeof name === 'string' ? name : undefined;
+  }
+
   private chooseRole(): ModelProviderRole | undefined {
     const ordered: ModelProviderRole[] = this.mode === 'manual_backup' ? ['backup', 'primary'] : ['primary', 'backup'];
     for (const role of ordered) if (this.clientFor(role) && this.isClosed(role)) return role;

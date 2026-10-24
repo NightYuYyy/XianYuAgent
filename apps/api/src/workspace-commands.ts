@@ -390,7 +390,7 @@ export class WorkspaceCommandOrchestrator {
         return { kind: 'products', title: '商品详情', summary: `已读取商品 ${product.id}`, content: `商品 ${product.title} · 状态 ${product.status} · 价格 ${formatMoney(product.priceMinor)} · 配置版本 v${product.configVersion}`, data: { product: safeProduct(product) } };
       }
       const accountScopedBrowse = /(?:当前账号|本账号|这个账号).*(?:商品|产品)|(?:商品|产品).*(?:当前账号|本账号|这个账号)/i.test(normalized);
-      const query = { accountId: input.accountId, keyword: accountScopedBrowse ? undefined : fields.keyword ?? extractKeyword(normalized, ['查询商品', '查看商品', '列出商品', '商品列表']), status: normalizeProductStatus(fields.status ?? extractStatus(normalized)), page: toOptionalInt(fields.page) ?? 1, pageSize: Math.min(100, toOptionalInt(fields.pageSize) ?? 20), sortBy: 'updatedAt' as const, sortOrder: 'desc' as const };
+      const query = { accountId: input.accountId, keyword: accountScopedBrowse ? undefined : fields.keyword ?? extractProductKeyword(normalized), status: normalizeProductStatus(fields.status ?? extractStatus(normalized)) ?? productStatusFromText(normalized), page: toOptionalInt(fields.page) ?? 1, pageSize: Math.min(100, toOptionalInt(fields.pageSize) ?? 20), sortBy: 'updatedAt' as const, sortOrder: 'desc' as const };
       if (typeof (this.deps.products as unknown as { list?: unknown }).list !== 'function') return executeNativeWorkspaceRead({ store: this.deps.store, adminId: input.adminId, accountId: input.accountId, instruction: normalized });
       const result = await this.deps.products.list(input.adminId, query);
       return productListResult(result.items, result.total);
@@ -722,6 +722,28 @@ function extractProductTitle(input: string): string | undefined {
   return value || undefined;
 }
 function extractKeyword(input: string, prefixes: string[]): string | undefined { const stripped = prefixes.reduce((value, prefix) => value.replace(new RegExp(prefix, 'i'), ''), input).replace(/(?:关键词|关键字|keyword)\s*[:：]?\s*/i, '').trim(); return stripped && !/^(商品|订单|列表|查询|查看|列出|搜索|查找|匹配|状态|详情)$/i.test(stripped) ? stripped : undefined; }
+/**
+ * Pull a product search keyword out of a natural-language instruction. Only
+ * an explicit keyword (关键词：xx / quoted text) or a short leftover noun
+ * counts; a whole sentence such as「查询当前账号的所有在售商品，列出标题和价格」
+ * is a browse request, not a title filter, and must not become the keyword.
+ */
+export function extractProductKeyword(input: string): string | undefined {
+  const explicit = input.match(/(?:关键词|关键字|keyword)\s*[:：]?\s*([^\s，,。；;]+)/i)?.[1] ?? input.match(/[「“"『]([^」”"』]{1,30})[」”"』]/)?.[1];
+  if (explicit?.trim()) return explicit.trim();
+  const filler = /(请|帮我|我|你|帮忙|麻烦|一下|查询|查看|列出|列表|搜索|查找|匹配|显示|给我|看看|当前|登录|登陆|闲鱼|账号|店铺|我的|我们|所有|全部|每个|每一个|在售|已发布|上架|下架|草稿|商品|产品|宝贝|的|和|及|以及|与|标题|价格|名称|状态|信息|详情|情况|有哪些|哪些|多少|数量)/g;
+  const leftover = input.replace(filler, '').replace(/[\s，,。.!！?？、；;：:]/g, '');
+  if (!leftover || leftover.length < 2 || leftover.length > 15) return undefined;
+  return leftover;
+}
+
+function productStatusFromText(input: string): ProductRecord['status'] | undefined {
+  if (/(在售|已发布|上架中|出售中)/.test(input)) return 'published';
+  if (/草稿/.test(input)) return 'draft';
+  if (/发布失败/.test(input)) return 'failed';
+  return undefined;
+}
+
 function extractStatus(input: string): string | undefined { return input.match(/(?:状态|status)\s*[:：]?\s*([\w-]+)/i)?.[1]; }
 function extractStatusToken(input: string, tokens: string[]): string | undefined { return tokens.find((token) => input.includes(token)); }
 function normalizeProductStatus(value?: string): ProductRecord['status'] | undefined { return value && ['draft', 'ready', 'publishing', 'published', 'failed', 'archived'].includes(value) ? value as ProductRecord['status'] : undefined; }
