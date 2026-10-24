@@ -553,7 +553,10 @@ export class XianyuMtopClient {
     if (cookieSnapshot && !cookieHeadersMatch(cookieSnapshot, cookieHeader)) cookieSnapshot = [];
     const dataValue = JSON.stringify(data);
     let lastError = 'MTOP_REQUEST_FAILED';
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    // 4 attempts: a token rotation can take two round trips (server deletes the
+    // stale _m_h5_tk, then issues a fresh one on the empty-token request).
+    const maxAttempts = 4;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const isSellerRequest = isSellerApi(api);
       const isSellerOrders = api === SOLD_ORDERS_API;
       const documentUrl = requestOptions.referer ?? (isSellerRequest ? SELLER_ORDER_MANAGE_REFERER : 'https://www.goofish.com/im');
@@ -571,7 +574,12 @@ export class XianyuMtopClient {
       const signingCookieHeader = useSnapshot ? snapshotSigningCookieHeader : cookieHeader;
       const requestCookieHeader = useSnapshot ? snapshotRequestCookieHeader : cookieHeader;
       const token = (useSnapshot ? snapshotToken : cookieValue(cookieHeader, '_m_h5_tk')).split('_', 1)[0] ?? '';
-      if (!token) {
+      // A missing _m_h5_tk is not proof the login is gone: MTOP routinely
+      // deletes the stale token in one response and issues a fresh one when
+      // the next request is signed with an empty token (what the browser SDK
+      // does). Only give up locally once every attempt is used.
+      const tokenMissing = !token;
+      if (tokenMissing && attempt === maxAttempts - 1) {
         const result = { success: false, accountInvalid: true, errorCode: 'MTOP_TOKEN_MISSING', message: 'credential does not contain _m_h5_tk', cookieHeader };
         await this.reportFailure({ adminId, accountId, api, ...result });
         return result;
@@ -634,7 +642,9 @@ export class XianyuMtopClient {
         if (isTokenExpired(retMessage)) {
           lastError = retMessage;
           if (setCookies.length > 0) continue;
-          const result = { success: false, accountInvalid: true, errorCode: 'MTOP_TOKEN_EXPIRED', message: retMessage || 'mtop token expired', response: payload, cookieHeader };
+          const result = tokenMissing
+            ? { success: false, accountInvalid: true, errorCode: 'MTOP_TOKEN_MISSING', message: 'credential does not contain _m_h5_tk and MTOP did not issue one', response: payload, cookieHeader }
+            : { success: false, accountInvalid: true, errorCode: 'MTOP_TOKEN_EXPIRED', message: retMessage || 'mtop token expired', response: payload, cookieHeader };
           await this.reportFailure({ adminId, accountId, api, ...result });
           return result;
         }
@@ -854,9 +864,26 @@ function mergeCookies(cookieHeader: string, setCookies: string[]): string {
   for (const raw of setCookies) {
     const first = raw.split(';', 1)[0] ?? '';
     const index = first.indexOf('=');
-    if (index > 0) values.set(first.slice(0, index).trim(), first.slice(index + 1).trim());
+    if (index <= 0) continue;
+    const name = first.slice(0, index).trim();
+    const value = first.slice(index + 1).trim();
+    // A Set-Cookie with an empty value, Max-Age<=0 or a past Expires is a
+    // deletion. Drop the cookie instead of persisting `name=` into the header.
+    if (!value || isCookieDeletion(raw)) values.delete(name);
+    else values.set(name, value);
   }
   return [...values.entries()].map(([key, value]) => `${key}=${value}`).join('; ');
+}
+
+function isCookieDeletion(raw: string): boolean {
+  for (const attribute of raw.split(';').slice(1)) {
+    const [rawKey, ...rest] = attribute.split('=');
+    const key = rawKey?.trim().toLowerCase();
+    const value = rest.join('=').trim();
+    if (key === 'max-age' && Number(value) <= 0) return true;
+    if (key === 'expires') { const at = Date.parse(value); if (Number.isFinite(at) && at <= Date.now()) return true; }
+  }
+  return false;
 }
 
 function getSetCookies(headers: Headers): string[] { return setCookieValues(headers); }

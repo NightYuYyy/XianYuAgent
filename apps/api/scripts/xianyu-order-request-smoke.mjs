@@ -6,10 +6,18 @@ let captured;
 let savedCookie;
 let savedMetadata;
 let responseMode = 'success';
+const rotateCalls = [];
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input));
   const body = new URLSearchParams(String(init.body ?? ''));
   captured = { url, headers: init.headers, payload: JSON.parse(body.get('data')) };
+  if (responseMode === 'tokenEmpty') return new Response(JSON.stringify({ ret: ['FAIL_SYS_TOKEN_EMPTY::令牌为空'] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  if (responseMode === 'rotate') {
+    rotateCalls.push(captured.url.searchParams.get('sign'));
+    const cookieSent = String(init.headers?.cookie ?? '');
+    if (cookieSent.includes('_m_h5_tk=stale')) return new Response(JSON.stringify({ ret: ['FAIL_SYS_TOKEN_EXOIRED::令牌过期'] }), { status: 200, headers: { 'content-type': 'application/json', 'set-cookie': '_m_h5_tk=; Domain=.goofish.com; Path=/; Max-Age=0' } });
+    if (!cookieSent.includes('_m_h5_tk=')) return new Response(JSON.stringify({ ret: ['FAIL_SYS_TOKEN_EMPTY::令牌为空'] }), { status: 200, headers: { 'content-type': 'application/json', 'set-cookie': '_m_h5_tk=fresh_123; Domain=.goofish.com; Path=/' } });
+  }
   if (responseMode === 'permission') return new Response(JSON.stringify({ ret: ['PERMISSION_EXCEPTION::无权限访问'], data: { errCode: 'PERMISSION_EXCEPTION', errMsg: '无权限访问' } }), { status: 200, headers: { 'content-type': 'application/json' } });
   return new Response(JSON.stringify({
     ret: ['SUCCESS::调用成功'],
@@ -79,8 +87,24 @@ try {
     loadCredential: async () => ({ cookieHeader: 'unb=legacy', metadata: { cookies_refresh_snapshot: '[]' } }),
     saveCookie: async () => {},
   });
+  responseMode = 'tokenEmpty';
   const emptySnapshot = await emptySnapshotClient.fetchOrdersAll('admin-1', 'account-1', 30, 1);
   assert.equal(emptySnapshot.pages[0].errorCode, 'MTOP_TOKEN_MISSING');
+
+  // Regression: MTOP deletes the stale _m_h5_tk, then issues a fresh one on the
+  // empty-token request. That must not be treated as a lost login.
+  responseMode = 'rotate';
+  let rotatedCookie = '';
+  const rotateClient = new XianyuMtopClient({
+    loadCredential: async () => ({ cookieHeader: 'unb=seller-1; cookie2=abc; _m_h5_tk=stale_1' }),
+    saveCookie: async (_adminId, _accountId, cookieHeader) => { rotatedCookie = cookieHeader; },
+  });
+  const rotated = await rotateClient.fetchOrdersAll('admin-1', 'account-1', 30, 1);
+  assert.equal(rotated.pages[0].errorCode, undefined, JSON.stringify(rotated.pages[0]));
+  assert.equal(rotateCalls.length, 3);
+  assert.match(rotatedCookie, /_m_h5_tk=fresh_123/);
+  assert.doesNotMatch(rotatedCookie, /_m_h5_tk=(;|$)/);
+  assert.match(rotatedCookie, /cookie2=abc/);
   console.log('xianyu order request smoke passed');
 } finally {
   globalThis.fetch = originalFetch;
