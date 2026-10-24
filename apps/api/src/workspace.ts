@@ -9,6 +9,11 @@ import type { WorkspaceCommandOrchestrator } from './workspace-commands.js';
 import type { ModelClient, PiRuntimeAttachment } from './pi-runtime.js';
 import { buildWorkspaceCheckpoint } from './workspace-context.js';
 
+const CONFIRMATION_EXPIRED_MESSAGE = '确认已超过有效期，本次操作没有执行。需要的话请重新发起。';
+function isConfirmationExpired(confirmation: { status: string; expiresAt: string }): boolean {
+  if (confirmation.status === 'expired') return true;
+  return confirmation.status === 'active' && Number.isFinite(Date.parse(confirmation.expiresAt)) && Date.parse(confirmation.expiresAt) <= Date.now();
+}
 const terminalRunStatuses = new Set<RunStatus>(['succeeded', 'partially_succeeded', 'failed', 'cancelled', 'expired']);
 const runTransitions: Record<RunStatus, RunStatus[]> = {
   queued: ['running', 'cancelled', 'expired'],
@@ -399,7 +404,33 @@ export class WorkspaceService {
   async getRun(input: { adminId: string; runId: string }): Promise<WorkspaceRunView> {
     const bundle = await this.store.getRun(input.adminId, input.runId);
     if (!bundle) throw new ServiceError(404, 'NOT_FOUND', 'run not found');
+    // A run whose confirmation timed out would otherwise sit in
+    // waiting_confirmation forever; close it the moment anyone looks at it.
+    if (bundle.run.status === 'waiting_confirmation') {
+      const confirmation = await this.store.getWorkspaceConfirmation(input.adminId, input.runId);
+      if (confirmation && isConfirmationExpired(confirmation)) {
+        await this.expireRunForConfirmation(input.adminId, bundle, confirmation);
+        const latest = await this.store.getRun(input.adminId, input.runId);
+        if (latest) return this.toRunView(latest.run, latest.steps);
+      }
+    }
     return this.toRunView(bundle.run, bundle.steps);
+  }
+
+  /** Close a run whose write confirmation timed out: confirmation, step and run all end as expired. */
+  private async expireRunForConfirmation(adminId: string, bundle: { run: RunRecord; steps: StepRecord[] }, confirmation: WorkspaceConfirmationRecord): Promise<void> {
+    if (confirmation.status === 'active') {
+      await this.store.transitionWorkspaceConfirmation({ adminId, confirmationId: confirmation.id, expectedVersion: confirmation.version, status: 'expired', actorId: adminId });
+    }
+    const finishedAt = new Date().toISOString();
+    const summary = CONFIRMATION_EXPIRED_MESSAGE;
+    const run = await this.store.updateRun(bundle.run.id, { status: 'expired', finishedAt, resultSummary: summary, errorCode: 'CONFIRMATION_EXPIRED' });
+    if (!run) return;
+    const step = bundle.steps.find((item) => item.id === confirmation.stepId);
+    if (step && !terminalStepStatuses.has(step.status)) await this.store.updateRunStep(step.id, { status: 'cancelled', finishedAt, outputSummary: summary, errorCode: 'CONFIRMATION_EXPIRED' });
+    await this.store.appendRunEvent({ runId: bundle.run.id, eventType: 'workspace.confirmation.expired', payload: { confirmationId: confirmation.id, status: 'expired' } });
+    await this.appendMessage({ adminId, sessionId: bundle.run.sessionId, runId: bundle.run.id, type: 'final_answer', content: summary, summary });
+    await this.store.appendRunEvent({ runId: bundle.run.id, eventType: 'run.expired', payload: { status: 'expired', resultSummary: summary, messageType: 'final_answer', content: summary } });
   }
 
   async cancelActiveRun(input: { adminId: string; runId: string; requestId: string; traceId: string }): Promise<WorkspaceRunView> {
@@ -451,10 +482,15 @@ export class WorkspaceService {
   async confirmRun(input: { adminId: string; runId: string; expectedVersion: number; requestId: string; traceId: string }): Promise<{ run: WorkspaceRunView; confirmation: WorkspaceConfirmationView; outbox: WorkspaceOutboxView }> {
     const bundle = await this.store.getRun(input.adminId, input.runId);
     if (!bundle) throw new ServiceError(404, 'NOT_FOUND', 'run not found');
-    if (bundle.run.status !== 'waiting_confirmation') throw new ServiceError(409, 'CONFLICT', 'run is not waiting for confirmation');
+    if (bundle.run.status === 'expired') throw new ServiceError(409, 'CONFIRMATION_EXPIRED', CONFIRMATION_EXPIRED_MESSAGE, { status: 'expired' });
+    if (bundle.run.status !== 'waiting_confirmation') throw new ServiceError(409, 'CONFLICT', '这次任务已经结束，不能再确认。', { status: bundle.run.status });
     const current = await this.store.getWorkspaceConfirmation(input.adminId, input.runId);
     if (!current) throw new ServiceError(404, 'NOT_FOUND', 'confirmation not found');
-    if (current.status !== 'active') throw new ServiceError(409, 'CONFLICT', 'confirmation is no longer active', { status: current.status });
+    if (isConfirmationExpired(current)) {
+      await this.expireRunForConfirmation(input.adminId, bundle, current);
+      throw new ServiceError(409, 'CONFIRMATION_EXPIRED', CONFIRMATION_EXPIRED_MESSAGE, { status: 'expired' });
+    }
+    if (current.status !== 'active') throw new ServiceError(409, 'CONFLICT', current.status === 'cancelled' ? '这个确认已被取消，操作没有执行。' : current.status === 'confirmed' ? '这个确认已经处理过了。' : '这个确认已失效，操作没有执行。', { status: current.status });
     if (current.action === 'agent_settings_update') {
       if (!this.agentSettings) throw new ServiceError(500, 'WORKSPACE_STORE_ERROR', 'agent settings service unavailable');
       const expectedVersion = Number(current.manifest.expectedVersion ?? 0);

@@ -452,7 +452,14 @@ export function useWorkspaceController(options: { api?: WorkspaceApi; accountId?
       runRef.current = result.run;
       setState((previous) => ({ ...previous, run: result.run, confirmation: result.confirmation, outbox: [result.outbox], actionSubmitting: false, sessions: previous.sessions.map((session) => session.id === result.run.sessionId ? { ...session, runId: result.run.runId, runStatus: result.run.status } : session) }));
       return result;
-    } catch (error) { const normalized = normalizeError(error); setState((previous) => ({ ...previous, actionSubmitting: false, error: normalized.message })); return null; }
+    } catch (error) {
+      const normalized = normalizeError(error);
+      // e.g. the confirmation expired: pull the closed run so the card does not stay stuck.
+      const refreshed = await api.getRun(currentRun.runId).catch(() => undefined);
+      if (refreshed) runRef.current = refreshed;
+      setState((previous) => ({ ...previous, ...(refreshed ? { run: refreshed } : {}), actionSubmitting: false, error: normalized.message }));
+      return null;
+    }
     finally { actionInFlightRef.current = false; }
   }, [api]);
 

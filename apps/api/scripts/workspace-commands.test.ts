@@ -625,3 +625,34 @@ test('structured read tools take typed arguments instead of a free-text instruct
 
   await assert.rejects(() => commands.executeModelTool('workspace_get_product', {}, input), /productId is required/);
 });
+
+test('an expired confirmation closes the run instead of leaving it stuck', async () => {
+  const store = new MemoryStore();
+  const admin = await store.createAdmin({ email: 'workspace-confirm-expired@example.com', passwordHash: 'hash', displayName: 'Expired Confirm' });
+  const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'seller-expired', displayName: 'Expired' });
+  const batch = await store.createCouponBatch({ adminId: admin.id, accountId: account.id, label: 'Batch', purpose: 'text', metadata: {} });
+  const session = await store.createAgentSession({ adminId: admin.id, accountId: account.id, title: 'Expired' });
+  const created = await store.createRun({ adminId: admin.id, accountId: account.id, sessionId: session.id, instruction: `启用卡券 ${batch.id}` });
+  let updateCalls = 0;
+  const commands = orchestrator({ store, coupons: { update: async () => { updateCalls += 1; return { status: 'active', batchId: batch.id }; }, bind: async () => ({}), unbind: async () => ({}), void: async () => ({}), get: async () => ({ batchId: batch.id, status: 'paused', metadata: {} }) } });
+  const runtime = new InProcessAgentRuntime(store, commands);
+  const service = new WorkspaceService(store, runtime, async () => 'audit', undefined, undefined, commands);
+  runtime.enqueue({ adminId: admin.id, sessionId: session.id, run: created.run, steps: created.steps });
+  const deadline = Date.now() + 2_000;
+  let confirmation;
+  while (Date.now() < deadline) {
+    confirmation = await store.getWorkspaceConfirmation(admin.id, created.run.id);
+    if (confirmation?.status === 'active') break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(confirmation);
+  // Simulate the 10-minute window having passed.
+  (store as unknown as { workspaceConfirmations: Map<string, { expiresAt: string }> }).workspaceConfirmations.get(confirmation!.id)!.expiresAt = new Date(Date.now() - 1_000).toISOString();
+  await assert.rejects(
+    () => service.confirmRun({ adminId: admin.id, runId: created.run.id, expectedVersion: confirmation!.version, requestId: 'req-expired', traceId: 'trace-expired' }),
+    (error: { code?: string; message?: string }) => error.code === 'CONFIRMATION_EXPIRED' && /有效期/.test(error.message ?? ''),
+  );
+  assert.equal(updateCalls, 0, 'nothing is written after expiry');
+  const run = await service.getRun({ adminId: admin.id, runId: created.run.id });
+  assert.equal(run.status, 'expired');
+});
