@@ -237,6 +237,8 @@ export class OpenAICompatibleModelClient implements ModelClient {
   readonly supportsStructuredOutput: boolean;
   /** Set once a streamed tool-result round stalled; later tool-result rounds go non-streamed directly. */
   private toolResultStreamingBroken = false;
+  /** Set once even a plain (no tool result) streamed round stalled; every later call goes non-streamed. */
+  private streamingBroken = false;
 
   get modelName(): string { return this.options.model; }
 
@@ -400,7 +402,7 @@ export class OpenAICompatibleModelClient implements ModelClient {
 
   async stream(input: ModelCompletionRequest, handlers: ModelStreamHandlers = {}): Promise<ModelCompletionResult> {
     const hasToolResults = input.messages.some((message) => message.role === 'tool');
-    if (hasToolResults && this.toolResultStreamingBroken) return this.completeThroughHandlers(input, handlers);
+    if (this.streamingBroken || (hasToolResults && this.toolResultStreamingBroken)) return this.completeThroughHandlers(input, handlers);
     const controller = new AbortController();
     const transportTimeoutMs = requestTimeoutMs(input, this.timeoutMs);
     const timeout = setTimeout(() => controller.abort('provider_timeout'), transportTimeoutMs);
@@ -474,6 +476,7 @@ export class OpenAICompatibleModelClient implements ModelClient {
       if (!(error instanceof PiModelClientError && error.code === 'MODEL_INVALID_RESPONSE')) logDiag(stalled ? 'stalled' : 'failed', { abortReason: controller.signal.aborted ? String(controller.signal.reason) : undefined, error: error instanceof Error ? error.message.slice(0, 160) : String(error) });
       if (stalled) {
         if (hasToolResults) this.toolResultStreamingBroken = true;
+        else this.streamingBroken = true;
         console.warn(JSON.stringify({ component: 'model-stream', event: 'stream_stall_fallback', model: this.options.model, stallMs, hasToolResults }));
         clearTimeout(timeout);
         input.signal?.removeEventListener('abort', onAbort);

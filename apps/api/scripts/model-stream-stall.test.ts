@@ -40,6 +40,22 @@ describe('streamed tool-result rounds on a stalling relay', () => {
   });
 });
 
+describe('plain streamed rounds on a stalling relay', () => {
+  it('stops streaming entirely after a plain round stalls', async () => {
+    const calls: boolean[] = [];
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { stream?: boolean };
+      calls.push(Boolean(body.stream));
+      if (body.stream) return new Response(new ReadableStream<Uint8Array>({ start(controller) { init.signal?.addEventListener('abort', () => controller.error(new Error('aborted'))); } }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      return new Response(JSON.stringify(completedPayload('好的')), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+    const client = new OpenAICompatibleModelClient({ apiKey: 'k', baseUrl: 'https://relay.example/v1', model: 'relay-model', wireApi: 'responses', timeoutMs: 12_000, fetchImpl });
+    await client.stream({ messages: [{ role: 'user', content: '你好' }] }, {});
+    await client.stream({ messages: [{ role: 'user', content: '再来' }] }, {});
+    assert.deepEqual(calls, [true, false, false]);
+  });
+});
+
 describe('extractProductKeyword', () => {
   it('ignores browse sentences and keeps real keywords', () => {
     assert.equal(extractProductKeyword('查询当前登录闲鱼账号的所有在售商品，列出每个商品的标题和价格。'), undefined);
