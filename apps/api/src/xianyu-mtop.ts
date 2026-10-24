@@ -191,6 +191,13 @@ export class XianyuMtopClient {
       await this.reportUploadSuccess(adminId, accountId, api, startedAt);
       return firstAttempt;
     }
+    if (firstAttempt.errorCode === 'IMAGE_UPLOAD_FAILED') {
+      // Network-level failure (timeout / reset) on the upload host. It says
+      // nothing about the account itself, so log it without marking the
+      // account degraded.
+      console.warn(JSON.stringify({ component: 'xianyu-mtop', event: 'image_upload_network_failure', adminId, accountId, bytes: data.length, message: firstAttempt.message?.slice(0, 160) }));
+      return firstAttempt;
+    }
     if (firstAttempt.errorCode !== 'SESSION_EXPIRED') {
       await this.reportFailure({ adminId, accountId, api, ...firstAttempt });
       return firstAttempt;
@@ -250,7 +257,7 @@ export class XianyuMtopClient {
           cookie: requestCookieHeader,
         },
         body: form,
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(uploadTimeoutMs(data.length, this.timeoutMs)),
       });
       const setCookies = getSetCookies(response.headers);
       if (cookieSnapshot) {
@@ -884,6 +891,16 @@ function isCookieDeletion(raw: string): boolean {
     if (key === 'expires') { const at = Date.parse(value); if (Number.isFinite(at) && at <= Date.now()) return true; }
   }
   return false;
+}
+
+/**
+ * The server uploads to a mainland host over a slow cross-border link
+ * (~15-20 KB/s measured), so a fixed 30s budget fails for any photo over
+ * ~500 KB. Scale the budget with the payload: base timeout + 1s per 12 KB,
+ * capped at 5 minutes (nginx in front allows 600s).
+ */
+export function uploadTimeoutMs(bytes: number, baseMs: number): number {
+  return Math.min(300_000, Math.max(baseMs, baseMs + Math.ceil(bytes / 12_000) * 1000));
 }
 
 function getSetCookies(headers: Headers): string[] { return setCookieValues(headers); }

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { XianyuMtopClient } from '../dist/xianyu-mtop.js';
+import { XianyuMtopClient, uploadTimeoutMs } from '../dist/xianyu-mtop.js';
 
 const originalFetch = globalThis.fetch;
 const capturedRequests = [];
@@ -97,3 +97,8 @@ try {
 } finally {
   globalThis.fetch = originalFetch;
 }
+
+assert.equal(uploadTimeoutMs(10_000, 30_000), 31_000);
+assert.equal(uploadTimeoutMs(1_500_000, 30_000), 155_000);
+assert.equal(uploadTimeoutMs(50_000_000, 30_000), 300_000);
+console.log('xianyu upload timeout budget passed');

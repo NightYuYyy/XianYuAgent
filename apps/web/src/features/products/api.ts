@@ -1,4 +1,5 @@
 import type { ProductAssetVM, ProductCouponVM, ProductDraftInput, ProductDraftPatch, ProductFilters, ProductPublishMultiSpecMeta, ProductSkuVM, ProductStatus, ProductSyncResultVM, ProductVM, ProductsPageVM, XianyuEditDetailVM, XianyuEditRequest, XianyuItemDetailVM, XianyuItemImageVM, XianyuItemSellerVM } from './types';
+import { compressImageForUpload } from './image-compress';
 import type { ProductPostageMode, ProductPublishSpecOverride, ProductPublishSpecPreview, PublishAttachment } from './product-publish';
 
 export interface ProductsApiTransport {
@@ -449,7 +450,7 @@ export function createProductsApi(transport: ProductsApiTransport): ProductsApi 
       if (input.quantity !== undefined) form.set('quantity', String(input.quantity));
       if (input.skus?.length) form.set('skus', JSON.stringify(input.skus));
       if (input.keepImageUrls !== undefined) form.set('keepImageUrls', JSON.stringify(input.keepImageUrls));
-      for (const file of input.newImages ?? []) form.append('images', file, file.name);
+      for (const original of input.newImages ?? []) { const file = await compressImageForUpload(original); form.append('images', file, file.name); }
       const payload = await post<{ product: ProductPayload; changed: string[] } | ApiEnvelope<{ product: ProductPayload; changed: string[] }>>(`/api/v1/products/${encodeURIComponent(productId)}/xianyu-edit`, form, { headers: { 'Idempotency-Key': options.idempotencyKey ?? idempotencyKey('product-xianyu-edit') } });
       const result = unwrapEnvelope(payload);
       return { product: toProductVM(result.product), changed: result.changed ?? [] };
@@ -532,7 +533,7 @@ export function createProductsApi(transport: ProductsApiTransport): ProductsApi 
       }
       form.set('specOverrides', input.specOverrides?.length ? JSON.stringify(input.specOverrides) : '');
       if (input.multiSpec && input.multiSpec.skus.length > 0) form.set('multiSpec', JSON.stringify(input.multiSpec));
-      for (const attachment of input.attachments) if (attachment.file) form.append('images', attachment.file, attachment.file.name);
+      for (const attachment of input.attachments) if (attachment.file) { const file = await compressImageForUpload(attachment.file); form.append('images', file, file.name); }
       const payload = await post<ProductPublishResultPayload | ApiEnvelope<ProductPublishResultPayload>>('/api/v1/products/publish', form, { headers: { 'Idempotency-Key': options.idempotencyKey ?? idempotencyKey('product-publish') } });
       const result = unwrapEnvelope(payload);
       return { ...result, product: toProductVM(result.product) };
@@ -543,7 +544,7 @@ export function createProductsApi(transport: ProductsApiTransport): ProductsApi 
       form.set('accountId', input.accountId);
       form.set('title', input.title);
       form.set('description', input.description);
-      for (const attachment of input.attachments) if (attachment.file) form.append('images', attachment.file, attachment.file.name);
+      for (const attachment of input.attachments) if (attachment.file) { const file = await compressImageForUpload(attachment.file); form.append('images', file, file.name); }
       const payload = await post<ProductPublishPreviewPayload | ApiEnvelope<ProductPublishPreviewPayload>>('/api/v1/products/publish/preview', form, { headers: { 'Idempotency-Key': options.idempotencyKey ?? idempotencyKey('product-publish-preview') } });
       return unwrapEnvelope(payload);
     },
