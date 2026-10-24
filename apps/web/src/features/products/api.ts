@@ -19,6 +19,10 @@ export interface ProductsApi {
   generateKnowledgeBaseFromConversations(productId: string, input: { accountId: string; configVersion: number; idempotencyKey?: string }): Promise<ProductKnowledgeBaseActionVM>;
   optimizeKnowledgeBase(productId: string, input: { accountId: string; configVersion: number; idempotencyKey?: string }): Promise<ProductKnowledgeBaseActionVM>;
   publishProduct(input: ProductPublishRequest, options?: { idempotencyKey?: string }): Promise<ProductPublishResultVM>;
+  /** 用当前图片整体覆盖草稿图片（存在后台对象存储），返回更新后的草稿。 */
+  saveDraftImages?(productId: string, files: File[], options?: { idempotencyKey?: string }): Promise<ProductVM>;
+  /** 取回草稿保存过的图片，用于「继续发布」。 */
+  loadDraftImages?(product: ProductVM): Promise<File[]>;
   previewProduct(input: ProductPublishPreviewRequest, options?: { idempotencyKey?: string }): Promise<ProductPublishPreviewVM>;
   optimizeDescription(input: { accountId: string; title: string; description: string }, options?: { idempotencyKey?: string }): Promise<{ description: string; provider: string; model: string }>;
   syncFromXianyu(accountId: string, options?: { pageSize?: number; maxPages?: number; idempotencyKey?: string }): Promise<ProductSyncResultVM>;
@@ -76,6 +80,21 @@ export interface ProductPublishRequest {
   attachments: PublishAttachment[];
   specOverrides?: ProductPublishSpecOverride[];
   multiSpec?: ProductPublishMultiSpecMeta;
+  /** 从这个草稿发布；发布成功后后台会把草稿归档。 */
+  draftProductId?: string;
+}
+
+/** 草稿里保存过的图片条目（attributesJson.publish.draftImages）。 */
+export function draftImageEntries(product: ProductVM | null | undefined): Array<{ index: number; name: string; mimeType: string }> {
+  const publish = product?.attributesJson?.publish;
+  if (!publish || typeof publish !== 'object' || Array.isArray(publish)) return [];
+  const list = (publish as Record<string, unknown>).draftImages;
+  if (!Array.isArray(list)) return [];
+  return list.flatMap((item, index) => {
+    if (!item || typeof item !== 'object') return [];
+    const entry = item as Record<string, unknown>;
+    return [{ index, name: typeof entry.name === 'string' ? entry.name : `image-${index + 1}`, mimeType: typeof entry.mimeType === 'string' ? entry.mimeType : 'image/jpeg' }];
+  });
 }
 
 export interface ProductPublishLocation {
@@ -533,10 +552,33 @@ export function createProductsApi(transport: ProductsApiTransport): ProductsApi 
       }
       form.set('specOverrides', input.specOverrides?.length ? JSON.stringify(input.specOverrides) : '');
       if (input.multiSpec && input.multiSpec.skus.length > 0) form.set('multiSpec', JSON.stringify(input.multiSpec));
+      if (input.draftProductId) form.set('draftProductId', input.draftProductId);
       for (const attachment of input.attachments) if (attachment.file) { const file = await compressImageForUpload(attachment.file); form.append('images', file, file.name); }
       const payload = await post<ProductPublishResultPayload | ApiEnvelope<ProductPublishResultPayload>>('/api/v1/products/publish', form, { headers: { 'Idempotency-Key': options.idempotencyKey ?? idempotencyKey('product-publish') } });
       const result = unwrapEnvelope(payload);
       return { ...result, product: toProductVM(result.product) };
+    },
+    async saveDraftImages(productId, files, options = {}) {
+      const post = requireTransportMethod(transport, 'post');
+      const form = new FormData();
+      for (const original of files) { const file = await compressImageForUpload(original); form.append('images', file, file.name); }
+      const payload = await post<{ product: ProductPayload } | ApiEnvelope<{ product: ProductPayload }>>(`/api/v1/products/${encodeURIComponent(productId)}/draft-images`, form, { headers: { 'Idempotency-Key': options.idempotencyKey ?? idempotencyKey('product-draft-images') } });
+      return toProductVM(unwrapEnvelope(payload).product);
+    },
+    async loadDraftImages(product) {
+      const entries = draftImageEntries(product);
+      const files: File[] = [];
+      for (const entry of entries) {
+        try {
+          const response = await fetch(`/api/v1/products/${encodeURIComponent(product.id)}/draft-images/${entry.index}`, { credentials: 'same-origin' });
+          if (!response.ok) continue;
+          const blob = await response.blob();
+          files.push(new File([blob], entry.name, { type: blob.type || entry.mimeType }));
+        } catch {
+          // 单张取不回来就跳过，用户可以重新补图。
+        }
+      }
+      return files;
     },
     async previewProduct(input, options = {}) {
       const post = requireTransportMethod(transport, 'post');
@@ -590,6 +632,8 @@ export function createProductsApi(transport: ProductsApiTransport): ProductsApi 
     },
   };
 }
+
+const mockDraftImages = new Map<string, File[]>();
 
 export function createMockProductsApi(seed: ProductVM[] = [
   { id: 'product-001', accountId: 'account-001', externalProductRef: 'xy-1001', title: 'Python 全栈资料包', description: '课程资料与配套源码。', categoryCode: 'digital', attributesJson: {}, configVersion: 3, priceMinor: 3990, status: 'published', createdAt: '2026-09-18T09:30:00.000Z', updatedAt: '2026-09-20T09:30:00.000Z', xianyuUpdatedAt: '2026-09-20T08:30:00.000Z', couponBatches: [{ id: '1', label: 'Python 全栈资料包' }], knowledgeBase: '用简洁中文回答买家问题。', skuCount: 1, assetCount: 3 },
@@ -732,7 +776,20 @@ export function createMockProductsApi(seed: ProductVM[] = [
       }
       return { product, conversationCount: 0, messageCount: 0, questionCount: 0, humanReplyCount: 0, changed, model: 'mock' };
     },
+    async saveDraftImages(productId, files) {
+      const product = seed.find((item) => item.id === productId);
+      if (!product) throw new Error('product not found');
+      mockDraftImages.set(productId, [...files]);
+      const publish = { ...((product.attributesJson?.publish as Record<string, unknown> | undefined) ?? {}), draftImages: files.map((file) => ({ name: file.name, mimeType: file.type, size: file.size })) };
+      product.attributesJson = { ...(product.attributesJson ?? {}), publish };
+      product.configVersion += 1;
+      return { ...product };
+    },
+    async loadDraftImages(product) {
+      return [...(mockDraftImages.get(product.id) ?? [])];
+    },
     async publishProduct(input) {
+      if (input.draftProductId) { const draft = seed.find((item) => item.id === input.draftProductId && item.status === 'draft'); if (draft) draft.status = 'archived'; }
       const product: ProductVM = {
         id: `published-${seed.length + 1}`,
         accountId: input.accountId,

@@ -71,7 +71,9 @@ export interface ProductsController {
   updateKnowledgeBase: (product: ProductVM, knowledgeBase: string) => Promise<ProductVM | null>;
   generateKnowledgeBaseFromConversations: (product: ProductVM) => Promise<import('./api').ProductKnowledgeBaseActionVM | null>;
   optimizeKnowledgeBase: (product: ProductVM) => Promise<import('./api').ProductKnowledgeBaseActionVM | null>;
-  publishProduct: (values: ProductPublishFormValues) => Promise<boolean>;
+  publishProduct: (values: ProductPublishFormValues, options?: { draftProductId?: string }) => Promise<boolean>;
+  saveDraftImages: (productId: string, files: File[]) => Promise<ProductVM | null>;
+  loadDraftImages: (product: ProductVM) => Promise<File[]>;
   previewProduct: (values: Pick<ProductPublishFormValues, 'accountId' | 'title' | 'description' | 'attachments'>) => Promise<ProductPublishPreviewVM>;
   optimizeDescription: (input: { accountId: string; title: string; description: string }) => Promise<string>;
   syncFromXianyu: (accountId: string) => Promise<boolean>;
@@ -202,7 +204,7 @@ export function useProductsController(options: { api?: ProductsApi; initialFilte
       return null;
     }
   }, [productsApi, reload]);
-  const publishProduct = useCallback(async (values: ProductPublishFormValues) => {
+  const publishProduct = useCallback(async (values: ProductPublishFormValues, options: { draftProductId?: string } = {}) => {
     setMutation({ phase: 'saving', error: null });
     try {
       const result = await productsApi.publishProduct({
@@ -218,6 +220,7 @@ export function useProductsController(options: { api?: ProductsApi; initialFilte
         specOverrides: values.specOverrides,
         multiSpec: values.multiSpecEnabled ? skuRowsToMeta(values.multiSpecName, values.skuRows) : undefined,
         attachments: values.attachments,
+        ...(options.draftProductId ? { draftProductId: options.draftProductId } : {}),
       });
       setMutation({ phase: 'success', error: null });
       await reload();
@@ -227,6 +230,18 @@ export function useProductsController(options: { api?: ProductsApi; initialFilte
       return false;
     }
   }, [productsApi, reload]);
+  const saveDraftImages = useCallback(async (productId: string, files: File[]) => {
+    if (!productsApi.saveDraftImages) return null;
+    try {
+      const product = await productsApi.saveDraftImages(productId, files);
+      await reload();
+      return product;
+    } catch (error) {
+      setMutation({ phase: 'error', error: toProductsMutationError(error) });
+      return null;
+    }
+  }, [productsApi, reload]);
+  const loadDraftImages = useCallback(async (product: ProductVM) => (productsApi.loadDraftImages ? productsApi.loadDraftImages(product) : []), [productsApi]);
   const previewProduct = useCallback(async (values: Pick<ProductPublishFormValues, 'accountId' | 'title' | 'description' | 'attachments'>) => productsApi.previewProduct({ accountId: values.accountId.trim(), title: values.title.trim(), description: values.description.trim(), attachments: values.attachments }), [productsApi]);
   const optimizeDescription = useCallback(async (input: { accountId: string; title: string; description: string }) => {
     try {
@@ -369,5 +384,5 @@ export function useProductsController(options: { api?: ProductsApi; initialFilte
   }, [productsApi]);
   const clearMutation = useCallback(() => setMutation({ phase: 'idle', error: null }), []);
 
-  return { filters, setFilters, setKeyword, reload, openProduct, closeProduct, openXianyuDetail, syncXianyuDetail, closeXianyuDetail, openXianyuEdit, closeXianyuEdit, submitXianyuEdit, xianyuEdit, createDraft, updateDraft, updateKnowledgeBase, generateKnowledgeBaseFromConversations, batchListing, batchAutoRelist, relistNow, optimizeKnowledgeBase, publishProduct, previewProduct, optimizeDescription, syncFromXianyu, syncError, clearMutation, state, detail, xianyuDetail, mutation };
+  return { saveDraftImages, loadDraftImages, filters, setFilters, setKeyword, reload, openProduct, closeProduct, openXianyuDetail, syncXianyuDetail, closeXianyuDetail, openXianyuEdit, closeXianyuEdit, submitXianyuEdit, xianyuEdit, createDraft, updateDraft, updateKnowledgeBase, generateKnowledgeBaseFromConversations, batchListing, batchAutoRelist, relistNow, optimizeKnowledgeBase, publishProduct, previewProduct, optimizeDescription, syncFromXianyu, syncError, clearMutation, state, detail, xianyuDetail, mutation };
 }

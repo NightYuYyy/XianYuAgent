@@ -1606,6 +1606,50 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
     return undefined;
   }
 
+  // 草稿图片：保存草稿时把当前图片整体覆盖存进对象存储，重新打开草稿时按序号取回，
+  // 这样草稿可以过后「继续发布」而不用重新选图。
+  const draftImagesMatch = ctx.path.match(/^\/api\/v1\/products\/([^/]+)\/draft-images(?:\/(\d+))?$/);
+  if (draftImagesMatch) {
+    const productId = decodeURIComponent(draftImagesMatch[1]);
+    const draft = isUuidLike(productId) ? await runtime.store.getProduct(authContext.admin.id, productId) : undefined;
+    if (!draft) return failure(ctx, 404, 'NOT_FOUND', 'product not found');
+    if (draftImagesMatch[2] !== undefined && (ctx.method === 'GET' || ctx.method === 'HEAD')) {
+      const entry = readDraftImages(draft.attributes)[Number(draftImagesMatch[2])];
+      const object = entry ? await runtime.objectStorage.getObject(entry.key) : undefined;
+      if (!entry || !object) return failure(ctx, 404, 'NOT_FOUND', 'draft image not found');
+      response.statusCode = 200;
+      response.setHeader('Content-Type', object.contentType || entry.mimeType);
+      response.setHeader('Content-Length', String(object.body.length));
+      response.setHeader('Cache-Control', 'private, no-cache');
+      response.setHeader('Content-Disposition', 'inline');
+      response.setHeader('X-Content-Type-Options', 'nosniff');
+      if (ctx.method === 'HEAD') response.end();
+      else response.end(object.body);
+      return undefined;
+    }
+    if (draftImagesMatch[2] === undefined && ctx.method === 'POST') {
+      return mutation(runtime, ctx, authContext, draft.accountId, async () => {
+        if (draft.status !== 'draft') throw new ServiceError(409, 'PRODUCT_NOT_DRAFT', '只有草稿可以保存图片');
+        const images = readPublishImages(ctx.body.images).filter((image) => image.contentType.toLowerCase().startsWith('image/'));
+        if (images.length > 9) throw new ServiceError(422, 'VALIDATION_FAILED', '商品图片最多 9 张');
+        const saved: DraftImageEntry[] = [];
+        for (const image of images) {
+          const key = `products/${productId}/draft/${createHash('sha256').update(image.data).digest('hex').slice(0, 32)}`;
+          await runtime.objectStorage.putObject({ key, body: image.data, contentType: image.contentType });
+          saved.push({ key, name: image.filename, mimeType: image.contentType, size: image.data.length });
+        }
+        const attributes = { ...(draft.attributes ?? {}) };
+        const publish = attributes.publish && typeof attributes.publish === 'object' && !Array.isArray(attributes.publish) ? { ...(attributes.publish as Record<string, unknown>) } : {};
+        publish.draftImages = saved;
+        publish.images = saved.map(({ name, mimeType, size }) => ({ name, mimeType, size }));
+        const updated = await runtime.store.updateProduct({ adminId: authContext.admin.id, productId, expectedConfigVersion: draft.configVersion, patch: { attributes: { ...attributes, publish } } });
+        if (!updated) throw new ServiceError(404, 'NOT_FOUND', 'product not found');
+        return success(ctx, { product: toProductView(updated), images: saved.map(({ name, mimeType, size }, index) => ({ index, name, mimeType, size })) });
+      });
+    }
+    return failure(ctx, 405, 'METHOD_NOT_ALLOWED', 'method not allowed');
+  }
+
   const productDetailAssetMatch = ctx.path.match(/^\/api\/v1\/products\/([^/]+)\/detail\/assets\/([^/]+)$/);
   if (productDetailAssetMatch && (ctx.method === 'GET' || ctx.method === 'HEAD')) {
     const productId = decodeURIComponent(productDetailAssetMatch[1]);
@@ -1708,6 +1752,8 @@ async function dispatch(runtime: AppRuntime, ctx: RequestContext, response: Serv
         requestId: ctx.requestId,
         traceId: ctx.traceId,
       });
+      const draftProductId = optionalString(ctx.body.draftProductId);
+      if (draftProductId) await archivePublishedDraft(runtime, authContext.admin.id, accountId, draftProductId);
       return success(ctx, { ...published, product: toProductView(published.product) }, 201);
     });
   }
@@ -2173,6 +2219,35 @@ function parsePublishSpecOverrides(value: unknown): import('./product-publish.js
     ...(typeof item.catName === 'string' && item.catName.trim() ? { catName: item.catName.trim() } : {}),
     ...(typeof item.tbCatId === 'string' && item.tbCatId.trim() ? { tbCatId: item.tbCatId.trim() } : {}),
   }));
+}
+
+interface DraftImageEntry { key: string; name: string; mimeType: string; size: number }
+
+function readDraftImages(attributes: Record<string, unknown> | undefined): DraftImageEntry[] {
+  const publish = attributes?.publish;
+  if (!publish || typeof publish !== 'object' || Array.isArray(publish)) return [];
+  const list = (publish as Record<string, unknown>).draftImages;
+  if (!Array.isArray(list)) return [];
+  return list.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const entry = item as Record<string, unknown>;
+    if (typeof entry.key !== 'string' || !entry.key.startsWith('products/')) return [];
+    return [{ key: entry.key, name: typeof entry.name === 'string' ? entry.name : 'image', mimeType: typeof entry.mimeType === 'string' ? entry.mimeType : 'application/octet-stream', size: typeof entry.size === 'number' ? entry.size : 0 }];
+  });
+}
+
+function isUuidLike(value: string): boolean { return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value); }
+
+/** 从草稿发布成功后把源草稿归档，避免列表里同时留着草稿和已发布两条。失败只记日志，不影响发布结果。 */
+async function archivePublishedDraft(runtime: AppRuntime, adminId: string, accountId: string, draftProductId: string): Promise<void> {
+  try {
+    if (!isUuidLike(draftProductId)) return;
+    const draft = await runtime.store.getProduct(adminId, draftProductId);
+    if (!draft || draft.status !== 'draft' || draft.externalProductRef || draft.accountId !== accountId) return;
+    await runtime.store.updateProduct({ adminId, productId: draftProductId, expectedConfigVersion: draft.configVersion, patch: { status: 'archived' } });
+  } catch (error) {
+    console.warn(JSON.stringify({ component: 'product-publish', event: 'draft_archive_failed', draftProductId, error: error instanceof Error ? error.message : String(error) }));
+  }
 }
 
 function readPublishImages(value: unknown): Array<{ filename: string; contentType: string; data: Buffer }> {

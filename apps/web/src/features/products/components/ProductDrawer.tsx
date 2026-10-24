@@ -6,7 +6,7 @@ import { createInitialProductPublishValues, inferProductCategory, serializeAttac
 import { ProductPublishForm } from './ProductPublishForm';
 import { ProductFormStateBoundary } from './ProductFormStateBoundary';
 
-export function ProductDrawer({ mode, accountId, product, error, saving, onClose, onCreate, onUpdate, onPublish, previewProduct, optimizeDescription }: { mode: 'create' | 'edit'; accountId?: string; product?: ProductVM | null; error: ProductMutationError | null; saving: boolean; onClose: () => void; onCreate: (values: ReturnType<typeof toDraftInput>) => Promise<boolean>; onUpdate: (productId: string, patch: ReturnType<typeof toDraftPatch>, version: number) => Promise<boolean>; onPublish: (values: ProductPublishFormValues) => Promise<boolean>; previewProduct: (values: Pick<ProductPublishFormValues, 'accountId' | 'title' | 'description' | 'attachments'>) => Promise<ProductPublishPreviewVM>; optimizeDescription: (input: { title: string; description: string }) => Promise<string> }) {
+export function ProductDrawer({ mode, accountId, product, error, saving, onClose, onCreate, onUpdate, onPublish, onSaveDraftImages, loadDraftImages, previewProduct, optimizeDescription }: { mode: 'create' | 'edit'; accountId?: string; product?: ProductVM | null; error: ProductMutationError | null; saving: boolean; onClose: () => void; onCreate: (values: ReturnType<typeof toDraftInput>) => Promise<boolean | ProductVM | null>; onUpdate: (productId: string, patch: ReturnType<typeof toDraftPatch>, version: number) => Promise<boolean | ProductVM | null>; onPublish: (values: ProductPublishFormValues, options?: { draftProductId?: string }) => Promise<boolean>; onSaveDraftImages?: (productId: string, files: File[]) => Promise<unknown>; loadDraftImages?: (product: ProductVM) => Promise<File[]>; previewProduct: (values: Pick<ProductPublishFormValues, 'accountId' | 'title' | 'description' | 'attachments'>) => Promise<ProductPublishPreviewVM>; optimizeDescription: (input: { title: string; description: string }) => Promise<string> }) {
   const initialValues = useMemo<ProductPublishFormValues>(() => createInitialProductPublishValues(accountId, product), [accountId, product]);
   const [values, setValues] = useState<ProductPublishFormValues>(initialValues);
   const [errors, setErrors] = useState<ProductFormErrors>({});
@@ -18,6 +18,21 @@ export function ProductDrawer({ mode, accountId, product, error, saving, onClose
   const previewRequestId = useRef(0);
 
   useEffect(() => { setValues(initialValues); setErrors({}); setConfirmationOpen(false); setQueueState('draft'); setOfficialPreview(null); setPreviewState('idle'); previewRequestId.current += 1; }, [initialValues]);
+
+  // 只有还没发到闲鱼的草稿才走「继续发布」：发布成功后后台会把这条草稿归档。
+  const draftProductId = mode === 'edit' && product && product.status === 'draft' && !product.externalProductRef ? product.id : undefined;
+  const [restoringImages, setRestoringImages] = useState(false);
+  useEffect(() => {
+    if (!draftProductId || !product || !loadDraftImages) return;
+    let cancelled = false;
+    setRestoringImages(true);
+    void loadDraftImages(product).then((files) => {
+      if (cancelled || files.length === 0) return;
+      const restored = files.map((file, index) => ({ id: `draft-${product.id}-${index}`, file, url: URL.createObjectURL(file), name: file.name, mimeType: file.type, size: file.size }));
+      setValues((previous) => (previous.attachments.length > 0 ? previous : { ...previous, attachments: restored }));
+    }).finally(() => { if (!cancelled) setRestoringImages(false); });
+    return () => { cancelled = true; };
+  }, [draftProductId, product, loadDraftImages]);
 
   useEffect(() => {
     const imageAttachments = values.attachments.filter((attachment) => Boolean(attachment.file));
@@ -85,7 +100,11 @@ export function ProductDrawer({ mode, accountId, product, error, saving, onClose
 
   async function saveDraft(closeAfterSave: boolean) {
     if (!validate(false) || saving) return false;
-    const ok = mode === 'create' ? await onCreate(draftInput()) : await onUpdate(product!.id, draftPatch(), product!.configVersion);
+    const result = mode === 'create' ? await onCreate(draftInput()) : await onUpdate(product!.id, draftPatch(), product!.configVersion);
+    const saved = result && typeof result === 'object' ? result : null;
+    // 草稿文字存完后再把当前图片整体存一份，下次打开草稿能直接继续发布。
+    if (saved && onSaveDraftImages) await onSaveDraftImages(saved.id, values.attachments.flatMap((attachment) => (attachment.file ? [attachment.file] : [])));
+    const ok = Boolean(result);
     if (ok && closeAfterSave) onClose();
     return ok;
   }
@@ -93,7 +112,7 @@ export function ProductDrawer({ mode, accountId, product, error, saving, onClose
   async function confirmPublish() {
     setConfirmationOpen(false);
     setQueueState('publishing');
-    const ok = await onPublish(values);
+    const ok = await onPublish(values, draftProductId ? { draftProductId } : undefined);
     if (ok) onClose();
     else setQueueState('draft');
   }
@@ -109,7 +128,7 @@ export function ProductDrawer({ mode, accountId, product, error, saving, onClose
   }
 
   return <div className="products-detail-backdrop product-publish-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><aside className="products-detail-panel product-publish-drawer" role="dialog" aria-modal="true" aria-label={mode === 'create' ? '发布商品' : '编辑商品'}>
-    <header className="product-publish-header"><div><p className="eyebrow">商品发布 / Draft</p><h2>{mode === 'create' ? '发布商品' : '编辑商品'}</h2><p>填写商品信息后，检查附件与物流并提交到当前闲鱼账号。</p></div><div className="product-publish-header-actions"><span className={`products-status products-status-${queueState === 'publishing' ? 'publishing' : 'draft'}`}>{queueState === 'publishing' ? '发布队列中' : '草稿 · 未发布'}</span><button className="icon-button" type="button" aria-label="关闭发布商品" onClick={onClose} disabled={saving}>×</button></div></header>
+    <header className="product-publish-header"><div><p className="eyebrow">商品发布 / Draft</p><h2>{mode === 'create' ? '发布商品' : draftProductId ? '继续发布草稿' : '编辑商品'}</h2>{restoringImages && <p className="product-publish-restoring" role="status">正在取回草稿图片…</p>}<p>填写商品信息后，检查附件与物流并提交到当前闲鱼账号。</p></div><div className="product-publish-header-actions"><span className={`products-status products-status-${queueState === 'publishing' ? 'publishing' : 'draft'}`}>{queueState === 'publishing' ? '发布队列中' : '草稿 · 未发布'}</span><button className="icon-button" type="button" aria-label="关闭发布商品" onClick={onClose} disabled={saving}>×</button></div></header>
     <div className="product-publish-body"><ProductFormStateBoundary error={error}><ProductPublishForm values={values} errors={errors} disabled={saving} optimizing={optimizing} officialPreview={officialPreview} previewState={previewState} onSpecOverrideChange={(property, option) => setValues((previous) => ({ ...previous, specOverrides: [...(previous.specOverrides ?? []).filter((item) => item.propertyId !== property.propertyId), { ...option, propertyId: property.propertyId, propertyName: property.propertyName }] }))} onChange={update} onMultiSpecChange={(patch) => { setValues((previous) => ({ ...previous, ...patch })); if (errors.priceYuan) setErrors((previous) => ({ ...previous, priceYuan: undefined })); }} onAttachmentsChange={(attachments) => setValues((previous) => ({ ...previous, attachments }))} onOptimize={() => { void optimizeDescriptionFromProvider(); }} /></ProductFormStateBoundary></div>
     <footer className="product-publish-footer"><div className="product-publish-footer-hint"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v5c0 5 3.4 8.7 8 10 4.6-1.3 8-5 8-10V6Z" /><path d="M12 8v4m0 3h.01" /></svg><span>发布后会立即同步到闲鱼，建议先检查图片、价格、描述与物流模式。</span></div><div className="product-publish-footer-actions"><button className="btn ghost" type="button" onClick={() => void saveDraft(true)} disabled={saving}>{saving ? '保存中…' : '保存草稿'}</button><button className="btn primary" type="button" onClick={() => { if (validate(true)) setConfirmationOpen(true); }} disabled={saving}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>发布到闲鱼</button></div></footer>
     {confirmationOpen && <div className="product-publish-confirmation"><h3>确认发布到闲鱼？</h3><p>将使用当前账号发布 1 个商品，{values.multiSpecEnabled ? `${values.skuRows.length} 个规格（${values.multiSpecName.trim() || '规格'}）按各自价格发布` : `价格 ¥${values.priceYuan || '0'}，库存按闲鱼官方逻辑处理`}，所在地 {values.location.trim() || '未设置'}。确认后会进入服务端发布队列。</p><div className="product-publish-confirmation-actions"><button className="btn ghost" type="button" onClick={() => setConfirmationOpen(false)}>返回修改</button><button className="btn warning" type="button" onClick={() => void confirmPublish()}>确认发布</button></div></div>}

@@ -23,6 +23,20 @@ const product: ProductVM = {
 const productWithKnowledgeBase: ProductVM = { ...product, knowledgeBase: '支持数字资料交付；付款后发送下载说明。' };
 
 describe('ProductTable', () => {
+  it('offers 继续发布 instead of the Xianyu detail button for unpublished drafts', () => {
+    const draft: ProductVM = { ...product, id: 'draft-1', externalProductRef: undefined, status: 'draft' };
+    const html = renderToStaticMarkup(createElement(ProductTable, {
+      products: [draft, product],
+      page: 1, totalPages: 1, total: 2, sortBy: 'xianyuOrder', sortOrder: 'asc',
+      onSortChange: vi.fn(), onPageChange: vi.fn(), onOpen: vi.fn(), onOpenXianyuDetail: vi.fn(), onOpenKnowledgeBase: vi.fn(),
+      onContinueDraft: vi.fn(),
+    }));
+    expect(html).toContain('data-testid="product-continue-draft-1"');
+    expect(html).not.toContain('data-testid="product-detail-draft-1"');
+    expect(html).toContain('data-testid="product-detail-product-1"');
+    expect(html).toContain('继续发布');
+  });
+
   it('places detail before automation and keeps an explicit action gap', () => {
     const html = renderToStaticMarkup(createElement(ProductTable, {
       products: [product],
