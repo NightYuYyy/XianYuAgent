@@ -126,7 +126,7 @@ function shouldProjectEvent(event: WorkspaceRunEventVM): boolean {
   // Keep them in the live trace; filtering them here makes the step fallback
   // disappear as soon as the first tool event arrives, which looks like a
   // reasoning summary flashing and then being covered by tool output.
-  if (event.eventType === 'context.compacted' || event.eventType === 'reasoning.delta') return false;
+  if (event.eventType === 'context.compacted') return false;
   if (event.eventType === 'step.succeeded' || event.eventType === 'step.failed') return Boolean(messageType(event));
   if (event.eventType === 'runtime.succeeded' || event.eventType === 'runtime.failed' || event.eventType === 'run.succeeded' || event.eventType === 'run.failed') return Boolean(messageType(event) || event.payload.content);
   return true;
@@ -214,6 +214,24 @@ export function buildWorkspaceMessages(run: WorkspaceRunVM, events: WorkspaceRun
     }
     // Pi emits the terminal step.succeeded event after persisting the final answer.
     // Keep the conversation surface ordered as user → one execution trace → final answer.
+    if (event.eventType === 'reasoning.delta') {
+      const thinking = typeof event.payload.content === 'string' ? event.payload.content.trim() : '';
+      if (!thinking) return;
+      messages.push({
+        id: `${run.runId}:thinking:${String(event.payload.messageId ?? event.sequence)}`,
+        runId: run.runId,
+        type: 'reasoning_summary',
+        createdAt: event.createdAt,
+        title: '思考过程',
+        content: thinking,
+        summary: '思考过程',
+        eventType: 'reasoning.delta',
+        sequence: event.sequence,
+        status: safeStatus(event.payload) as WorkspaceMessageVM['status'],
+        collapsible: true,
+      });
+      return;
+    }
     if (messageKind === 'reasoning_summary' && finalAnswerRendered) return;
     const summary = typeof event.payload.summary === 'string' ? event.payload.summary : undefined;
     const content = typeof event.payload.content === 'string' ? event.payload.content : eventSummary(event);
@@ -322,6 +340,9 @@ function mergeStreamingEvents(events: WorkspaceRunEventVM[], options: { ignoreTe
   [...events].sort((left, right) => left.sequence - right.sequence).forEach((event) => {
     const payload = event.payload;
     if (event.eventType === 'reasoning.delta') {
+      // The model's real reasoning text, one collapsible block per model round.
+      const streamId = typeof payload.streamId === 'string' ? payload.streamId : `${event.runId}:stream`;
+      append(event, 'reasoning_summary', typeof payload.contentDelta === 'string' ? payload.contentDelta : '', `${streamId}:thinking`, '思考过程');
       return;
     }
     if (event.eventType === 'assistant.delta') {

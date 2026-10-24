@@ -223,7 +223,9 @@ export function MessageStream({ messages, expandedTrace, onToggleTrace }: { mess
   const visibleMessages = messages.filter(isVisibleWorkspaceActivity);
   const activityItems = buildWorkspaceActivityItems(visibleMessages);
   return <div className="workspace-message-list">
-    {activityItems.map((item) => item.kind === 'summary'
+    {activityItems.map((item) => item.kind === 'thinking'
+      ? <ThinkingView key={item.id} item={item} />
+      : item.kind === 'summary'
       ? <ExecutionSummaryView key={item.id} item={item} />
       : item.kind === 'tool'
         ? <ToolEventView key={item.id} item={item} expanded={expandedTrace === item.id} onToggle={() => onToggleTrace?.(item.id)} />
@@ -233,8 +235,15 @@ export function MessageStream({ messages, expandedTrace, onToggleTrace }: { mess
 
 function isVisibleWorkspaceActivity(message: WorkspaceMessageVM): boolean {
   if (message.type !== 'reasoning_summary') return true;
-  if (message.eventType === 'reasoning.delta') return false;
   return !['模型原生推理', '执行 Workspace 任务'].includes(message.summary ?? '') && !isLowSignalSummary(message);
+}
+
+/** The model's own reasoning for one round, collapsed by default. */
+function ThinkingView({ item }: { item: Extract<WorkspaceActivityItem, { kind: 'thinking' }> }) {
+  return <details className="workspace-activity-thinking" data-testid="workspace-activity-thinking">
+    <summary>思考过程<span>{item.text.length} 字</span></summary>
+    <p>{item.text}</p>
+  </details>;
 }
 
 function ExecutionSummaryView({ item }: { item: Extract<WorkspaceActivityItem, { kind: 'summary' }> }) {

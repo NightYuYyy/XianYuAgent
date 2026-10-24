@@ -86,7 +86,8 @@ test('Workspace Pi ignores account AutoReply Agent settings', async () => {
     assert.equal(bundle.run.status, 'succeeded');
     assert.equal(bundle.run.resultSummary, 'PI_AGENT_OK');
     assert.ok(elapsedMs < 5_000, `Workspace Pi unexpectedly inherited AutoReply send delay: ${elapsedMs}ms`);
-    assert.equal(requests.length, 2);
+    // One streamed call; the up-front model planner is off by default.
+    assert.equal(requests.length, 1);
     assert.equal(requests.filter((request) => request.stream === true).length, 1);
     assert.equal(JSON.stringify(requests).includes('PI_AUTO_REPLY_SENTINEL_SHOULD_NOT_REACH_WORKSPACE'), false);
     assert.equal(JSON.stringify(requests).includes('sendDelaySeconds'), false);

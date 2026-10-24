@@ -210,6 +210,8 @@ export class PiModelClientError extends Error {
   readonly origin?: ModelTimeoutOrigin;
   readonly timeoutPhase?: string;
   modelProgress?: ModelProgressSnapshot;
+  /** Model that produced the failure, for user-facing messages. */
+  model?: string;
 
   constructor(code: PiModelErrorCode, message: string, status?: number, retryAfterMs?: number, meta?: { origin?: ModelTimeoutOrigin; timeoutPhase?: string; modelProgress?: ModelProgressSnapshot }) {
     super(message);
@@ -377,7 +379,7 @@ export class OpenAICompatibleModelClient implements ModelClient {
         webSearchUsed: this.wireApi === 'responses' && extractResponsesWebSearchUsed(payload),
       };
     } catch (error) {
-      if (error instanceof PiModelClientError) throw error;
+      if (error instanceof PiModelClientError) { error.model ??= this.options.model; throw error; }
       if (controller.signal.aborted) {
         const reason = normalizeAbortReason(controller.signal.reason);
         if (reason === 'agent_deadline') throw new PiModelClientError('MODEL_TIMEOUT', 'model request exceeded the Agent deadline', undefined, undefined, { origin: 'agent_deadline', timeoutPhase: input.timeoutPhase });
@@ -482,7 +484,7 @@ export class OpenAICompatibleModelClient implements ModelClient {
         input.signal?.removeEventListener('abort', onAbort);
         return this.completeThroughHandlers(input, handlers);
       }
-      if (error instanceof PiModelClientError) throw error;
+      if (error instanceof PiModelClientError) { error.model ??= this.options.model; throw error; }
       if (controller.signal.aborted) {
         const reason = normalizeAbortReason(controller.signal.reason);
         if (reason === 'agent_deadline') throw new PiModelClientError('MODEL_TIMEOUT', 'model request exceeded the Agent deadline', undefined, undefined, { origin: 'agent_deadline', timeoutPhase: input.timeoutPhase });
@@ -541,6 +543,13 @@ export interface PiRuntimeAdapterOptions {
   skillManager?: PiSkillManager;
   /** Optional policy extension; generic runtime remains usable without one. */
   planPolicy?: WorkspacePlanPolicy;
+  /**
+   * Ask the model for an up-front execution plan before the tool loop. Off by
+   * default: it costs an extra model call per message (and with a 5s cap it
+   * mostly timed out on slower providers). Policy plans still apply.
+   * Env override: WORKSPACE_MODEL_PLANNER=on.
+   */
+  modelPlanner?: boolean;
 }
 
 export interface PiRuntimeEnqueueInput {
@@ -737,7 +746,13 @@ export class PiRuntimeAdapter implements WorkspaceRuntime {
         adminId: input.adminId ?? input.run.requestedBy,
         accountId: input.run.accountId,
       }) ?? this.modelClient;
-      const skillInstruction = await this.options.skillManager?.handleInstruction({ adminId: input.adminId ?? input.run.requestedBy, instruction: input.run.instruction });
+      // With a model-driven loop the model decides when to install/log in a
+      // Skill through the pi_skill_* tools. Only a pasted authorization code
+      // (a reply to a pending Skill login) is still handled directly.
+      const modelDriven = Boolean(modelClient.stream && this.options.workspaceCommands);
+      const skillInstruction = !modelDriven || /\u6388\u6743\u7801|\bCAC-/i.test(input.run.instruction)
+        ? await this.options.skillManager?.handleInstruction({ adminId: input.adminId ?? input.run.requestedBy, instruction: input.run.instruction })
+        : undefined;
       if (this.stopped || signal.aborted || this.cancelled.has(input.run.id)) return;
       if (skillInstruction) {
         if (this.stopped || signal.aborted || this.cancelled.has(input.run.id)) return;
@@ -829,6 +844,16 @@ export class PiRuntimeAdapter implements WorkspaceRuntime {
     }
   }
 
+  /** Skill tools are only offered when a Skill is installed or the user talks about Skills. */
+  private async skillToolsFor(input: PiRuntimeEnqueueInput): Promise<ModelToolDefinition[]> {
+    const manager = this.options.skillManager;
+    if (!manager) return [];
+    const mentionsSkill = /\bskills?\b|\u6280\u80fd|\u63d2\u4ef6|pi_skill/i.test(input.run.instruction);
+    let installed = 0;
+    try { installed = (await manager.list(input.adminId ?? input.run.requestedBy)).length; } catch { installed = 0; }
+    return mentionsSkill || installed > 0 ? manager.getModelTools() : [];
+  }
+
   private async executeModelDriven(input: PiRuntimeEnqueueInput, step: StepRecord, sessionId: string, modelClient: ModelClient, signal: AbortSignal): Promise<void> {
     const commands = this.options.workspaceCommands;
     if (!commands?.getModelTools || !commands.executeModelTool || !modelClient.stream) throw new Error('MODEL_TOOL_RUNTIME_UNAVAILABLE');
@@ -837,7 +862,8 @@ export class PiRuntimeAdapter implements WorkspaceRuntime {
     await this.emit(input.run.id, 'run.executing', { status: 'executing', messageType: 'tool_event' });
     await this.emit(input.run.id, 'step.executing', { stepId: step.id, status: 'executing', messageType: 'tool_event' });
 
-    const tools = [...commands.getModelTools(), ...(this.options.skillManager?.getModelTools() ?? [])];
+    const skillTools = this.options.skillManager ? await this.skillToolsFor(input) : [];
+    const tools = [...commands.getModelTools(), ...skillTools];
     const toolPlans = new Map<string, WorkspaceToolPlanMetadata>(
       tools.flatMap((tool) => tool.type === 'function' && tool.function.plan ? [[tool.function.name, tool.function.plan] as const] : []),
     );
@@ -883,7 +909,9 @@ export class PiRuntimeAdapter implements WorkspaceRuntime {
       executionPlan = reopenBlockedWorkspacePlan(executionPlan);
       await this.emit(input.run.id, 'workspace.plan.updated', { status: executionPlan.status, plan: executionPlan, reason: 'reconnect_failed_step' });
     }
-    if (!executionPlan && !input.resumeAfterConfirmation && !input.resumeFromFailure) {
+    const modelPlannerEnabled = this.options.modelPlanner ?? process.env.WORKSPACE_MODEL_PLANNER === 'on';
+    const policyPlanAvailable = Boolean(this.options.planPolicy?.selectPlan);
+    if (!executionPlan && !input.resumeAfterConfirmation && !input.resumeFromFailure && (modelPlannerEnabled || policyPlanAvailable)) {
       executionPlan = await createWorkspaceExecutionPlanFromModel(input.run.instruction, tools, modelClient, signal, { planPolicy: this.options.planPolicy });
       if (executionPlan && !signal.aborted) {
         await this.emit(input.run.id, 'workspace.plan.created', { status: executionPlan.status, plan: executionPlan });
@@ -953,8 +981,18 @@ export class PiRuntimeAdapter implements WorkspaceRuntime {
         await this.persistMessage({ adminId: input.adminId, sessionId, runId: input.run.id, messageType: 'reasoning_summary', content: redactSensitiveText(compacted.summary, this.options.redactSecrets), summary: '上下文摘要' });
       }
       await this.emit(input.run.id, 'stream.started', { streamId, round: round + 1, model: activeModelName(modelClient) ?? this.options.model, status: 'running' });
-      await this.emit(input.run.id, 'workspace.execution.summary', { streamId, messageType: 'reasoning_summary', summary: round === 0 ? '分析任务' : '评估工具结果', content: round === 0 ? '正在核对任务目标与已有结果。' : '已读取上一轮工具结果，正在确定下一步。', status: 'running' });
       let surfacedToolCallCount = 0;
+      // The model's own reasoning text, forwarded as-is (batched) so the UI
+      // shows what the model is actually thinking instead of canned status lines.
+      let reasoningBuffer = '';
+      let reasoningFlushedAt = Date.now();
+      const flushReasoning = async () => {
+        if (!reasoningBuffer) return;
+        const chunk = reasoningBuffer;
+        reasoningBuffer = '';
+        reasoningFlushedAt = Date.now();
+        await this.emit(input.run.id, 'reasoning.delta', { streamId, contentDelta: redactSensitiveText(chunk, this.options.redactSecrets), status: 'running' });
+      };
       // A strict contract plan advances one durable step at a time.  Even if
       // the provider returns several calls in one response, only the call for
       // the current step may be surfaced, persisted, and executed.
@@ -963,7 +1001,10 @@ export class PiRuntimeAdapter implements WorkspaceRuntime {
         : Number.POSITIVE_INFINITY;
       const handlers: ModelStreamHandlers = {
         onReasoningDelta: async (delta) => {
-          if (delta) reasoningDeltaCount += 1;
+          if (!delta) return;
+          reasoningDeltaCount += 1;
+          reasoningBuffer += delta;
+          if (reasoningBuffer.length >= 160 || Date.now() - reasoningFlushedAt >= 500) await flushReasoning();
         },
         onTextDelta: async (delta) => {
           assistant += delta;
@@ -989,6 +1030,7 @@ export class PiRuntimeAdapter implements WorkspaceRuntime {
         await this.persistMessage({ adminId: input.adminId, sessionId, runId: input.run.id, messageType: 'reasoning_summary', content: redactSensitiveText(forced.summary ?? '', this.options.redactSecrets), summary: '上下文摘要' });
         result = await modelClient.stream({ messages, tools, toolChoice: finalAnswerRound ? 'none' : 'auto', signal }, handlers);
       }
+      await flushReasoning();
       finalResult = result;
       let calls = result.toolCalls ?? [];
       if (Number.isFinite(maxToolCallsForResponse) && calls.length > maxToolCallsForResponse) calls = calls.slice(0, maxToolCallsForResponse);
@@ -1008,15 +1050,6 @@ export class PiRuntimeAdapter implements WorkspaceRuntime {
       messages.push({ role: 'assistant', content: result.content ?? assistant, toolCalls: calls });
       for (const call of calls) {
         const progress = workspaceToolProgress(call.function.name);
-        await this.emit(input.run.id, 'workspace.execution.summary', {
-          streamId,
-          messageType: 'reasoning_summary',
-          toolCallId: call.id,
-          toolName: call.function.name,
-          summary: progress.summary,
-          content: progress.content,
-          status: 'running',
-        });
         const toolStartedAt = new Date().toISOString();
         await this.emit(input.run.id, 'tool.call.started', { streamId, toolCallId: call.id, toolName: call.function.name, summary: progress.summary, argumentFingerprint: toolArgumentFingerprint(call.function.arguments), readOnly: replayableCallIsReadOnly(call.function.name, call.function.arguments), startedAt: toolStartedAt, status: 'running' });
         let args: Record<string, unknown>;
@@ -1907,6 +1940,14 @@ function toSafeFailure(error: unknown): { code: string; summary: string } {
 }
 
 function summarizePiFailure(error: PiModelClientError): string {
+  const base = summarizePiFailureBase(error);
+  const detail = error.code === 'MODEL_HTTP_ERROR' && error.status ? `HTTP ${error.status}` : error.code === 'MODEL_TIMEOUT' && /after (\d+)ms/.test(error.message) ? `${Math.round(Number(error.message.match(/after (\d+)ms/)![1]) / 1000)} 秒内无结果` : '';
+  const who = error.model ? `模型 ${error.model}` : '';
+  const suffix = [who, detail].filter(Boolean).join('，');
+  return suffix ? `${base.replace(/。$/, '')}（${suffix}）。` : base;
+}
+
+function summarizePiFailureBase(error: PiModelClientError): string {
   if (error.code === 'MODEL_TOOL_LOOP_EXCEEDED') return '模型重复调用工具或超过 Workspace 工具循环预算，已停止本次执行。';
   if (error.code === 'MODEL_TIMEOUT') return '模型请求超时，未能在限定时间内完成。';
   if (error.code === 'MODEL_ABORTED') return '模型请求已取消。';
@@ -1925,6 +1966,12 @@ function summarizePiFailure(error: PiModelClientError): string {
 function workspaceToolProgress(toolName: string): { summary: string; content: string } {
   const labels: Record<string, string> = {
     workspace_read: '读取工作区数据',
+    workspace_list_products: '查询商品列表',
+    workspace_get_product: '读取商品详情',
+    workspace_list_coupons: '查询卡券批次',
+    workspace_list_orders: '查询订单',
+    workspace_get_order: '读取订单详情',
+    workspace_account_status: '读取账号状态',
     workspace_product_search: '检索商品信息',
     workspace_prepare_write: '准备受控写入',
     pi_skill_list: '读取已安装 Skill',

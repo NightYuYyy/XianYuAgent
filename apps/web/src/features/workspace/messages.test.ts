@@ -119,7 +119,7 @@ describe('workspace message projection', () => {
     expect(messages.filter((message) => message.type === 'tool_event')).toHaveLength(1);
   });
 
-  it('merges tool and answer deltas without rendering provider reasoning', () => {
+  it('merges tool and answer deltas and shows provider reasoning as one thinking block', () => {
     const messages = buildWorkspaceMessages(run, [
       { sequence: 2, runId: 'run-1', eventType: 'reasoning.delta', payload: { streamId: 's-1', messageId: 's-1:reasoning', contentDelta: '先读取' }, createdAt: '2026-09-20T00:00:01.000Z' },
       { sequence: 3, runId: 'run-1', eventType: 'reasoning.delta', payload: { streamId: 's-1', messageId: 's-1:reasoning', contentDelta: '商品。' }, createdAt: '2026-09-20T00:00:01.100Z' },
@@ -129,7 +129,7 @@ describe('workspace message projection', () => {
       { sequence: 7, runId: 'run-1', eventType: 'assistant.delta', payload: { streamId: 's-2', messageId: 's-2:assistant', phase: 'terminal', contentDelta: ' 1 个商品。' }, createdAt: '2026-09-20T00:00:02.200Z' },
       { sequence: 8, runId: 'run-1', eventType: 'run.succeeded', payload: { status: 'succeeded', messageType: 'final_answer', content: '已找到 1 个商品。' }, createdAt: '2026-09-20T00:00:02.300Z' },
     ]);
-    expect(messages.some((message) => message.content.includes('先读取商品。'))).toBe(false);
+    expect(messages.filter((message) => message.summary === '思考过程').map((message) => message.content)).toEqual(['先读取商品。']);
     expect(messages.find((message) => message.type === 'tool_event')?.content).toContain('商品 1 个');
     expect(messages.find((message) => message.type === 'final_answer')?.content).toBe('已找到 1 个商品。');
   });
@@ -340,7 +340,8 @@ describe('workspace message projection', () => {
     expect(projected.filter((item) => item.type === 'tool_event')).toHaveLength(1);
     expect(projected.some((item) => item.type === 'reasoning_summary' && item.summary === '分析任务')).toBe(true);
     expect(projected.some((item) => item.content.includes('商品 product-1'))).toBe(true);
-    expect(projected.every((item) => !/内部推理细节|raw-json|大量原始 JSON|WORKSPACE_PLAN|Plan Mode/.test(item.content))).toBe(true);
+    expect(projected.every((item) => !/raw-json|大量原始 JSON|WORKSPACE_PLAN|Plan Mode/.test(item.content))).toBe(true);
+    expect(projected.some((item) => item.summary === '思考过程' && item.content === '内部推理细节')).toBe(true);
   });
 
   it('does not show a second tool event when a persisted result is reused', () => {

@@ -602,3 +602,26 @@ test('reconnect resumes the failed node with the persisted run context', async (
   assert.equal(resumeInput?.resumeFromFailure, true);
   assert.deepEqual(resumeInput?.history, [{ role: 'assistant', content: '[tool_event] 读取商品\n商品查询失败' }]);
 });
+
+test('structured read tools take typed arguments instead of a free-text instruction', async () => {
+  let listQuery: Record<string, unknown> | undefined;
+  const commands = orchestrator({
+    products: {
+      list: async (_adminId: string, query: Record<string, unknown>) => { listQuery = query; return { items: [{ id: 'p-1', accountId: 'account-1', title: 'AI定制PPT', status: 'published', priceMinor: 1990, configVersion: 1, knowledgeBase: '' }], page: 1, pageSize: 20, total: 1, totalPages: 1 }; },
+      get: async (_adminId: string, productId: string) => ({ id: productId, accountId: 'account-1', title: 'AI定制PPT', status: 'published', priceMinor: 1990, configVersion: 3, knowledgeBase: '常见问题', skus: [] }),
+    },
+  });
+  const names = commands.getModelTools().flatMap((tool) => tool.type === 'function' ? [tool.function.name] : []);
+  for (const name of ['workspace_list_products', 'workspace_get_product', 'workspace_list_coupons', 'workspace_list_orders', 'workspace_get_order', 'workspace_account_status']) assert.ok(names.includes(name), name);
+
+  const listed = await commands.executeModelTool('workspace_list_products', { status: 'published' }, input);
+  assert.equal(listQuery?.status, 'published');
+  assert.equal(listQuery?.keyword, undefined, 'no keyword means browse everything');
+  assert.match(listed.content, /productId=p-1/);
+
+  const detail = await commands.executeModelTool('workspace_get_product', { productId: 'p-1' }, input);
+  assert.equal((detail.data as { product: { knowledgeBase: string } }).product.knowledgeBase, '常见问题');
+  assert.ok((detail.data as { automation?: unknown }).automation, 'automation config is included');
+
+  await assert.rejects(() => commands.executeModelTool('workspace_get_product', {}, input), /productId is required/);
+});

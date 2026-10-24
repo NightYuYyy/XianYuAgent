@@ -109,3 +109,13 @@ describe('workspace activity feed', () => {
     expect(shouldDisplayToolActionLabel('检索 Skill 使用说明')).toBe(true);
   });
 });
+
+describe('thinking blocks', () => {
+  it('turns model reasoning into a separate thinking item', () => {
+    const items = buildWorkspaceActivityItems([
+      { id: 't-1', runId: 'run-1', type: 'reasoning_summary', createdAt: '2026-10-24T00:00:00.000Z', title: '思考过程', content: '先查在售商品', summary: '思考过程', eventType: 'reasoning.delta', collapsible: true },
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]?.kind).toBe('thinking');
+  });
+});

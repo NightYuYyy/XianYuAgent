@@ -139,9 +139,11 @@ test('Pi runtime executes model-selected workspace tools and streams results', a
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   const events = await store.listRunEvents(admin.id, created.run.id, 0);
-  assert.ok(events.some((event) => event.eventType === 'workspace.execution.summary' && event.payload.summary === '分析任务'));
+  // No canned round-start narration: only real model output and tool results are shown.
+  assert.ok(!events.some((event) => event.eventType === 'workspace.execution.summary' && event.payload.summary === '分析任务'));
   assert.ok(events.some((event) => event.eventType === 'workspace.execution.summary' && event.payload.content === '读取完成'));
-  assert.ok(!events.some((event) => event.eventType === 'reasoning.delta'));
+  // The model's real reasoning text is forwarded (batched) instead of canned status lines.
+  assert.deepEqual(events.filter((event) => event.eventType === 'reasoning.delta').map((event) => event.payload.contentDelta), ['需要读取商品数据', '根据工具结果整理答案']);
   assert.ok(!events.some((event) => event.eventType === 'tool.call.delta'));
   assert.ok(events.some((event) => event.eventType === 'tool.call.started' && event.payload.toolName === 'workspace_read'));
   assert.ok(events.filter((event) => event.eventType === 'tool.call.started').every((event) => typeof event.payload.argumentFingerprint === 'string' && event.payload.arguments === undefined));
@@ -191,7 +193,7 @@ test('Pi runtime executes a durable Plan Mode sequence and exposes the current s
       ? { kind: 'products' as const, title: '商品搜索', summary: '找到目标商品', content: 'productId=product-plan', data: { productId: 'product-plan', items: [{ id: 'product-plan', title: '目标商品' }] } }
       : { kind: 'read' as const, title: '商品状态', summary: '读取完成', content: '商品状态正常' },
   } as unknown as WorkspaceCommandOrchestrator;
-  const runtime = new PiRuntimeAdapter(store, model, { workspaceCommands: commandTool, model: 'plan-model' });
+  const runtime = new PiRuntimeAdapter(store, model, { workspaceCommands: commandTool, model: 'plan-model', modelPlanner: true });
   try {
     runtime.enqueue({ adminId: admin.id, sessionId: session.id, run: created.run, steps: created.steps });
     const deadline = Date.now() + 2_000;
@@ -240,7 +242,7 @@ test('Plan Mode stops the remaining tool calls when a planned step fails', async
       return { kind: 'write_plan' as const, title: '写入确认', summary: '等待确认', content: '等待确认', plan: { kind: 'coupon_bind', action: 'coupon_bind', title: '写入确认', summary: '等待确认', content: '等待确认', policyRef: 'workspace.coupon_bind.confirm', expiresAt: new Date(Date.now() + 60_000).toISOString(), manifest: { productId: 'product-1' } } };
     },
   } as unknown as WorkspaceCommandOrchestrator;
-  const runtime = new PiRuntimeAdapter(store, model, { workspaceCommands: commandTool, model: 'plan-batch-failure' });
+  const runtime = new PiRuntimeAdapter(store, model, { workspaceCommands: commandTool, model: 'plan-batch-failure', modelPlanner: true });
   try {
     runtime.enqueue({ adminId: admin.id, sessionId: session.id, run: created.run, steps: created.steps });
     const deadline = Date.now() + 2_000;
@@ -299,7 +301,7 @@ test('Plan Mode adjusts the plan after a failed step and continues with the repl
       return { kind: 'read' as const, title: '商品状态', summary: '已读取商品状态', content: '商品状态正常', data: { status: 'active' } };
     },
   } as unknown as WorkspaceCommandOrchestrator;
-  const runtime = new PiRuntimeAdapter(store, model, { workspaceCommands: commandTool, model: 'plan-replan' });
+  const runtime = new PiRuntimeAdapter(store, model, { workspaceCommands: commandTool, model: 'plan-replan', modelPlanner: true });
   try {
     runtime.enqueue({ adminId: admin.id, sessionId: session.id, run: created.run, steps: created.steps });
     const deadline = Date.now() + 2_000;

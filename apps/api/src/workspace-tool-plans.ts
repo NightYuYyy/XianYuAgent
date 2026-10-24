@@ -11,6 +11,27 @@ export const workspaceReadPlan: WorkspaceToolPlanMetadata = {
   default: { sideEffect: 'read', confirmationPolicy: 'none', replay: 'reusable', inputFacts: [], inputBindings: [], outputFacts: [fact('readback', ['result.data'], 'object')], argumentSchema: objectSchema({ instruction: stringSchema() }, ['instruction']) },
 };
 
+const integerSchema = (extra: WorkspacePlanJsonSchema = {}): WorkspacePlanJsonSchema => ({ type: 'integer', ...extra });
+const readOnly = (argumentSchema: WorkspacePlanJsonSchema, outputFacts: WorkspacePlanOutputFact[] = [fact('readback', ['result.data'], 'object')]): WorkspaceToolPlanMetadata => ({
+  contractVersion: 1,
+  default: { sideEffect: 'read', confirmationPolicy: 'none', replay: 'reusable', inputFacts: [], inputBindings: [], outputFacts, argumentSchema },
+});
+
+/** Structured read tools: typed arguments instead of a free-text instruction re-parsed by regex. */
+export const workspaceListProductsPlan = readOnly(objectSchema({ status: stringSchema(), keyword: stringSchema(), limit: integerSchema() }), [
+  fact('readback', ['result.data'], 'object'),
+  fact('productId', ['result.data.items[0].id'], 'string', 'tool_result', false, { condition: { path: 'result.data.items', arrayLengthEquals: 1 }, onConditionFalse: 'skip' }),
+]);
+export const workspaceGetProductPlan = readOnly(objectSchema({ productId: stringSchema() }, ['productId']), [
+  fact('readback', ['result.data'], 'object'),
+  fact('productId', ['result.data.product.id'], 'string', 'tool_result', true),
+  fact('productTitle', ['result.data.product.title'], 'string'),
+]);
+export const workspaceListCouponsPlan = readOnly(objectSchema({ status: stringSchema(), keyword: stringSchema(), limit: integerSchema() }));
+export const workspaceListOrdersPlan = readOnly(objectSchema({ paymentStatus: stringSchema(), deliveryStatus: stringSchema(), afterSalesStatus: stringSchema(), keyword: stringSchema(), limit: integerSchema() }));
+export const workspaceGetOrderPlan = readOnly(objectSchema({ orderNo: stringSchema() }, ['orderNo']));
+export const workspaceAccountStatusPlan = readOnly(objectSchema({}));
+
 export const workspaceProductSearchPlan: WorkspaceToolPlanMetadata = {
   contractVersion: 1,
   default: {

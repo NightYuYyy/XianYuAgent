@@ -486,6 +486,36 @@ body .app-viewport .workspace-domain .workspace-mobile-compact-header strong {
   margin: 0;
   padding: 0 2px 17px;
 }
+.workspace-activity-thinking {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 12px;
+  padding: 0 2px;
+}
+.workspace-activity-thinking > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: #6B7280;
+  font-size: 12px;
+  list-style: none;
+}
+.workspace-activity-thinking > summary::-webkit-details-marker { display: none; }
+.workspace-activity-thinking > summary::before { content: '›'; display: inline-block; transition: transform .15s ease; }
+.workspace-activity-thinking[open] > summary::before { transform: rotate(90deg); }
+.workspace-activity-thinking > summary span { color: #9CA3AF; }
+.workspace-activity-thinking > p {
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border-left: 2px solid #E5E7EB;
+  color: #6B7280;
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  max-height: 320px;
+  overflow: auto;
+}
 .workspace-activity-summary p {
   margin: 0;
   color: #4B5563;

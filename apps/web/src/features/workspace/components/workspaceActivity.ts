@@ -3,6 +3,7 @@ import type { WorkspaceMessageVM } from '../types';
 export type WorkspaceActivityItem =
   | { kind: 'message'; message: WorkspaceMessageVM }
   | { kind: 'summary'; id: string; text: string; message: WorkspaceMessageVM }
+  | { kind: 'thinking'; id: string; text: string; message: WorkspaceMessageVM }
   | { kind: 'tool'; id: string; key: string; label: string; count: number; message: WorkspaceMessageVM; messages: WorkspaceMessageVM[] };
 
 export type WorkspaceToolActionIcon = 'edit' | 'search' | 'read' | 'command';
@@ -17,6 +18,11 @@ const lowSignalSummaryPattern = /等待工具返回真实结果|正在等待工�
 export function buildWorkspaceActivityItems(messages: WorkspaceMessageVM[]): WorkspaceActivityItem[] {
   const items: WorkspaceActivityItem[] = [];
   for (const message of messages) {
+    if (message.type === 'reasoning_summary' && message.eventType === 'reasoning.delta') {
+      const text = message.content.trim();
+      if (text) items.push({ kind: 'thinking', id: message.id, text, message });
+      continue;
+    }
     if (message.type === 'reasoning_summary') {
       const text = humanizeActivityText(message.content.trim());
       if (!text || isLowSignalSummary(message)) continue;

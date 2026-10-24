@@ -15,7 +15,8 @@ import type { OrderDeliveryService } from './order-delivery.js';
 import { detectNativeWorkspaceRead, executeNativeWorkspaceRead, type NativeWorkspaceReadResult } from './workspace-native-read.js';
 import { prepareNativeWorkspaceWrite, type NativeWorkspaceWritePlan } from './workspace-native-write.js';
 import type { ModelToolDefinition } from './pi-runtime.js';
-import { workspacePrepareWritePlan, workspaceProductSearchPlan, workspaceReadPlan } from './workspace-tool-plans.js';
+import type { WorkspaceToolPlanMetadata } from './workspace-plan-contract.js';
+import { workspaceAccountStatusPlan, workspaceGetOrderPlan, workspaceGetProductPlan, workspaceListCouponsPlan, workspaceListOrdersPlan, workspaceListProductsPlan, workspacePrepareWritePlan, workspaceProductSearchPlan, workspaceReadPlan } from './workspace-tool-plans.js';
 
 export type WorkspaceCommandResult = NativeWorkspaceReadResult & { mutation?: boolean; operation?: string };
 
@@ -74,7 +75,7 @@ export class WorkspaceCommandOrchestrator {
         type: 'function',
         function: {
           name: 'workspace_read',
-          description: 'Read current Workspace data for the selected account. Use only for read/diagnostic requests such as account, order, dashboard, or broad product reads. Do not use for cancellation, disable, update, publish, delivery, or other mutations; do not use for a product-name lookup when workspace_product_search applies.',
+          description: 'Fallback reader for things the structured tools do not cover: dashboard / 经营分析, auto-reply activity, model provider settings, delivery previews. Prefer workspace_list_products, workspace_get_product, workspace_list_coupons, workspace_list_orders, workspace_get_order and workspace_account_status whenever they fit. ' + 'Read current Workspace data for the selected account. Use only for read/diagnostic requests such as account, order, dashboard, or broad product reads. Do not use for cancellation, disable, update, publish, delivery, or other mutations; do not use for a product-name lookup when workspace_product_search applies.',
           parameters: {
             type: 'object',
             additionalProperties: false,
@@ -117,6 +118,7 @@ export class WorkspaceCommandOrchestrator {
           plan: workspaceProductSearchPlan,
         },
       },
+      ...structuredReadToolDefinitions(),
     ];
   }
 
@@ -136,6 +138,8 @@ export class WorkspaceCommandOrchestrator {
         data: { total: result.total, ...(result.items.length === 1 ? { productId: result.items[0]!.id } : {}), items },
       };
     }
+    const structured = await this.executeStructuredRead(name, args, input);
+    if (structured) return structured;
     if (!instruction && !operation) throw new ServiceError(422, 'VALIDATION_FAILED', 'workspace tool requires operation+parameters or instruction');
     if (name === 'workspace_read') {
       if (requiresWorkspaceWrite(instruction)) throw new ServiceError(422, 'WORKSPACE_WRITE_REQUIRED', '该请求包含商品变更动作，请使用 workspace_prepare_write');
@@ -169,6 +173,48 @@ export class WorkspaceCommandOrchestrator {
       return { kind: 'write_plan', title: plan.title, summary: plan.summary, content: plan.content, data: plan.manifest, plan };
     }
     throw new ServiceError(422, 'VALIDATION_FAILED', `unknown workspace tool: ${name}`);
+  }
+
+  /** Typed read tools. Returns undefined for any other tool name. */
+  private async executeStructuredRead(name: string, args: Record<string, unknown>, input: WorkspaceCommandInput): Promise<WorkspaceModelToolResult | undefined> {
+    const text = (key: string) => (typeof args[key] === 'string' && (args[key] as string).trim() ? (args[key] as string).trim() : undefined);
+    const limit = Math.min(50, Math.max(1, Math.trunc(Number(args.limit) || 20)));
+    if (name === 'workspace_list_products') {
+      const status = normalizeProductStatus(text('status'));
+      const result = await this.deps.products.list(input.adminId, { accountId: input.accountId, keyword: text('keyword'), status, page: 1, pageSize: limit, sortBy: 'updatedAt', sortOrder: 'desc' });
+      const items = result.items.map(productBrief);
+      return { kind: 'read', title: '商品列表', summary: `共 ${result.total} 个商品${status ? `（${status}）` : ''}`, content: items.length ? items.map((item, index) => `${index + 1}. ${item.title} · ${item.status} · ${formatMoney(item.priceMinor)} · productId=${item.id}`).join('\n') : '没有符合条件的商品。', data: { total: result.total, items } };
+    }
+    if (name === 'workspace_get_product') {
+      const productId = text('productId');
+      if (!productId) throw new ServiceError(422, 'VALIDATION_FAILED', 'productId is required; call workspace_list_products or workspace_product_search first');
+      const product = await this.deps.products.get(input.adminId, productId);
+      if (product.accountId !== input.accountId) throw new ServiceError(403, 'FORBIDDEN', 'product belongs to another account');
+      let automation: unknown;
+      try { const config = await this.deps.productAutomation.get(input.adminId, productId); automation = { configVersion: config.configVersion, config: config.config }; } catch { automation = undefined; }
+      const detail = { ...productBrief(product), description: product.description, knowledgeBase: product.knowledgeBase ?? '', skus: product.skus ?? [], couponBatches: (product as { couponBatches?: unknown }).couponBatches ?? [], configVersion: product.configVersion };
+      return { kind: 'read', title: '商品详情', summary: `已读取商品：${product.title}`, content: [`${product.title} · ${product.status} · ${formatMoney(product.priceMinor)}`, `知识库：${product.knowledgeBase?.trim() ? `${product.knowledgeBase.trim().length} 字` : '未配置'}`, `自动化：${automation ? '已配置' : '未配置'}`].join('\n'), data: { product: detail, automation } };
+    }
+    if (name === 'workspace_list_coupons') {
+      const status = text('status');
+      const result = await this.deps.coupons.list(input.adminId, { accountId: input.accountId, keyword: text('keyword'), status: status && ['draft', 'active', 'paused', 'closed', 'voided'].includes(status) ? status as never : undefined, page: 1, pageSize: limit, sortBy: 'createdAt', sortOrder: 'desc' });
+      return { kind: 'read', title: '卡券批次', summary: `共 ${result.total} 个卡券批次`, content: result.items.length ? result.items.map((item, index) => { const row = item as Record<string, unknown>; return `${index + 1}. ${String(row.label ?? row.batchId)} · ${String(row.status)} · 可用 ${String(row.availableCount ?? '?')} / 共 ${String(row.totalCount ?? '?')} · batchId=${String(row.batchId ?? row.id)}`; }).join('\n') : '没有卡券批次。', data: { total: result.total, items: result.items } };
+    }
+    if (name === 'workspace_list_orders') {
+      const result = await this.deps.orders.list(input.adminId, { accountId: input.accountId, keyword: text('keyword'), paymentStatus: normalizePaymentStatus(text('paymentStatus')), deliveryStatus: normalizeDeliveryStatus(text('deliveryStatus')), afterSalesStatus: normalizeAfterSalesStatus(text('afterSalesStatus')), page: 1, pageSize: limit, sortBy: 'createdAt', sortOrder: 'desc' });
+      return orderListResult(result.items, result.total);
+    }
+    if (name === 'workspace_get_order') {
+      const orderNo = text('orderNo');
+      if (!orderNo) throw new ServiceError(422, 'VALIDATION_FAILED', 'orderNo is required');
+      const order = await this.deps.orders.get({ adminId: input.adminId, orderNo, accountId: input.accountId });
+      return { kind: 'read', title: '订单详情', summary: `已读取订单 ${order.orderNo}`, content: `订单 ${order.orderNo} · ${order.itemTitle} · 支付 ${order.paymentStatus} · 交付 ${order.deliveryStatus} · 售后 ${order.afterSalesStatus}`, data: { order } };
+    }
+    if (name === 'workspace_account_status') {
+      const result = await this.accountsResult(input);
+      return { kind: 'read', title: result.title, summary: result.summary, content: result.content, data: result.data };
+    }
+    return undefined;
   }
 
   async prepareWrite(input: WorkspaceCommandInput): Promise<NativeWorkspaceWritePlan | undefined> {
@@ -760,6 +806,21 @@ function normalizeDeliveryType(value?: string): OrderDeliveryType | undefined {
 }
 function normalizeAfterSalesStatus(value?: string): OrderRecord['afterSalesStatus'] | undefined { if (!value) return undefined; if (/退款中|refunding/i.test(value)) return 'refunding'; if (/已退款|refunded/i.test(value)) return 'refunded'; if (/申请|requested|售后/i.test(value)) return 'requested'; if (/关闭|closed/i.test(value)) return 'closed'; return value === 'none' ? 'none' : undefined; }
 function safeProduct(product: ProductRecord): Record<string, unknown> { return { ...product }; }
+function productBrief(product: ProductRecord) { return { id: product.id, title: product.title, status: product.status, priceMinor: product.priceMinor, externalProductRef: product.externalProductRef, skuCount: product.skuCount ?? 0, hasKnowledgeBase: Boolean(product.knowledgeBase?.trim()) }; }
+
+const PRODUCT_STATUS_ENUM = ['draft', 'published', 'failed', 'archived'];
+function structuredReadToolDefinitions(): ModelToolDefinition[] {
+  const tool = (name: string, description: string, properties: Record<string, unknown>, required: string[], plan: WorkspaceToolPlanMetadata): ModelToolDefinition => ({ type: 'function', function: { name, description, parameters: { type: 'object', additionalProperties: false, properties, required }, plan } });
+  const limit = { type: 'integer', minimum: 1, maximum: 50, description: 'Max rows, default 20.' };
+  return [
+    tool('workspace_list_products', 'List products of the current account. Filter by status (published = 在售/已发布, draft = 草稿) and/or a title keyword. Leave keyword empty to browse everything.', { status: { type: 'string', enum: PRODUCT_STATUS_ENUM }, keyword: { type: 'string', description: 'Part of the product title or the Xianyu item number. Omit to list all.' }, limit }, [], workspaceListProductsPlan),
+    tool('workspace_get_product', 'Read one product in full: price, SKUs, description, knowledge base, bound coupon batches and automation (auto-delivery) config. Needs the internal productId from workspace_list_products or workspace_product_search.', { productId: { type: 'string' } }, ['productId'], workspaceGetProductPlan),
+    tool('workspace_list_coupons', 'List coupon / 卡密 batches of the current account with available and used counts.', { status: { type: 'string', enum: ['draft', 'active', 'paused', 'closed', 'voided'] }, keyword: { type: 'string' }, limit }, [], workspaceListCouponsPlan),
+    tool('workspace_list_orders', 'List orders of the current account, newest first. Filters are optional.', { paymentStatus: { type: 'string', enum: ['unpaid', 'paid', 'closed'] }, deliveryStatus: { type: 'string', enum: ['pending', 'delivered', 'failed', 'cancelled'] }, afterSalesStatus: { type: 'string', enum: ['refunding', 'refunded'] }, keyword: { type: 'string', description: 'Order number, buyer or item title fragment.' }, limit }, [], workspaceListOrdersPlan),
+    tool('workspace_get_order', 'Read one order by its Xianyu order number.', { orderNo: { type: 'string' } }, ['orderNo'], workspaceGetOrderPlan),
+    tool('workspace_account_status', 'Read the Xianyu accounts and their health / login status.', {}, [], workspaceAccountStatusPlan),
+  ];
+}
 function productListResult(items: ProductRecord[], total: number): WorkspaceCommandResult { const rows = items.map((item) => safeProduct(item)); return { kind: 'products', title: '商品查询', summary: `已读取 ${total} 个商品`, content: rows.length ? [`当前账号共有 ${total} 个商品：`, ...rows.map((item, index) => `${index + 1}. ${String(item.title)} · ${String(item.status)} · ${formatMoney(typeof item.priceMinor === 'number' ? item.priceMinor : undefined)}`)].join('\n') : '当前账号暂无匹配商品。', data: { total, items: rows } }; }
 function orderListResult(items: OrderRecord[], total: number): WorkspaceCommandResult { const rows = items.map((item) => ({ orderNo: item.orderNo, itemTitle: item.itemTitle, amountMinor: item.amountMinor, paymentStatus: item.paymentStatus, orderStatus: item.orderStatus, deliveryStatus: item.deliveryStatus, afterSalesStatus: item.afterSalesStatus, createdAt: item.createdAt, updatedAt: item.updatedAt, redacted: true })); return { kind: 'orders', title: '订单查询', summary: `已读取 ${total} 个订单`, content: rows.length ? [`当前账号共有 ${total} 个订单：`, ...rows.map((item, index) => `${index + 1}. ${item.orderNo} · ${item.itemTitle} · 支付 ${item.paymentStatus} · 交付 ${item.deliveryStatus} · 售后 ${item.afterSalesStatus}`)].join('\n') : '当前账号暂无匹配订单。', data: { total, items: rows } }; }
 function formatAutomationPersistedResult(result: { product: { id: string; externalProductRef?: string; title: string }; configVersion: number; config: ProductAutomationConfig; couponBatches: Array<{ id: string; sequenceId?: string; label?: string; purpose?: string; status?: string; availableCount?: number }>; persisted: boolean; persistenceVerifiedAt?: string }): string {
