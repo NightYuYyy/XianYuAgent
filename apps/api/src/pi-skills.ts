@@ -721,9 +721,17 @@ export class PiSkillManager {
     const source = urlMatch?.[0].replace(/[),\]}>，。！？；：]+$/g, '');
     const tokenMatch = normalized.match(/(?:\u6388\u6743\u7801|\u6388\u6743\s*token|token|code|\u6388\u6743[^A-Za-z0-9]{0,12})\s*[:：]?\s*([A-Za-z0-9._-]{8,})/i)
       ?? normalized.match(/\b(CAC-[A-Za-z0-9_-]{8,})\b/i);
-    const loginIntent = /(?:\u6388\u6743|\u7ed1\u5b9a|\u767b\u5f55|\u626b\u7801|authorize|login|sign\s*in)/i.test(normalized);
     const requestedSkill = extractSkillId(normalized);
-    const installIntent = (/(?:\u5b89\u88c5|\u4e0b\u8f7d|\u6dfb\u52a0|install)/i.test(normalized) || /\bskill\b/i.test(normalized)) && Boolean(source);
+    // Only short-circuit into install/login for an explicit Skill command.
+    // A normal chat message that merely contains a link plus words like
+    // 「下载地址」 or 「登录」 must go to the model, not trigger an install.
+    const mentionsSkill = /\bskills?\b|\u6280\u80fd|\u63d2\u4ef6/i.test(normalized);
+    const installVerb = /(?:\u5b89\u88c5|\u6dfb\u52a0|install)/i.test(normalized);
+    const sourceLooksInstallable = Boolean(source) && isInstallableSkillSource(source!);
+    const bareInstallCommand = installVerb && Boolean(source) && normalized.replace(source!, '').replace(/[\s:：]/g, '').length <= 12;
+    const installIntent = sourceLooksInstallable && installVerb && (mentionsSkill || bareInstallCommand);
+    const explicitToken = /\u6388\u6743\u7801|\bCAC-/i.test(normalized) && Boolean(tokenMatch?.[1]);
+    const loginIntent = (mentionsSkill || Boolean(requestedSkill)) && /(?:\u6388\u6743|\u7ed1\u5b9a|\u767b\u5f55|\u626b\u7801|authorize|login|sign\s*in)/i.test(normalized);
     if (installIntent) {
       const item = await this.install({ adminId: input.adminId, source: source! });
       const authResult = tokenMatch?.[1] ? await this.login({ adminId: input.adminId, skillId: item.id, token: tokenMatch[1], sessionInput: normalized }) : undefined;
@@ -739,7 +747,7 @@ export class PiSkillManager {
         data: { item: publicSkillInfo(item), authorized: completed, loginStatus: authResult?.status, authUrl: authResult?.authUrl },
       };
     }
-    if (loginIntent || Boolean(tokenMatch?.[1])) {
+    if (loginIntent || explicitToken) {
       const skills = await this.list(input.adminId);
       const candidate = (requestedSkill && skills.find((item) => matchesSkillIdentifier(item, requestedSkill)))
         ?? skills.find((item) => /quark|夸克/i.test(item.name) || /quark|夸克/i.test(item.id))
@@ -1116,6 +1124,14 @@ function sanitizeSkillId(value: string): string { return value.trim().toLowerCas
 function basenameFromSource(source: string): string {
   const value = source.split(/[\\/]/).at(-1) ?? 'skill';
   return value.replace(/\.(zip|tar|gz|tgz)$/i, '').replace(/\.tar$/i, '') || 'skill';
+}
+
+/** A source that can plausibly be a Skill package: archive file, GitHub repo, or local path. */
+export function isInstallableSkillSource(source: string): boolean {
+  const value = source.trim();
+  if (/^file:\/\//i.test(value) || /^(?:[A-Za-z]:[\\/]|\/)/.test(value)) return true;
+  if (/^https?:\/\/(?:www\.)?github\.com\/[^/]+\/[^/]+/i.test(value)) return true;
+  return /^https?:\/\/[^?#]+\.(?:zip|tar|tgz|tar\.gz|skill)(?:[?#].*)?$/i.test(value);
 }
 
 export function normalizeSkillSource(source: string): string | undefined {
