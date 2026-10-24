@@ -35,18 +35,21 @@ export function toProductsMutationError(error: unknown): ProductMutationError {
   const status = typeof error === 'object' && error && 'status' in error ? Number((error as { status?: unknown }).status) : undefined;
   const payload = typeof error === 'object' && error && 'payload' in error ? (error as { payload?: unknown }).payload : undefined;
   const payloadError = typeof payload === 'object' && payload && 'error' in payload && typeof (payload as { error?: unknown }).error === 'object'
-    ? (payload as { error: { code?: unknown; details?: unknown } }).error
+    ? (payload as { error: { code?: unknown; message?: unknown; details?: unknown } }).error
     : undefined;
   const code = typeof payloadError?.code === 'string' ? payloadError.code : '';
+  const serverMessage = typeof payloadError?.message === 'string' ? payloadError.message.trim() : '';
   const detailCode = payloadError?.details && typeof payloadError.details === 'object' && !Array.isArray(payloadError.details) && typeof (payloadError.details as { errorCode?: unknown }).errorCode === 'string'
     ? String((payloadError.details as { errorCode: string }).errorCode)
     : '';
   if (status === 409 && code === 'ACCOUNT_REAUTH_REQUIRED' && detailCode === 'ACCOUNT_VALIDATION_REQUIRED') return { code: 'ACCOUNT_REAUTH_REQUIRED', reason: 'SLIDER_VALIDATION', message: '请先在闲鱼商品详情页完成滑块验证，再到账号管理回写验证后的最新完整 Cookie，最后重新同步详情。', retryable: false };
   if (status === 409 && code === 'ACCOUNT_REAUTH_REQUIRED') return { code: 'ACCOUNT_REAUTH_REQUIRED', reason: 'REAUTH', message: '闲鱼账号登录态已失效，请先重新登录账号。', retryable: false };
+  // 闲鱼拒绝发布 / 编辑时把闲鱼给的原因原样展示（去掉 FAIL_BIZ_xxx:: 前缀），不要笼统说「同步失败」。
+  if (code === 'XIANYU_PUBLISH_FAILED' || code === 'XIANYU_EDIT_FAILED') return { code: 'SYNC_FAILED', message: `闲鱼拒绝了这次提交：${readableXianyuMessage(serverMessage) || '未返回原因，请稍后重试。'}`, retryable: false };
   if (status === 502 || code === 'XIANYU_SYNC_FAILED') return { code: 'SYNC_FAILED', message: '闲鱼商品同步失败，请稍后重试。', retryable: true };
   if (status === 403) return { code: 'FORBIDDEN', message: '当前管理员没有写入商品的权限。', retryable: false };
   if (status === 409 || code === 'PRODUCT_VERSION_CONFLICT') return { code: 'VERSION_CONFLICT', message: '商品已被其他操作更新，请保留本地草稿后重新加载。', retryable: false };
-  if (status === 422) return { code: 'VALIDATION_FAILED', message: '商品字段校验失败，请检查输入。', retryable: false };
+  if (status === 422) return { code: 'VALIDATION_FAILED', message: serverMessage && /[\u4e00-\u9fa5]/.test(serverMessage) ? serverMessage : '商品字段校验失败，请检查输入。', retryable: false };
   if (error instanceof TypeError) return { code: 'NETWORK_ERROR', message: '商品服务暂时不可用，请检查连接后重试。', retryable: true };
   return { code: 'UNKNOWN', message: error instanceof Error ? error.message : '商品保存失败，请重试。', retryable: true };
 }
@@ -385,4 +388,11 @@ export function useProductsController(options: { api?: ProductsApi; initialFilte
   const clearMutation = useCallback(() => setMutation({ phase: 'idle', error: null }), []);
 
   return { saveDraftImages, loadDraftImages, filters, setFilters, setKeyword, reload, openProduct, closeProduct, openXianyuDetail, syncXianyuDetail, closeXianyuDetail, openXianyuEdit, closeXianyuEdit, submitXianyuEdit, xianyuEdit, createDraft, updateDraft, updateKnowledgeBase, generateKnowledgeBaseFromConversations, batchListing, batchAutoRelist, relistNow, optimizeKnowledgeBase, publishProduct, previewProduct, optimizeDescription, syncFromXianyu, syncError, clearMutation, state, detail, xianyuDetail, mutation };
+}
+
+/** `FAIL_BIZ_TITLE_LENGTH_TOO_LONG::标题不能超过30个字…` -> `标题不能超过30个字…` */
+export function readableXianyuMessage(message: string): string {
+  const text = message.trim();
+  const index = text.lastIndexOf('::');
+  return (index >= 0 ? text.slice(index + 2) : text).trim();
 }

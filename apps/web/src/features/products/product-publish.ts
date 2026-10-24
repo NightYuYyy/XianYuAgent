@@ -6,6 +6,9 @@ export type PublishAttachment = ProductPublishImageMeta & {
   file?: File;
 };
 
+/** 闲鱼商品标题上限（按字符计），超出时闲鱼返回 FAIL_BIZ_TITLE_LENGTH_TOO_LONG。 */
+export const XIANYU_TITLE_MAX = 30;
+
 export type ProductPostageMode = 'free' | 'distance' | 'fixed' | 'none';
 
 export type ProductPublishSpec = {

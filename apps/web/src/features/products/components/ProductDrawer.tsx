@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ProductMutationError, ProductVM } from '../types';
 import type { ProductPublishPreviewVM } from '../api';
 import { toDraftInput, toDraftPatch, type ProductFormErrors } from '../validation';
-import { createInitialProductPublishValues, inferProductCategory, serializeAttachments, shouldPreviewOfficialSpecifications, skuRowsToMeta, validateSkuRows, type ProductPublishFormValues } from '../product-publish';
+import { XIANYU_TITLE_MAX, createInitialProductPublishValues, inferProductCategory, serializeAttachments, shouldPreviewOfficialSpecifications, skuRowsToMeta, validateSkuRows, type ProductPublishFormValues } from '../product-publish';
 import { ProductPublishForm } from './ProductPublishForm';
 import { ProductFormStateBoundary } from './ProductFormStateBoundary';
 
@@ -87,6 +87,7 @@ export function ProductDrawer({ mode, accountId, product, error, saving, onClose
     const nextErrors: ProductFormErrors = {};
     if (!values.accountId.trim()) nextErrors.accountId = '缺少账号上下文，请先在账号管理选择当前账号。';
     if (!values.title.trim()) nextErrors.title = '商品标题不能为空。';
+    else if ([...values.title.trim()].length > XIANYU_TITLE_MAX) nextErrors.title = `闲鱼标题最多 ${XIANYU_TITLE_MAX} 个字，当前 ${[...values.title.trim()].length} 个。`;
     if (values.description.length > 2000) nextErrors.description = '商品描述不能超过 2000 个字符。';
     if (requirePublish && values.attachments.filter((attachment) => Boolean(attachment.file)).length < 1) nextErrors.description = '发布到闲鱼前至少上传 1 张商品图片。';
     if (values.multiSpecEnabled) {
