@@ -959,6 +959,21 @@ export class PiRuntimeAdapter implements WorkspaceRuntime {
     let forceFinalAnswer = false;
     let pendingToolFailure: { toolName: string; code: string; summary: string } | undefined;
     const repeatedCalls = new Map<string, number>();
+    // Same tool failing with the same error again and again means the model
+    // cannot fix it by itself (usually a missing tool capability). Stop early
+    // with a clear reason instead of looping until the round budget runs out.
+    const failureCounts = new Map<string, number>();
+    const REPEATED_FAILURE_LIMIT = 3;
+    const repeatedFailureStop = async (toolName: string, toolCallId: string, failure: { code: string; summary: string }): Promise<boolean> => {
+      const key = `${toolName}|${failure.code}|${failure.summary}`;
+      const count = (failureCounts.get(key) ?? 0) + 1;
+      failureCounts.set(key, count);
+      if (count < REPEATED_FAILURE_LIMIT) return false;
+      const stop = { toolName, code: 'MODEL_TOOL_LOOP_EXCEEDED', summary: `工具 ${toolName} 连续 ${count} 次返回同一个错误「${failure.summary}」，模型无法自行解决，已停止本次执行。` };
+      await this.emit(input.run.id, 'tool.result', { streamId: `${input.run.id}:guard`, toolCallId, toolName, summary: stop.summary, status: 'failed', result: toolFailureResult(stop), completedAt: new Date().toISOString() });
+      await this.recordToolFailure(input, step, stop);
+      return true;
+    };
     const replayedCalls = new Map<string, number>();
     const skillProgress = restoreSkillProgress(priorEvents);
     const configuredMaxRounds = this.options.maxToolRounds;
@@ -1119,6 +1134,7 @@ export class PiRuntimeAdapter implements WorkspaceRuntime {
           const normalized = normalizeModelToolResult(rawResult, call.function.name);
           if (!normalized.ok) {
             pendingToolFailure = { toolName: call.function.name, ...normalized.failure };
+            if (await repeatedFailureStop(call.function.name, call.id, pendingToolFailure)) return;
             const errorResult = toolFailureResult(pendingToolFailure);
             await this.emit(input.run.id, 'tool.result', { streamId, toolCallId: call.id, toolName: call.function.name, summary: pendingToolFailure.summary, status: 'failed', result: errorResult, completedAt: new Date().toISOString() });
             await this.emit(input.run.id, 'workspace.execution.summary', { streamId, messageType: 'reasoning_summary', summary: '工具返回错误', content: pendingToolFailure.summary, status: 'failed' });
@@ -1157,6 +1173,7 @@ export class PiRuntimeAdapter implements WorkspaceRuntime {
           pendingToolFailure = undefined;
         } catch (error) {
           const failure = toSafeFailure(error);
+          if (await repeatedFailureStop(call.function.name, call.id, failure)) return;
           const errorResult = toolFailureResult(failure);
           pendingToolFailure = { toolName: call.function.name, ...failure };
           await this.emit(input.run.id, 'tool.result', { streamId, toolCallId: call.id, toolName: call.function.name, summary: pendingToolFailure.summary, status: 'failed', result: errorResult, completedAt: new Date().toISOString() });

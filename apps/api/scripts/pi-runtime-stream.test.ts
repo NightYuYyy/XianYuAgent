@@ -1583,3 +1583,41 @@ test('Pi runtime closes a Skill login run after pending user action', async () =
   assert.ok(events.some((event) => event.eventType === 'run.succeeded' && String(event.payload.content).includes('授权码')));
   runtime.stop();
 });
+
+test('Pi runtime stops when a tool keeps returning the same error', async () => {
+  const store = new MemoryStore();
+  const admin = await store.createAdmin({ email: 'repeat-failure@example.com', passwordHash: 'hash', displayName: 'Repeat Failure' });
+  const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'repeat-failure' });
+  const session = await store.createAgentSession({ adminId: admin.id, accountId: account.id, title: 'Repeat Failure' });
+  const created = await store.createRun({ adminId: admin.id, accountId: account.id, sessionId: session.id, instruction: '修改商品' });
+  let modelRounds = 0;
+  let toolCalls = 0;
+  const model: ModelClient = {
+    async stream(_input, handlers: ModelStreamHandlers): Promise<ModelCompletionResult> {
+      modelRounds += 1;
+      // Different arguments every time, so the identical-call guard does not fire.
+      const call = { id: `call-${modelRounds}`, type: 'function' as const, function: { name: 'workspace_prepare_write', arguments: JSON.stringify({ operation: 'product_update', parameters: { productId: 'p-1', attempt: modelRounds } }) } };
+      await handlers.onToolCall?.(call);
+      return { content: '', model: 'loop-model', toolCalls: [call] };
+    },
+    async complete() { return { content: 'unused', model: 'unused' }; },
+  };
+  const commandTool = {
+    getModelTools: () => [tool('workspace_prepare_write', 'write', { type: 'object' })],
+    executeModelTool: async () => { toolCalls += 1; throw Object.assign(new Error('商品变更至少需要一个可编辑字段'), { code: 'VALIDATION_FAILED' }); },
+  } as unknown as WorkspaceCommandOrchestrator;
+  const runtime = new PiRuntimeAdapter(store, model, { workspaceCommands: commandTool, model: 'loop-model' });
+  try {
+    runtime.enqueue({ adminId: admin.id, sessionId: session.id, run: created.run, steps: created.steps });
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline && !['succeeded', 'failed'].includes((await store.getRun(admin.id, created.run.id))?.run.status ?? '')) await new Promise((resolve) => setTimeout(resolve, 10));
+    const bundle = await store.getRun(admin.id, created.run.id);
+    assert.equal(bundle?.run.status, 'failed');
+    assert.equal(bundle?.run.errorCode, 'MODEL_TOOL_LOOP_EXCEEDED');
+    assert.equal(toolCalls, 3);
+    const events = await store.listRunEvents(admin.id, created.run.id, 0);
+    assert.ok(events.some((event) => event.eventType === 'tool.result' && /连续 3 次返回同一个错误/.test(String(event.payload.summary))));
+  } finally {
+    runtime.stop();
+  }
+});

@@ -656,3 +656,35 @@ test('an expired confirmation closes the run instead of leaving it stuck', async
   const run = await service.getRun({ adminId: admin.id, runId: created.run.id });
   assert.equal(run.status, 'expired');
 });
+
+test('coupon_update can turn a batch into a per-SKU batch and keeps other metadata', async () => {
+  const store = new MemoryStore();
+  const admin = await store.createAdmin({ email: 'workspace-multispec@example.com', passwordHash: 'hash', displayName: 'Multi Spec' });
+  const account = await store.createAccount({ adminId: admin.id, platform: 'xianyu', sellerRef: 'seller-multispec', displayName: 'Multi Spec' });
+  const batch = await store.createCouponBatch({ adminId: admin.id, accountId: account.id, label: 'Batch', purpose: 'text', metadata: { textContent: '使用说明', description: '保留我' } });
+  let patched: Record<string, unknown> | undefined;
+  const commands = orchestrator({ store, coupons: { update: async (input: { patch: Record<string, unknown> }) => { patched = input.patch; return { batchId: batch.id }; }, get: async () => ({ batchId: batch.id, status: 'active', metadata: {} }), bind: async () => ({}), unbind: async () => ({}), void: async () => ({}) } });
+  const scoped = { ...input, adminId: admin.id, accountId: account.id, instruction: '' };
+  const plan = await commands.prepareWrite({ ...scoped, operation: 'coupon_update', parameters: { batchId: batch.id, patch: { multiSpec: true, specName: '版本', specValue: '标准版' } } });
+  assert.ok(plan);
+  await (commands as unknown as { confirmCoupon: (input: unknown, action: string) => Promise<unknown> }).confirmCoupon({ plan, run: { id: 'run-1' }, step: { id: 'step-1' }, adminId: admin.id, requestId: 'r', traceId: 't' }, 'coupon_update');
+  const metadata = patched?.metadata as Record<string, unknown>;
+  assert.equal(metadata.multiSpec, true);
+  assert.equal(metadata.specName, '版本');
+  assert.equal(metadata.specValue, '标准版');
+  assert.equal(metadata.textContent, '使用说明', 'existing metadata is merged, not replaced');
+  assert.equal(metadata.description, '保留我');
+
+  await assert.rejects(async () => {
+    const half = await commands.prepareWrite({ ...scoped, operation: 'coupon_update', parameters: { batchId: batch.id, patch: { multiSpec: true, specName: '版本' } } });
+    await (commands as unknown as { confirmCoupon: (input: unknown, action: string) => Promise<unknown> }).confirmCoupon({ plan: half, run: { id: 'run-1' }, step: { id: 'step-1' }, adminId: admin.id, requestId: 'r', traceId: 't' }, 'coupon_update');
+  }, /specName and specValue/);
+
+  const listed = await orchestrator({ coupons: { list: async () => ({ items: [{ batchId: '7', label: 'A 款', status: 'active', availableCount: 3, totalCount: 5, metadata: { multiSpec: true, specName: '版本', specValue: '标准版' } }], total: 1 }) } }).executeModelTool('workspace_list_coupons', {}, input);
+  assert.match(listed.content, /规格 版本:标准版/);
+});
+
+test('the prepare_write tool tells the model how per-SKU coupons work', () => {
+  const tool = orchestrator().getModelTools().find((item) => item.type === 'function' && item.function.name === 'workspace_prepare_write');
+  assert.ok(tool && tool.type === 'function' && /multiSpec/.test(tool.function.description ?? ''));
+});

@@ -89,7 +89,7 @@ export class WorkspaceCommandOrchestrator {
         type: 'function',
         function: {
           name: 'workspace_prepare_write',
-          description: 'Prepare a controlled Workspace mutation. Prefer structured arguments: operation plus parameters. The model must first resolve the operation contract and required API parameters, then provide canonical values. coupon_create maps to CouponService.create(accountId,label,purpose,metadata); data mode then calls CouponService.importItems(batchId,contents). It requires label, purpose(text|data|api|image), and textContent/dataContent/apiConfig/imageUrls. product_publish requires productId; product_update requires productId and patch; product_knowledge_update requires productId plus knowledgeBase or mode; product_automation_update requires productId and a canonical partial config containing one or more of paidAutoDelivery, unpaidAutoReprice, reviewGift, reviewReminder. For coupon-backed rules, resolve the coupon batch first and pass couponBatchIds, never a human label. order_deliver/order_retry/order_cancel require orderNo; model_settings_update requires provider, baseUrl, model and apiKey only when changing credentials; agent_settings_update requires patch. instruction remains a compatibility fallback. This creates a confirmation plan and never executes the mutation before the user confirms it.',
+          description: 'Prepare a controlled Workspace mutation. ' + MULTI_SPEC_TOOL_GUIDE + ' Prefer structured arguments: operation plus parameters. The model must first resolve the operation contract and required API parameters, then provide canonical values. coupon_create maps to CouponService.create(accountId,label,purpose,metadata); data mode then calls CouponService.importItems(batchId,contents). It requires label, purpose(text|data|api|image), and textContent/dataContent/apiConfig/imageUrls. product_publish requires productId; product_update requires productId and patch; product_knowledge_update requires productId plus knowledgeBase or mode; product_automation_update requires productId and a canonical partial config containing one or more of paidAutoDelivery, unpaidAutoReprice, reviewGift, reviewReminder. For coupon-backed rules, resolve the coupon batch first and pass couponBatchIds, never a human label. order_deliver/order_retry/order_cancel require orderNo; model_settings_update requires provider, baseUrl, model and apiKey only when changing credentials; agent_settings_update requires patch. instruction remains a compatibility fallback. This creates a confirmation plan and never executes the mutation before the user confirms it.',
           parameters: {
             type: 'object',
             additionalProperties: false,
@@ -175,6 +175,18 @@ export class WorkspaceCommandOrchestrator {
     throw new ServiceError(422, 'VALIDATION_FAILED', `unknown workspace tool: ${name}`);
   }
 
+  private async boundCouponLines(adminId: string, couponBatches: unknown[]): Promise<string[]> {
+    const lines: string[] = [];
+    for (const entry of couponBatches.slice(0, 20)) {
+      const record = entry && typeof entry === 'object' ? entry as Record<string, unknown> : {};
+      const id = String(record.batchId ?? record.id ?? record.sequenceId ?? '');
+      if (!id) continue;
+      const batch = await this.deps.store.getCouponBatch(adminId, id).catch(() => undefined);
+      lines.push(`绑定卡券：${batch?.label ?? record.label ?? id} · ${couponSpecLabel(batch?.metadata ?? record.metadata)} · batchId=${batch?.sequenceId ?? id}`);
+    }
+    return lines;
+  }
+
   /** Typed read tools. Returns undefined for any other tool name. */
   private async executeStructuredRead(name: string, args: Record<string, unknown>, input: WorkspaceCommandInput): Promise<WorkspaceModelToolResult | undefined> {
     const text = (key: string) => (typeof args[key] === 'string' && (args[key] as string).trim() ? (args[key] as string).trim() : undefined);
@@ -193,12 +205,12 @@ export class WorkspaceCommandOrchestrator {
       let automation: unknown;
       try { const config = await this.deps.productAutomation.get(input.adminId, productId); automation = { configVersion: config.configVersion, config: config.config }; } catch { automation = undefined; }
       const detail = { ...productBrief(product), description: product.description, knowledgeBase: product.knowledgeBase ?? '', skus: product.skus ?? [], couponBatches: (product as { couponBatches?: unknown }).couponBatches ?? [], configVersion: product.configVersion };
-      return { kind: 'read', title: '商品详情', summary: `已读取商品：${product.title}`, content: [`${product.title} · ${product.status} · ${formatMoney(product.priceMinor)}`, `知识库：${product.knowledgeBase?.trim() ? `${product.knowledgeBase.trim().length} 字` : '未配置'}`, `自动化：${automation ? '已配置' : '未配置'}`].join('\n'), data: { product: detail, automation } };
+      return { kind: 'read', title: '商品详情', summary: `已读取商品：${product.title}`, content: [`${product.title} · ${product.status} · ${formatMoney(product.priceMinor)}`, `知识库：${product.knowledgeBase?.trim() ? `${product.knowledgeBase.trim().length} 字` : '未配置'}`, `自动化：${automation ? '已配置' : '未配置'}`, ...productSpecLines(product), ...await this.boundCouponLines(input.adminId, (detail.couponBatches as unknown[]) ?? [])].join('\n'), data: { product: detail, automation } };
     }
     if (name === 'workspace_list_coupons') {
       const status = text('status');
       const result = await this.deps.coupons.list(input.adminId, { accountId: input.accountId, keyword: text('keyword'), status: status && ['draft', 'active', 'paused', 'closed', 'voided'].includes(status) ? status as never : undefined, page: 1, pageSize: limit, sortBy: 'createdAt', sortOrder: 'desc' });
-      return { kind: 'read', title: '卡券批次', summary: `共 ${result.total} 个卡券批次`, content: result.items.length ? result.items.map((item, index) => { const row = item as Record<string, unknown>; return `${index + 1}. ${String(row.label ?? row.batchId)} · ${String(row.status)} · 可用 ${String(row.availableCount ?? '?')} / 共 ${String(row.totalCount ?? '?')} · batchId=${String(row.batchId ?? row.id)}`; }).join('\n') : '没有卡券批次。', data: { total: result.total, items: result.items } };
+      return { kind: 'read', title: '卡券批次', summary: `共 ${result.total} 个卡券批次`, content: result.items.length ? result.items.map((item, index) => { const row = item as Record<string, unknown>; return `${index + 1}. ${String(row.label ?? row.batchId)} · ${String(row.status)} · ${couponSpecLabel(row.metadata)} · 可用 ${String(row.availableCount ?? '?')} / 共 ${String(row.totalCount ?? '?')} · batchId=${String(row.batchId ?? row.id)}`; }).join('\n') : '没有卡券批次。', data: { total: result.total, items: result.items } };
     }
     if (name === 'workspace_list_orders') {
       const result = await this.deps.orders.list(input.adminId, { accountId: input.accountId, keyword: text('keyword'), paymentStatus: normalizePaymentStatus(text('paymentStatus')), deliveryStatus: normalizeDeliveryStatus(text('deliveryStatus')), afterSalesStatus: normalizeAfterSalesStatus(text('afterSalesStatus')), page: 1, pageSize: limit, sortBy: 'createdAt', sortOrder: 'desc' });
@@ -633,7 +645,18 @@ export class WorkspaceCommandOrchestrator {
       return { resultSummary: `卡券批次已复制为 ${String((created as Record<string, unknown>).batchId ?? '')}`, outputSummary: '卡券复制完成', data: { created, copiedItemCount: contents.length } };
     }
     const patch = (execution.patch ?? input.plan.manifest.patch ?? {}) as Record<string, unknown>;
-    const result = await this.deps.coupons.update({ adminId: input.adminId, batchId, patch: { label: typeof patch.label === 'string' ? patch.label : undefined, purpose: typeof patch.purpose === 'string' ? patch.purpose : undefined, status: typeof patch.status === 'string' ? patch.status as never : undefined }, requestId: input.requestId, traceId: input.traceId });
+    const metadataPatch = couponMetadataPatch(patch);
+    let metadata: Record<string, unknown> | undefined;
+    if (metadataPatch) {
+      // Store replaces metadata wholesale: merge onto the stored (raw) metadata.
+      const current = await this.deps.store.getCouponBatch(input.adminId, batchId);
+      if (!current) throw new ServiceError(404, 'NOT_FOUND', 'coupon batch not found');
+      const { imageUrls: _imageUrls, ...stored } = (current.metadata ?? {}) as Record<string, unknown>;
+      metadata = { ...stored, ...metadataPatch };
+      if (metadata.multiSpec === false) { delete metadata.specName; delete metadata.specValue; }
+      if (metadata.multiSpec === true && (!metadata.specName || !metadata.specValue)) throw new ServiceError(422, 'VALIDATION_FAILED', 'multiSpec coupon needs both specName and specValue matching the order SKU text');
+    }
+    const result = await this.deps.coupons.update({ adminId: input.adminId, batchId, patch: { label: typeof patch.label === 'string' ? patch.label : undefined, purpose: typeof patch.purpose === 'string' ? patch.purpose : undefined, status: typeof patch.status === 'string' ? patch.status as never : undefined, ...(metadata ? { metadata: metadata as never } : {}) }, requestId: input.requestId, traceId: input.traceId });
     return { resultSummary: '卡券批次已更新', outputSummary: '卡券批次更新完成', data: result };
   }
 
@@ -809,6 +832,45 @@ function safeProduct(product: ProductRecord): Record<string, unknown> { return {
 function productBrief(product: ProductRecord) { return { id: product.id, title: product.title, status: product.status, priceMinor: product.priceMinor, externalProductRef: product.externalProductRef, skuCount: product.skuCount ?? 0, hasKnowledgeBase: Boolean(product.knowledgeBase?.trim()) }; }
 
 const PRODUCT_STATUS_ENUM = ['draft', 'published', 'failed', 'archived'];
+
+/**
+ * Multi-spec (per-SKU) coupon delivery is configured on the coupon batch, not
+ * on the product: each batch carries metadata.multiSpec + specName + specValue
+ * and auto-delivery picks the batch whose spec equals the order's SKU spec.
+ */
+const MULTI_SPEC_TOOL_GUIDE = 'Per-SKU delivery: a product with several SKUs gets one coupon batch per SKU. For coupon_create pass parameters.multiSpec = true, parameters.specName = "<规格名>", parameters.specValue = "<规格值>" (nesting them under parameters.metadata also works; parameters.oneTime = true makes data codes single-use) (both must equal the order SKU text exactly, e.g. order spec "版本:标准版" -> specName "版本", specValue "标准版"). To turn an existing batch into a per-SKU batch use coupon_update with parameters.patch = { multiSpec: true, specName, specValue } (or patch.metadata with the same keys). Then bind every per-SKU batch to the product (coupon_bind, or product_automation_update paidAutoDelivery). When any bound batch is multiSpec, only multiSpec batches are used and an order whose spec matches none of them fails auto-delivery. workspace_list_coupons and workspace_get_product show each batch\'s spec.';
+
+/** SKU lines in the exact "规格名:规格值" form orders carry, so the model can copy them into specName/specValue. */
+function productSpecLines(product: ProductRecord): string[] {
+  const publish = (product.attributes as Record<string, unknown> | undefined)?.publish as Record<string, unknown> | undefined;
+  const multi = publish?.multiSpec as { name?: unknown; skus?: Array<{ value?: unknown; priceMinor?: unknown }> } | undefined;
+  if (multi && typeof multi.name === 'string' && Array.isArray(multi.skus) && multi.skus.length) {
+    return [`规格（订单里写作 规格名:规格值）：${multi.skus.map((sku) => `${multi.name}:${String(sku.value ?? '?')} ${formatMoney(typeof sku.priceMinor === 'number' ? sku.priceMinor : undefined)}`).join('；')}`];
+  }
+  const skus = product.skus ?? [];
+  return skus.length ? [`SKU：${skus.map((sku) => `${sku.skuCode} ${formatMoney(sku.priceMinor)}`).join('；')}`] : ['规格：单规格'];
+}
+
+/** Coupon metadata keys the Workspace may change through coupon_update. */
+const COUPON_METADATA_PATCH_KEYS = ['multiSpec', 'specName', 'specValue', 'description', 'oneTime', 'delaySeconds'] as const;
+export function couponMetadataPatch(patch: Record<string, unknown>): Record<string, unknown> | undefined {
+  const source = { ...(patch.metadata && typeof patch.metadata === 'object' && !Array.isArray(patch.metadata) ? patch.metadata as Record<string, unknown> : {}), ...patch };
+  const out: Record<string, unknown> = {};
+  for (const key of COUPON_METADATA_PATCH_KEYS) {
+    const value = source[key];
+    if (value === undefined || value === null) continue;
+    if (key === 'multiSpec' || key === 'oneTime') out[key] = value === true || value === 'true' || value === '是';
+    else if (key === 'delaySeconds') { const n = Number(value); if (Number.isFinite(n) && n >= 0) out[key] = Math.trunc(n); }
+    else if (typeof value === 'string' && value.trim()) out[key] = value.trim();
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function couponSpecLabel(metadata: unknown): string {
+  const record = metadata && typeof metadata === 'object' ? metadata as Record<string, unknown> : {};
+  if (record.multiSpec !== true) return '不分规格';
+  return `规格 ${String(record.specName ?? '?')}:${String(record.specValue ?? '?')}`;
+}
 function structuredReadToolDefinitions(): ModelToolDefinition[] {
   const tool = (name: string, description: string, properties: Record<string, unknown>, required: string[], plan: WorkspaceToolPlanMetadata): ModelToolDefinition => ({ type: 'function', function: { name, description, parameters: { type: 'object', additionalProperties: false, properties, required }, plan } });
   const limit = { type: 'integer', minimum: 1, maximum: 50, description: 'Max rows, default 20.' };

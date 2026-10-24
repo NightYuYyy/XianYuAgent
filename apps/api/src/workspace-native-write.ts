@@ -431,10 +431,15 @@ function normalizeCouponMetadata(parameters: Record<string, unknown>, purpose: N
   if (parameters.feePayer === 'distributor' || parameters.feePayer === 'dealer') metadata.feePayer = parameters.feePayer;
   if (stringValue(parameters.minPrice)) metadata.minPrice = stringValue(parameters.minPrice);
   if (parameters.dockVisibility === 'public' || parameters.dockVisibility === 'dealer_only') metadata.dockVisibility = parameters.dockVisibility;
-  const multiSpec = parseCouponBoolean(typeof parameters.multiSpec === 'boolean' ? parameters.multiSpec : stringValue(parameters.multiSpec));
+  // Spec fields may come top-level or nested under parameters.metadata.
+  const specSource = { ...nestedMetadata, ...parameters };
+  const multiSpec = parseCouponBoolean(typeof specSource.multiSpec === 'boolean' ? specSource.multiSpec : stringValue(specSource.multiSpec));
   if (multiSpec !== undefined) metadata.multiSpec = multiSpec;
-  if (stringValue(parameters.specName)) metadata.specName = stringValue(parameters.specName);
-  if (stringValue(parameters.specValue)) metadata.specValue = stringValue(parameters.specValue);
+  if (stringValue(specSource.specName)) metadata.specName = stringValue(specSource.specName);
+  if (stringValue(specSource.specValue)) metadata.specValue = stringValue(specSource.specValue);
+  if (metadata.multiSpec === true && (!metadata.specName || !metadata.specValue)) throw Object.assign(new Error('multiSpec coupon needs both specName and specValue matching the order SKU text'), { code: 'VALIDATION_FAILED' });
+  const oneTime = parseCouponBoolean(typeof specSource.oneTime === 'boolean' ? specSource.oneTime : stringValue(specSource.oneTime));
+  if (oneTime !== undefined) metadata.oneTime = oneTime;
   if (purpose === 'api' && isRecord(parameters.apiConfig)) {
     const api = parameters.apiConfig;
     const url = stringValue(api.url);
